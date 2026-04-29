@@ -51,14 +51,14 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   const startDate = getNextAvailableDate(day, hour);
   const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
 
-  // Recordatorio inteligente: si la cita es en más de 24h → 24h antes, si no → 3h antes
+  // Recordatorio inteligente: más de 24h → recordatorio 24h antes, menos → 3h antes
   const hoursUntilEvent = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
   const reminderMinutes = hoursUntilEvent > 24 ? 1440 : 180;
 
   const description = [
     `👤 Cliente: ${name || "Sin nombre"}`,
     `📱 WhatsApp: ${phone}`,
-    clientEmail && clientEmail !== "sin-correo" ? `📧 Email: ${clientEmail}` : "",
+    clientEmail && clientEmail !== "sin-correo" ? `📧 Email cliente: ${clientEmail}` : "",
     `🏗️ Proyecto: ${project || "Por definir"}`,
     `📍 Zona: ${zone || "Por definir"}`,
     wazeLink ? `🗺️ Ubicación: ${wazeLink}` : "🗺️ Ubicación: pendiente",
@@ -70,21 +70,11 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
     "Agendado automáticamente por Sasha — Bot SS Remodelaciones",
   ].filter(Boolean).join("\n");
 
-  // Armar lista de invitados
-  const attendees = [];
-  if (process.env.MELVIN_EMAIL) {
-    attendees.push({ email: process.env.MELVIN_EMAIL });
-  }
-  if (clientEmail && clientEmail !== "sin-correo" && clientEmail.includes("@")) {
-    attendees.push({ email: clientEmail });
-  }
-
-  const event = {
+  const eventBody = {
     summary: `🏗️ Visita SSR — ${name || "Cliente"} | ${zone || ""}`,
     description,
     start: { dateTime: startDate.toISOString(), timeZone: "America/Costa_Rica" },
     end: { dateTime: endDate.toISOString(), timeZone: "America/Costa_Rica" },
-    attendees,
     reminders: {
       useDefault: false,
       overrides: [
@@ -95,16 +85,31 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
     colorId: "2",
   };
 
-  const response = await calendar.events.insert({
-    calendarId: process.env.GOOGLE_CALENDAR_ID,
-    resource: event,
-    sendUpdates: attendees.length > 0 ? "all" : "none",
-  });
+  // Calendarios donde se crea el evento
+  const calendarIds = [process.env.GOOGLE_CALENDAR_ID];
+  if (process.env.GOOGLE_CALENDAR_GERENCIA) calendarIds.push(process.env.GOOGLE_CALENDAR_GERENCIA);
+  if (process.env.GOOGLE_CALENDAR_PROYECTOS) calendarIds.push(process.env.GOOGLE_CALENDAR_PROYECTOS);
 
-  console.log(`📅 Evento creado en Google Calendar: ${response.data.htmlLink}`);
+  let mainEvent = null;
+  for (const calId of calendarIds) {
+    try {
+      const response = await calendar.events.insert({
+        calendarId: calId,
+        resource: eventBody,
+        sendUpdates: "none",
+      });
+      console.log(`📅 Evento creado en calendario ${calId}: ${response.data.htmlLink}`);
+      if (!mainEvent) mainEvent = response.data;
+    } catch (err) {
+      console.error(`❌ Error creando evento en ${calId}:`, err.message);
+    }
+  }
+
+  if (!mainEvent) throw new Error("No se pudo crear el evento en ningún calendario");
+
   return {
-    eventId: response.data.id,
-    eventLink: response.data.htmlLink,
+    eventId: mainEvent.id,
+    eventLink: mainEvent.htmlLink,
     startDate,
   };
 }
