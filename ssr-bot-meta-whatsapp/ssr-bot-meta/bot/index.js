@@ -45,14 +45,16 @@ async function handleMessage(from, text, messageId) {
       }
 
     } else if (flag === "VISITA") {
-      const [name, project, zone, day, hour, wazeLink] = (flagData || "").split("|");
+      // Formato: nombre|proyecto|zona|dia|hora|ubicacion|email
+      const [name, project, zone, day, hour, ubicacion, email] = (flagData || "").split("|");
       const updated = update(from, {
         name: name?.trim() || session.name,
         project_desc: project?.trim() || session.project_desc,
         zone: zone?.trim() || session.zone,
         visit_day: day?.trim() || "a coordinar",
         visit_hour: hour?.trim() || "09:00",
-        waze_link: wazeLink?.trim() || "",
+        waze_link: ubicacion?.trim() || "",
+        client_email: email?.trim() || "",
         visit_confirmed: true,
         lead_saved: true,
       });
@@ -67,6 +69,7 @@ async function handleMessage(from, text, messageId) {
           day: updated.visit_day,
           hour: updated.visit_hour,
           wazeLink: updated.waze_link,
+          clientEmail: updated.client_email,
         });
 
         const dateStr = eventData.startDate.toLocaleDateString("es-CR", {
@@ -78,11 +81,11 @@ async function handleMessage(from, text, messageId) {
           timeZone: "America/Costa_Rica",
         });
 
-        calendarMsg = `✅ Cita agendada para el *${dateStr} a las ${timeStr}*. Melvin ya recibió la notificación 👍`;
+        calendarMsg = `✅ ¡Listo! Tu cita quedó agendada para el *${dateStr} a las ${timeStr}*. Te llegará una confirmación por correo y un recordatorio el día anterior 📧`;
         console.log(`📅 Visita agendada en Calendar: ${eventData.eventLink}`);
       } catch (calErr) {
         console.error("❌ Error creando evento en Calendar:", calErr.message);
-        calendarMsg = `ℹ️ Tu cita fue registrada. Melvin te confirmará los detalles pronto.`;
+        calendarMsg = `ℹ️ Tu cita fue registrada. Melvin Zúñiga, nuestro Encargado de Proyectos, te confirmará los detalles pronto.`;
       }
 
       await notifyMelvin(from, updated, normalized, "visita_solicitada");
@@ -131,7 +134,8 @@ async function notifyMelvin(from, session, lastMsg, tipo) {
     session.zone         && `📍 ${session.zone}`,
     session.visit_day    && `📅 Día: ${session.visit_day}`,
     session.visit_hour   && `🕐 Hora: ${session.visit_hour}`,
-    session.waze_link    && `🗺️ Waze: ${session.waze_link}`,
+    session.waze_link    && `🗺️ Ubicación: ${session.waze_link}`,
+    session.client_email && `📧 Email: ${session.client_email}`,
     "", `💬 "${lastMsg}"`, "",
     "_Sasha — Bot SSR_",
   ].filter(Boolean).join("\n");
@@ -153,7 +157,8 @@ function logLead(from, session, tipo = "lead") {
     zone: session.zone || "—",
     visit_day: session.visit_day || "—",
     visit_hour: session.visit_hour || "—",
-    waze_link: session.waze_link || "—",
+    location: session.waze_link || "—",
+    email: session.client_email || "—",
     visit: session.visit_confirmed || false,
   }));
 }
