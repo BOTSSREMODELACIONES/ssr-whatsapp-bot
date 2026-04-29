@@ -1,4 +1,3 @@
-// Base de conocimiento de SS Remodelaciones
 const KNOWLEDGE = {
   empresa: {
     nombre: "SS Remodelaciones",
@@ -7,7 +6,6 @@ const KNOWLEDGE = {
     zona_cobertura: "Gran Área Metropolitana (GAM) de Costa Rica y zonas cercanas",
     encargado: "Melvin Zúñiga",
     whatsapp_melvin: "+50671981370",
-    // ⚠️ Reemplazar con el SINPE real de la empresa para cobros
     sinpe_numero: "+50671981370",
     sinpe_nombre: "SS Remodelaciones / Melvin Zúñiga",
   },
@@ -25,8 +23,8 @@ const KNOWLEDGE = {
     ],
     formas_pago: ["SINPE Móvil", "Transferencia bancaria", "Efectivo en el momento de la visita"],
     pago: "Se coordina con el cliente — SINPE Móvil, transferencia o efectivo al llegar",
-    dias_disponibles: "Lunes a Sábado",
-    horarios: "7:00 am a 5:00 pm",
+    dias_disponibles: "Lunes, martes y viernes",
+    horarios: "9:00 am a 5:00 pm",
     nota_descuento: "Si el cliente contrata la obra, el costo de la visita se descuenta del total del proyecto.",
   },
 
@@ -42,6 +40,7 @@ const KNOWLEDGE = {
     "Trabajos en drywall y cielo raso",
     "Construcción de ampliaciones menores",
     "Instalación de puertas y ventanas",
+    "Decoración con Wall Panel",
   ],
 
   proceso_obra: [
@@ -66,7 +65,7 @@ const KNOWLEDGE = {
     },
     {
       q: "¿El presupuesto es gratis?",
-      a: "La visita de diagnóstico tiene un costo de ₡25.000, que incluye medición, asesoría y presupuesto detallado. Si luego contratás la obra, ese monto se descuenta del total. ¡Es una inversión que se recupera!"
+      a: "La visita de diagnóstico tiene un costo de ₡25.000, que incluye medición, asesoría y presupuesto detallado. Si luego contratás la obra, ese monto se descuenta del total."
     },
     {
       q: "¿Cuánto tiempo tarda una remodelación?",
