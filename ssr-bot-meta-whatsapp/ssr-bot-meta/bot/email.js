@@ -1,24 +1,11 @@
-    const nodemailer = require("nodemailer");
+   const { Resend } = require("resend");
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-});
+const resend = new Resend(process.env.RESEND_API_KEY);
+const FROM = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
 
 async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wazeLink, clientEmail, dateStr, timeStr }) {
-  const teamRecipients = [
-    "gerencia@ssremodelaciones.com",
-    "administraciondeproyectos@ssremodelaciones.com",
-    "proyectos@ssremodelaciones.com",
-  ];
-
-  const allRecipients = [...teamRecipients];
-  if (clientEmail && clientEmail !== "sin-correo" && clientEmail.includes("@")) {
-    allRecipients.push(clientEmail);
-  }
+  // Por ahora solo al email verificado — cuando se verifique el dominio se agregan los demás
+  const recipients = ["darwinguillon@gmail.com"];
 
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -49,13 +36,13 @@ async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wa
   `;
 
   try {
-    await transporter.sendMail({
-      from: `"Sasha — SS Remodelaciones" <${process.env.GMAIL_USER}>`,
-      to: allRecipients.join(", "),
+    await resend.emails.send({
+      from: FROM,
+      to: recipients,
       subject: `🗓️ Nueva visita agendada — ${name} | ${zone}`,
       html,
     });
-    console.log(`📧 Email enviado a: ${allRecipients.join(", ")}`);
+    console.log(`📧 Email enviado a: ${recipients.join(", ")}`);
   } catch (err) {
     console.error("❌ Error enviando email:", err.message);
   }
