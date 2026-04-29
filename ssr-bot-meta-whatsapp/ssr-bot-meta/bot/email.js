@@ -5,7 +5,7 @@ const FROM = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
 
 async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wazeLink, clientEmail, dateStr, timeStr }) {
   // Por ahora solo al email verificado — cuando se verifique el dominio se agregan los demás
-  const recipients = ["darwinguillon@gmail.com"];
+  const recipients = ["darwinguillon@gmail.com","administraciondeproyectos@ssremodelaciones.com","gerencia@ssremodelaciones.com","proyectos@ssremodelaciones.com",clientEmail];
 
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
