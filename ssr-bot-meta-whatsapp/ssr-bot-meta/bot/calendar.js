@@ -1,0 +1,121 @@
+const { google } = require("googleapis");
+
+/**
+ * Obtiene la fecha del próximo día de semana indicado (lunes=1, martes=2, viernes=5)
+ * Si "hoy" es ese día y son antes de las 5pm, usa hoy mismo.
+ */
+function getNextAvailableDate(dayName, hourStr) {
+  const DAY_MAP = { lunes: 1, martes: 2, viernes: 5 };
+  const normalized = dayName.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const targetDay = DAY_MAP[normalized];
+
+  // Parsear hora (formato "HH:MM" o "H:MM" o solo número)
+  let hour = 9;
+  let minute = 0;
+  if (hourStr) {
+    const parts = hourStr.replace(":", ".").split(".");
+    hour = parseInt(parts[0]) || 9;
+    minute = parseInt(parts[1]) || 0;
+    if (hour < 9) hour = 9;
+    if (hour > 16) hour = 16; // max 4pm para terminar a las 5pm
+  }
+
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  const result = new Date(now);
+  result.setHours(hour, minute, 0, 0);
+
+  if (targetDay === undefined) {
+    // Si no reconocemos el día, usar el próximo lunes
+    const daysUntilMonday = (8 - result.getDay()) % 7 || 7;
+    result.setDate(result.getDate() + daysUntilMonday);
+    return result;
+  }
+
+  const currentDay = result.getDay();
+  let daysUntil = (targetDay - currentDay + 7) % 7;
+
+  // Si es hoy pero ya pasó la hora, mover a la próxima semana
+  if (daysUntil === 0 && now.getHours() >= hour) daysUntil = 7;
+  // Si daysUntil es 0 y aún hay tiempo, usar hoy
+  result.setDate(result.getDate() + daysUntil);
+
+  return result;
+}
+
+async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink }) {
+  // Verificar que tenemos las credenciales
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado en variables de entorno");
+  }
+  if (!process.env.GOOGLE_CALENDAR_ID) {
+    throw new Error("GOOGLE_CALENDAR_ID no configurado en variables de entorno");
+  }
+
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/calendar"],
+  });
+
+  const calendar = google.calendar({ version: "v3", auth });
+
+  const startDate = getNextAvailableDate(day, hour);
+  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000); // +1 hora
+
+  const description = [
+    `👤 Cliente: ${name || "Sin nombre"}`,
+    `📱 WhatsApp: ${phone}`,
+    `🏗️ Proyecto: ${project || "Por definir"}`,
+    `📍 Zona: ${zone || "Por definir"}`,
+    wazeLink ? `🗺️ Waze: ${wazeLink}` : "🗺️ Ubicación: pendiente",
+    "",
+    "💰 Costo visita: ₡25.000 (descontable si contrata obra)",
+    "⏱️ Duración aprox: 1 hora",
+    "",
+    "─────────────────────────",
+    "Agendado automáticamente por Sasha — Bot SS Remodelaciones",
+  ].join("\n");
+
+  const event = {
+    summary: `🏗️ Visita SSR — ${name || "Cliente"} | ${zone || ""}`,
+    description,
+    start: {
+      dateTime: startDate.toISOString(),
+      timeZone: "America/Costa_Rica",
+    },
+    end: {
+      dateTime: endDate.toISOString(),
+      timeZone: "America/Costa_Rica",
+    },
+    reminders: {
+      useDefault: false,
+      overrides: [
+        { method: "popup", minutes: 60 },    // Recordatorio 1h antes
+        { method: "email", minutes: 1440 },  // Email 24h antes
+      ],
+    },
+    colorId: "2", // Verde — visitas
+  };
+
+  // Agregar email de Melvin si está configurado
+  if (process.env.MELVIN_EMAIL) {
+    event.attendees = [{ email: process.env.MELVIN_EMAIL }];
+  }
+
+  const response = await calendar.events.insert({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    resource: event,
+    sendUpdates: process.env.MELVIN_EMAIL ? "all" : "none",
+  });
+
+  console.log(`📅 Evento creado en Google Calendar: ${response.data.htmlLink}`);
+  return {
+    eventId: response.data.id,
+    eventLink: response.data.htmlLink,
+    startDate,
+  };
+}
+
+module.exports = { createVisitEvent };
