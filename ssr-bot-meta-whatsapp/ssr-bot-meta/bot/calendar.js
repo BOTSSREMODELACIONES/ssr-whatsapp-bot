@@ -50,7 +50,7 @@ async function getCalendarClient() {
 // Consulta los slots disponibles para un día dado
 // Slots posibles: 9:00, 11:00, 13:00, 15:00
 async function getAvailableSlots(dayName) {
-  const SLOTS = ["09:00", "11:00", "13:00", "15:00"];
+  const SLOTS = ["09:00", "11:30", "14:00"];
 
   try {
     const calendar = await getCalendarClient();
