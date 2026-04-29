@@ -33,32 +33,72 @@ function getNextAvailableDate(dayName, hourStr) {
   return result;
 }
 
-// Formatea fecha como string local sin conversión UTC
-// Ejemplo: "2026-05-04T09:00:00"
 function toLocalDateTimeString(date) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:00`;
 }
 
-async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail }) {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
-  }
-  if (!process.env.GOOGLE_CALENDAR_ID) {
-    throw new Error("GOOGLE_CALENDAR_ID no configurado");
-  }
-
+async function getCalendarClient() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   const auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ["https://www.googleapis.com/auth/calendar"],
   });
+  return google.calendar({ version: "v3", auth });
+}
 
-  const calendar = google.calendar({ version: "v3", auth });
+// Consulta los slots disponibles para un día dado
+// Slots posibles: 9:00, 11:00, 13:00, 15:00
+async function getAvailableSlots(dayName) {
+  const SLOTS = ["09:00", "11:00", "13:00", "15:00"];
+
+  try {
+    const calendar = await getCalendarClient();
+
+    // Calcular el rango del día
+    const dayStart = getNextAvailableDate(dayName, "09:00");
+    const dayEnd = new Date(dayStart);
+    dayEnd.setHours(17, 0, 0, 0);
+
+    const response = await calendar.events.list({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      timeMin: toLocalDateTimeString(dayStart) + "-06:00",
+      timeMax: toLocalDateTimeString(dayEnd) + "-06:00",
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const events = response.data.items || [];
+
+    // Extraer horas ocupadas
+    const occupiedHours = events.map(event => {
+      const start = event.start.dateTime || event.start.date;
+      const date = new Date(start);
+      const h = date.getHours().toString().padStart(2, "0");
+      const m = date.getMinutes().toString().padStart(2, "0");
+      return `${h}:${m}`;
+    });
+
+    // Filtrar slots disponibles
+    const available = SLOTS.filter(slot => !occupiedHours.includes(slot));
+
+    console.log(`📅 Slots disponibles para ${dayName}: ${available.join(", ") || "ninguno"}`);
+    return available;
+
+  } catch (err) {
+    console.error("❌ Error consultando disponibilidad:", err.message);
+    return ["09:00", "11:00", "13:00", "15:00"]; // Si falla, devolver todos
+  }
+}
+
+async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail }) {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
+  if (!process.env.GOOGLE_CALENDAR_ID) throw new Error("GOOGLE_CALENDAR_ID no configurado");
+
+  const calendar = await getCalendarClient();
   const startDate = getNextAvailableDate(day, hour);
   const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
 
-  // Recordatorio inteligente
   const hoursUntilEvent = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
   const reminderMinutes = hoursUntilEvent > 24 ? 1440 : 180;
 
@@ -80,14 +120,8 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   const eventBody = {
     summary: `🏗️ Visita SSR — ${name || "Cliente"} | ${zone || ""}`,
     description,
-    start: {
-      dateTime: toLocalDateTimeString(startDate),
-      timeZone: "America/Costa_Rica",
-    },
-    end: {
-      dateTime: toLocalDateTimeString(endDate),
-      timeZone: "America/Costa_Rica",
-    },
+    start: { dateTime: toLocalDateTimeString(startDate), timeZone: "America/Costa_Rica" },
+    end: { dateTime: toLocalDateTimeString(endDate), timeZone: "America/Costa_Rica" },
     reminders: {
       useDefault: false,
       overrides: [
@@ -98,32 +132,18 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
     colorId: "2",
   };
 
-  const calendarIds = [process.env.GOOGLE_CALENDAR_ID];
-  if (process.env.GOOGLE_CALENDAR_GERENCIA) calendarIds.push(process.env.GOOGLE_CALENDAR_GERENCIA);
-  if (process.env.GOOGLE_CALENDAR_PROYECTOS) calendarIds.push(process.env.GOOGLE_CALENDAR_PROYECTOS);
+  const response = await calendar.events.insert({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    resource: eventBody,
+    sendUpdates: "none",
+  });
 
-  let mainEvent = null;
-  for (const calId of calendarIds) {
-    try {
-      const response = await calendar.events.insert({
-        calendarId: calId,
-        resource: eventBody,
-        sendUpdates: "none",
-      });
-      console.log(`📅 Evento creado en calendario ${calId}: ${response.data.htmlLink}`);
-      if (!mainEvent) mainEvent = response.data;
-    } catch (err) {
-      console.error(`❌ Error creando evento en ${calId}:`, err.message);
-    }
-  }
-
-  if (!mainEvent) throw new Error("No se pudo crear el evento en ningún calendario");
-
+  console.log(`📅 Evento creado: ${response.data.htmlLink}`);
   return {
-    eventId: mainEvent.id,
-    eventLink: mainEvent.htmlLink,
+    eventId: response.data.id,
+    eventLink: response.data.htmlLink,
     startDate,
   };
 }
 
-module.exports = { createVisitEvent };
+module.exports = { createVisitEvent, getAvailableSlots };
