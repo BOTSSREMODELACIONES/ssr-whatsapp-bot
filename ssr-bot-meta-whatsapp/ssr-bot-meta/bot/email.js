@@ -1,18 +1,21 @@
 const { Resend } = require("resend");
 
 const resend = new Resend(process.env.RESEND_API_KEY);
-
 const FROM = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
 
 async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wazeLink, clientEmail, dateStr, timeStr }) {
-  const recipients = [
-    "gerencia@ssremodelaciones.com",
+  // Destinatarios fijos del equipo SSR
+  const teamRecipients = [
+    "darwinguillon@gmail.com", // gerencia (también verifica que llega)
     "administraciondeproyectos@ssremodelaciones.com",
+    "gerencia@ssremodelaciones.com",
+    "proyectos@ssremodelaciones.com",
   ];
 
-  // Agregar email del cliente si lo dio
+  // Email del cliente si lo dio
+  const allRecipients = [...teamRecipients];
   if (clientEmail && clientEmail !== "sin-correo" && clientEmail.includes("@")) {
-    recipients.push(clientEmail);
+    allRecipients.push(clientEmail);
   }
 
   const subject = `🗓️ Nueva visita agendada — ${name} | ${zone}`;
@@ -28,6 +31,7 @@ async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wa
         <table style="width: 100%; border-collapse: collapse;">
           <tr><td style="padding: 8px 0; color: #666; width: 40%;">👤 Cliente</td><td style="padding: 8px 0; font-weight: bold;">${name || "—"}</td></tr>
           <tr><td style="padding: 8px 0; color: #666;">📱 WhatsApp</td><td style="padding: 8px 0;">${phone}</td></tr>
+          ${clientEmail && clientEmail !== "sin-correo" ? `<tr><td style="padding: 8px 0; color: #666;">📧 Email cliente</td><td style="padding: 8px 0;">${clientEmail}</td></tr>` : ""}
           <tr><td style="padding: 8px 0; color: #666;">🏗️ Proyecto</td><td style="padding: 8px 0;">${project || "—"}</td></tr>
           <tr><td style="padding: 8px 0; color: #666;">📍 Zona</td><td style="padding: 8px 0;">${zone || "—"}</td></tr>
           <tr><td style="padding: 8px 0; color: #666;">📅 Fecha</td><td style="padding: 8px 0; font-weight: bold; color: #2e7d32;">${dateStr}</td></tr>
@@ -47,13 +51,25 @@ async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wa
   try {
     await resend.emails.send({
       from: FROM,
-      to: recipients,
+      to: allRecipients,
       subject,
       html,
     });
-    console.log(`📧 Email de confirmación enviado a: ${recipients.join(", ")}`);
+    console.log(`📧 Email enviado a: ${allRecipients.join(", ")}`);
   } catch (err) {
     console.error("❌ Error enviando email:", err.message);
+    // Intentar solo al gmail si falla con todos
+    try {
+      await resend.emails.send({
+        from: FROM,
+        to: ["darwinguillon@gmail.com"],
+        subject,
+        html,
+      });
+      console.log("📧 Email enviado solo a darwinguillon@gmail.com (fallback)");
+    } catch (err2) {
+      console.error("❌ Error en fallback de email:", err2.message);
+    }
   }
 }
 
