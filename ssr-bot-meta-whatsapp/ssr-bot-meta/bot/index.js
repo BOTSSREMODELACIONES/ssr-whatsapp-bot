@@ -59,9 +59,14 @@ async function handleMessage(from, text, messageId) {
         lead_saved: true,
       });
 
+      // Formatear hora correctamente en Costa Rica (sin conversión UTC)
+      const visitHour = updated.visit_hour || "09:00";
+      const [hh, mm] = visitHour.split(":");
+      const hourNum = parseInt(hh);
+      const ampm = hourNum >= 12 ? "p.m." : "a.m.";
+      const hour12 = hourNum > 12 ? hourNum - 12 : hourNum === 0 ? 12 : hourNum;
+      let timeStr = `${hour12}:${mm} ${ampm}`;
       let dateStr = updated.visit_day;
-      let timeStr = updated.visit_hour;
-      let calendarLink = "";
 
       // Crear evento en Google Calendar
       try {
@@ -80,12 +85,8 @@ async function handleMessage(from, text, messageId) {
           weekday: "long", day: "numeric", month: "long",
           timeZone: "America/Costa_Rica",
         });
-        timeStr = eventData.startDate.toLocaleTimeString("es-CR", {
-          hour: "2-digit", minute: "2-digit",
-          timeZone: "America/Costa_Rica",
-        });
-        calendarLink = eventData.eventLink;
-        console.log(`📅 Visita agendada en Calendar: ${calendarLink}`);
+
+        console.log(`📅 Visita agendada en Calendar: ${eventData.eventLink}`);
       } catch (calErr) {
         console.error("❌ Error creando evento en Calendar:", calErr.message);
       }
@@ -113,8 +114,7 @@ async function handleMessage(from, text, messageId) {
       logLead(from, updated, "visita_solicitada");
 
       // Confirmación al cliente
-      const calendarMsg = `✅ ¡Listo! Tu cita quedó agendada para el *${dateStr} a las ${timeStr}*. Te llegará una confirmación por correo y un recordatorio el día anterior 📧`;
-      await sendText(from, calendarMsg);
+      await sendText(from, `✅ ¡Listo! Tu cita quedó agendada para el *${dateStr} a las ${timeStr}*. Te llegará una confirmación por correo y un recordatorio el día anterior 📧`);
     }
 
   } catch (err) {
