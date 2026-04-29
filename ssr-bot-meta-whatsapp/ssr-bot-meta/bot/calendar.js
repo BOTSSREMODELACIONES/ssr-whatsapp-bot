@@ -51,6 +51,10 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   const startDate = getNextAvailableDate(day, hour);
   const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
 
+  // Recordatorio inteligente: si la cita es en más de 24h → 24h antes, si no → 3h antes
+  const hoursUntilEvent = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
+  const reminderMinutes = hoursUntilEvent > 24 ? 1440 : 180;
+
   const description = [
     `👤 Cliente: ${name || "Sin nombre"}`,
     `📱 WhatsApp: ${phone}`,
@@ -84,8 +88,8 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
     reminders: {
       useDefault: false,
       overrides: [
-        { method: "popup", minutes: 60 },     // Popup 1h antes
-        { method: "email", minutes: 1440 },   // Email 24h antes a todos los invitados
+        { method: "popup", minutes: 60 },
+        { method: "email", minutes: reminderMinutes },
       ],
     },
     colorId: "2",
