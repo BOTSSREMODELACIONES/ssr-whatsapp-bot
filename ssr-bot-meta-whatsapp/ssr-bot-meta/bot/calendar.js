@@ -33,6 +33,13 @@ function getNextAvailableDate(dayName, hourStr) {
   return result;
 }
 
+// Formatea fecha como string local sin conversión UTC
+// Ejemplo: "2026-05-04T09:00:00"
+function toLocalDateTimeString(date) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:00`;
+}
+
 async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail }) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
     throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
@@ -51,7 +58,7 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   const startDate = getNextAvailableDate(day, hour);
   const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
 
-  // Recordatorio inteligente: más de 24h → recordatorio 24h antes, menos → 3h antes
+  // Recordatorio inteligente
   const hoursUntilEvent = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
   const reminderMinutes = hoursUntilEvent > 24 ? 1440 : 180;
 
@@ -73,8 +80,14 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   const eventBody = {
     summary: `🏗️ Visita SSR — ${name || "Cliente"} | ${zone || ""}`,
     description,
-    start: { dateTime: startDate.toISOString(), timeZone: "America/Costa_Rica" },
-    end: { dateTime: endDate.toISOString(), timeZone: "America/Costa_Rica" },
+    start: {
+      dateTime: toLocalDateTimeString(startDate),
+      timeZone: "America/Costa_Rica",
+    },
+    end: {
+      dateTime: toLocalDateTimeString(endDate),
+      timeZone: "America/Costa_Rica",
+    },
     reminders: {
       useDefault: false,
       overrides: [
@@ -85,7 +98,6 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
     colorId: "2",
   };
 
-  // Calendarios donde se crea el evento
   const calendarIds = [process.env.GOOGLE_CALENDAR_ID];
   if (process.env.GOOGLE_CALENDAR_GERENCIA) calendarIds.push(process.env.GOOGLE_CALENDAR_GERENCIA);
   if (process.env.GOOGLE_CALENDAR_PROYECTOS) calendarIds.push(process.env.GOOGLE_CALENDAR_PROYECTOS);
