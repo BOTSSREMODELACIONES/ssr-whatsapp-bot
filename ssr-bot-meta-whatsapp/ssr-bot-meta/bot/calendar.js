@@ -71,12 +71,21 @@ async function getAvailableSlots(dayName) {
     const events = response.data.items || [];
 
     // Extraer horas ocupadas
-    const occupiedHours = events.map(event => {
+  const occupiedRanges = events.map(event => {
       const start = event.start.dateTime || event.start.date;
-      const date = new Date(start);
-      const h = date.getHours().toString().padStart(2, "0");
-      const m = date.getMinutes().toString().padStart(2, "0");
-      return `${h}:${m}`;
+      return new Date(start).getTime();
+    });
+
+    const available = SLOTS.filter(slot => {
+      const [h, m] = slot.split(":");
+      const slotDate = new Date(dayStart);
+      slotDate.setHours(parseInt(h), parseInt(m), 0, 0);
+      const slotTime = slotDate.getTime();
+
+      // Verificar que no haya ningún evento dentro de 2.5 horas antes o después
+      return !occupiedRanges.some(occupied =>
+        Math.abs(occupied - slotTime) < 2.5 * 60 * 60 * 1000
+      );
     });
 
     // Filtrar slots disponibles
