@@ -2,6 +2,7 @@ const { get, update, addMsg, reset } = require("./state");
 const { ask } = require("./claude");
 const { sendText, markRead } = require("./messenger");
 const { createVisitEvent } = require("./calendar");
+const { sendVisitConfirmation } = require("./email");
 const KNOWLEDGE = require("./knowledge");
 
 async function handleMessage(from, text, messageId) {
@@ -45,7 +46,6 @@ async function handleMessage(from, text, messageId) {
       }
 
     } else if (flag === "VISITA") {
-      // Formato: nombre|proyecto|zona|dia|hora|ubicacion|email
       const [name, project, zone, day, hour, ubicacion, email] = (flagData || "").split("|");
       const updated = update(from, {
         name: name?.trim() || session.name,
@@ -59,7 +59,11 @@ async function handleMessage(from, text, messageId) {
         lead_saved: true,
       });
 
-      let calendarMsg = "";
+      let dateStr = updated.visit_day;
+      let timeStr = updated.visit_hour;
+      let calendarLink = "";
+
+      // Crear evento en Google Calendar
       try {
         const eventData = await createVisitEvent({
           name: updated.name,
@@ -72,28 +76,45 @@ async function handleMessage(from, text, messageId) {
           clientEmail: updated.client_email,
         });
 
-        const dateStr = eventData.startDate.toLocaleDateString("es-CR", {
+        dateStr = eventData.startDate.toLocaleDateString("es-CR", {
           weekday: "long", day: "numeric", month: "long",
           timeZone: "America/Costa_Rica",
         });
-        const timeStr = eventData.startDate.toLocaleTimeString("es-CR", {
+        timeStr = eventData.startDate.toLocaleTimeString("es-CR", {
           hour: "2-digit", minute: "2-digit",
           timeZone: "America/Costa_Rica",
         });
-
-        calendarMsg = `✅ ¡Listo! Tu cita quedó agendada para el *${dateStr} a las ${timeStr}*. Te llegará una confirmación por correo y un recordatorio el día anterior 📧`;
-        console.log(`📅 Visita agendada en Calendar: ${eventData.eventLink}`);
+        calendarLink = eventData.eventLink;
+        console.log(`📅 Visita agendada en Calendar: ${calendarLink}`);
       } catch (calErr) {
         console.error("❌ Error creando evento en Calendar:", calErr.message);
-        calendarMsg = `ℹ️ Tu cita fue registrada. Melvin Zúñiga, nuestro Encargado de Proyectos, te confirmará los detalles pronto.`;
       }
 
+      // Enviar email de confirmación
+      try {
+        await sendVisitConfirmation({
+          name: updated.name,
+          phone: from,
+          project: updated.project_desc,
+          zone: updated.zone,
+          day: updated.visit_day,
+          hour: updated.visit_hour,
+          wazeLink: updated.waze_link,
+          clientEmail: updated.client_email,
+          dateStr,
+          timeStr,
+        });
+      } catch (emailErr) {
+        console.error("❌ Error enviando email:", emailErr.message);
+      }
+
+      // Notificar a Melvin por WhatsApp
       await notifyMelvin(from, updated, normalized, "visita_solicitada");
       logLead(from, updated, "visita_solicitada");
 
-      if (calendarMsg) {
-        await sendText(from, calendarMsg.trim());
-      }
+      // Confirmación al cliente
+      const calendarMsg = `✅ ¡Listo! Tu cita quedó agendada para el *${dateStr} a las ${timeStr}*. Te llegará una confirmación por correo y un recordatorio el día anterior 📧`;
+      await sendText(from, calendarMsg);
     }
 
   } catch (err) {
