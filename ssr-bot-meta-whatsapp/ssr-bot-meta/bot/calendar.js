@@ -104,4 +104,46 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
 
   const description = [
     `👤 Cliente: ${name || "Sin nombre"}`,
-    `
+    `📱 WhatsApp: ${phone}`,
+    clientEmail && clientEmail !== "sin-correo" ? `📧 Email cliente: ${clientEmail}` : "",
+    `🏗️ Proyecto: ${project || "Por definir"}`,
+    `📍 Zona: ${zone || "Por definir"}`,
+    wazeLink ? `🗺️ Ubicación: ${wazeLink}` : "🗺️ Ubicación: pendiente",
+    "",
+    "💰 Costo visita: ₡25.000 (descontable si contrata obra)",
+    "⏱️ Duración aprox: 1 hora",
+    "",
+    "─────────────────────────",
+    "Agendado automáticamente por Sasha — Bot SS Remodelaciones",
+  ].filter(Boolean).join("\n");
+
+  const eventBody = {
+    summary: `🏗️ Visita SSR — ${name || "Cliente"} | ${zone || ""}`,
+    description,
+    start: { dateTime: toLocalDateTimeString(startDate), timeZone: "America/Costa_Rica" },
+    end: { dateTime: toLocalDateTimeString(endDate), timeZone: "America/Costa_Rica" },
+    reminders: {
+      useDefault: false,
+      overrides: [
+        { method: "popup", minutes: 60 },
+        { method: "email", minutes: reminderMinutes },
+      ],
+    },
+    colorId: "2",
+  };
+
+  const response = await calendar.events.insert({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    resource: eventBody,
+    sendUpdates: "none",
+  });
+
+  console.log(`📅 Evento creado: ${response.data.htmlLink}`);
+  return {
+    eventId: response.data.id,
+    eventLink: response.data.htmlLink,
+    startDate,
+  };
+}
+
+module.exports = { createVisitEvent, getAvailableSlots };
