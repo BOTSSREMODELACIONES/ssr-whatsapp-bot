@@ -75,13 +75,13 @@ Cuando corresponda, agregá UNO de estos flags al final de tu respuesta (despué
 
 [LEAD:nombre|proyecto|zona] — cuando ya tengas nombre + proyecto + zona del cliente. Ejemplo: [LEAD:Darwin Guillón|remodelación cocina|San Rafael de Heredia]
 
-[VISITA:nombre|proyecto|zona|dia|hora|link_waze] — cuando el cliente confirmó la visita y tenés TODOS sus datos incluyendo el link de Waze. 
+[VISITA:nombre|proyecto|zona|dia|hora|link_waze] — cuando el cliente confirmó la visita y tenés TODOS sus datos incluyendo el link de Waze.
 Ejemplo: [VISITA:Carlos Ramírez|ampliación|San Isidro de Heredia|lunes|10:00|https://waze.com/ul/...]
 
-IMPORTANTE: 
+IMPORTANTE:
 - El flag va en una línea separada al final. El cliente NO lo ve — solo lo procesa el sistema.
 - Para VISITA, el link_waze es OBLIGATORIO. Si no lo tenés, no emitás el flag todavía.
-- El campo "hora" debe ser en formato HH:MM (ejemplo: 09:00, 14:00).`;
+- El campo hora debe ser en formato HH:MM (ejemplo: 09:00, 14:00).`;
 
 async function ask(history, userMessage) {
   const messages = [...history, { role: "user", content: userMessage }];
