@@ -1,24 +1,24 @@
-const { Resend } = require("resend");
+    const nodemailer = require("nodemailer");
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-const FROM = process.env.RESEND_FROM_EMAIL || "onboarding@resend.dev";
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD,
+  },
+});
 
 async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wazeLink, clientEmail, dateStr, timeStr }) {
-  // Destinatarios fijos del equipo SSR
   const teamRecipients = [
-    "darwinguillon@gmail.com", // gerencia (también verifica que llega)
-    "administraciondeproyectos@ssremodelaciones.com",
     "gerencia@ssremodelaciones.com",
+    "administraciondeproyectos@ssremodelaciones.com",
     "proyectos@ssremodelaciones.com",
   ];
 
-  // Email del cliente si lo dio
   const allRecipients = [...teamRecipients];
   if (clientEmail && clientEmail !== "sin-correo" && clientEmail.includes("@")) {
     allRecipients.push(clientEmail);
   }
-
-  const subject = `🗓️ Nueva visita agendada — ${name} | ${zone}`;
 
   const html = `
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -49,27 +49,15 @@ async function sendVisitConfirmation({ name, phone, project, zone, day, hour, wa
   `;
 
   try {
-    await resend.emails.send({
-      from: FROM,
-      to: allRecipients,
-      subject,
+    await transporter.sendMail({
+      from: `"Sasha — SS Remodelaciones" <${process.env.GMAIL_USER}>`,
+      to: allRecipients.join(", "),
+      subject: `🗓️ Nueva visita agendada — ${name} | ${zone}`,
       html,
     });
     console.log(`📧 Email enviado a: ${allRecipients.join(", ")}`);
   } catch (err) {
     console.error("❌ Error enviando email:", err.message);
-    // Intentar solo al gmail si falla con todos
-    try {
-      await resend.emails.send({
-        from: FROM,
-        to: ["darwinguillon@gmail.com"],
-        subject,
-        html,
-      });
-      console.log("📧 Email enviado solo a darwinguillon@gmail.com (fallback)");
-    } catch (err2) {
-      console.error("❌ Error en fallback de email:", err2.message);
-    }
   }
 }
 
