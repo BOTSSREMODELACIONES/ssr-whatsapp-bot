@@ -47,15 +47,12 @@ async function getCalendarClient() {
   return google.calendar({ version: "v3", auth });
 }
 
-// Consulta los slots disponibles para un día dado
-// Slots posibles: 9:00, 11:00, 13:00, 15:00
 async function getAvailableSlots(dayName) {
   const SLOTS = ["09:00", "11:30", "14:00"];
 
   try {
     const calendar = await getCalendarClient();
 
-    // Calcular el rango del día
     const dayStart = getNextAvailableDate(dayName, "09:00");
     const dayEnd = new Date(dayStart);
     dayEnd.setHours(17, 0, 0, 0);
@@ -70,8 +67,7 @@ async function getAvailableSlots(dayName) {
 
     const events = response.data.items || [];
 
-    // Extraer horas ocupadas
-  const occupiedRanges = events.map(event => {
+    const occupiedRanges = events.map(event => {
       const start = event.start.dateTime || event.start.date;
       return new Date(start).getTime();
     });
@@ -81,22 +77,17 @@ async function getAvailableSlots(dayName) {
       const slotDate = new Date(dayStart);
       slotDate.setHours(parseInt(h), parseInt(m), 0, 0);
       const slotTime = slotDate.getTime();
-
-      // Verificar que no haya ningún evento dentro de 2.5 horas antes o después
       return !occupiedRanges.some(occupied =>
         Math.abs(occupied - slotTime) < 2.5 * 60 * 60 * 1000
       );
     });
-
-    // Filtrar slots disponibles
-    const available = SLOTS.filter(slot => !occupiedHours.includes(slot));
 
     console.log(`📅 Slots disponibles para ${dayName}: ${available.join(", ") || "ninguno"}`);
     return available;
 
   } catch (err) {
     console.error("❌ Error consultando disponibilidad:", err.message);
-    return ["09:00", "11:00", "13:00", "15:00"]; // Si falla, devolver todos
+    return ["09:00", "11:30", "14:00"];
   }
 }
 
@@ -113,46 +104,4 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
 
   const description = [
     `👤 Cliente: ${name || "Sin nombre"}`,
-    `📱 WhatsApp: ${phone}`,
-    clientEmail && clientEmail !== "sin-correo" ? `📧 Email cliente: ${clientEmail}` : "",
-    `🏗️ Proyecto: ${project || "Por definir"}`,
-    `📍 Zona: ${zone || "Por definir"}`,
-    wazeLink ? `🗺️ Ubicación: ${wazeLink}` : "🗺️ Ubicación: pendiente",
-    "",
-    "💰 Costo visita: ₡25.000 (descontable si contrata obra)",
-    "⏱️ Duración aprox: 1 hora",
-    "",
-    "─────────────────────────",
-    "Agendado automáticamente por Sasha — Bot SS Remodelaciones",
-  ].filter(Boolean).join("\n");
-
-  const eventBody = {
-    summary: `🏗️ Visita SSR — ${name || "Cliente"} | ${zone || ""}`,
-    description,
-    start: { dateTime: toLocalDateTimeString(startDate), timeZone: "America/Costa_Rica" },
-    end: { dateTime: toLocalDateTimeString(endDate), timeZone: "America/Costa_Rica" },
-    reminders: {
-      useDefault: false,
-      overrides: [
-        { method: "popup", minutes: 60 },
-        { method: "email", minutes: reminderMinutes },
-      ],
-    },
-    colorId: "2",
-  };
-
-  const response = await calendar.events.insert({
-    calendarId: process.env.GOOGLE_CALENDAR_ID,
-    resource: eventBody,
-    sendUpdates: "none",
-  });
-
-  console.log(`📅 Evento creado: ${response.data.htmlLink}`);
-  return {
-    eventId: response.data.id,
-    eventLink: response.data.htmlLink,
-    startDate,
-  };
-}
-
-module.exports = { createVisitEvent, getAvailableSlots };
+    `
