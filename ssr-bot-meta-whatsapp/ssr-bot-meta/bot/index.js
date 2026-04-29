@@ -1,7 +1,7 @@
 const { get, update, addMsg, reset } = require("./state");
 const { ask } = require("./claude");
 const { sendText, markRead } = require("./messenger");
-const { createVisitEvent } = require("./calendar");
+const { createVisitEvent, getAvailableSlots } = require("./calendar");
 const { sendVisitConfirmation } = require("./email");
 const KNOWLEDGE = require("./knowledge");
 
@@ -22,11 +22,38 @@ async function handleMessage(from, text, messageId) {
   try {
     addMsg(from, "user", normalized);
 
-    const rawResponse = await ask(session.history.slice(0, -1), normalized);
+    // Detectar si el cliente mencionó un día para consultar disponibilidad
+    const dayMentioned = detectDay(normalized);
+    let availabilityContext = "";
+
+    if (dayMentioned && !session.slots_shown) {
+      const slots = await getAvailableSlots(dayMentioned);
+      update(from, { slots_shown: dayMentioned });
+
+      if (slots.length === 0) {
+        availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explicale amablemente y ofrecele los otros días disponibles: lunes, martes o viernes.]`;
+      } else {
+        const slotsText = slots.map(s => {
+          const [h, m] = s.split(":");
+          const hNum = parseInt(h);
+          const ampm = hNum >= 12 ? "p.m." : "a.m.";
+          const h12 = hNum > 12 ? hNum - 12 : hNum;
+          return `${h12}:${m} ${ampm}`;
+        }).join(", ");
+        availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrecé SOLO estos horarios al cliente, no otros.]`;
+      }
+    }
+
+    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext);
     const { cleanMessage, flag, flagData } = parseFlags(rawResponse);
 
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
+
+    // Reset slots_shown si cambia de día
+    if (dayMentioned && dayMentioned !== session.slots_shown) {
+      update(from, { slots_shown: null });
+    }
 
     if (flag === "ESCALAR") {
       update(from, { escalated: true });
@@ -59,7 +86,6 @@ async function handleMessage(from, text, messageId) {
         lead_saved: true,
       });
 
-      // Formatear hora correctamente en Costa Rica (sin conversión UTC)
       const visitHour = updated.visit_hour || "09:00";
       const [hh, mm] = visitHour.split(":");
       const hourNum = parseInt(hh);
@@ -68,7 +94,6 @@ async function handleMessage(from, text, messageId) {
       let timeStr = `${hour12}:${mm} ${ampm}`;
       let dateStr = updated.visit_day;
 
-      // Crear evento en Google Calendar
       try {
         const eventData = await createVisitEvent({
           name: updated.name,
@@ -85,13 +110,11 @@ async function handleMessage(from, text, messageId) {
           weekday: "long", day: "numeric", month: "long",
           timeZone: "America/Costa_Rica",
         });
-
         console.log(`📅 Visita agendada en Calendar: ${eventData.eventLink}`);
       } catch (calErr) {
         console.error("❌ Error creando evento en Calendar:", calErr.message);
       }
 
-      // Enviar email de confirmación
       try {
         await sendVisitConfirmation({
           name: updated.name,
@@ -109,11 +132,9 @@ async function handleMessage(from, text, messageId) {
         console.error("❌ Error enviando email:", emailErr.message);
       }
 
-      // Notificar a Melvin por WhatsApp
       await notifyMelvin(from, updated, normalized, "visita_solicitada");
       logLead(from, updated, "visita_solicitada");
 
-      // Confirmación al cliente
       await sendText(from, `✅ ¡Listo! Tu cita quedó agendada para el *${dateStr} a las ${timeStr}*. Te llegará una confirmación por correo y un recordatorio el día anterior 📧`);
     }
 
@@ -123,6 +144,14 @@ async function handleMessage(from, text, messageId) {
       `Tuve un problema técnico 😔 Escribile directamente a *${KNOWLEDGE.empresa.encargado}* al ${KNOWLEDGE.empresa.whatsapp_melvin}.`
     );
   }
+}
+
+function detectDay(text) {
+  const normalized = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (normalized.includes("lunes")) return "lunes";
+  if (normalized.includes("martes")) return "martes";
+  if (normalized.includes("viernes")) return "viernes";
+  return null;
 }
 
 function parseFlags(response) {
