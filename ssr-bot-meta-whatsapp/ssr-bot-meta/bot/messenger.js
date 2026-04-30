@@ -50,12 +50,43 @@ async function sendList(to, bodyText, buttonLabel, sections) {
 }
 
 /**
+ * Descarga una imagen/media de Meta y la retorna en base64
+ * @param {string} mediaId - ID del media recibido en el webhook
+ * @returns {{ base64: string, mimeType: string }}
+ */
+async function downloadMedia(mediaId) {
+  const token = process.env.WHATSAPP_TOKEN;
+
+  // Paso 1: obtener la URL de descarga desde Meta
+  const metaRes = await fetch(`${GRAPH_URL}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!metaRes.ok) {
+    throw new Error(`Error obteniendo URL de media: ${metaRes.status}`);
+  }
+  const { url, mime_type } = await metaRes.json();
+
+  // Paso 2: descargar el archivo real
+  const imgRes = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!imgRes.ok) {
+    throw new Error(`Error descargando imagen: ${imgRes.status}`);
+  }
+
+  const buffer = Buffer.from(await imgRes.arrayBuffer());
+  return {
+    base64: buffer.toString("base64"),
+    mimeType: mime_type || "image/jpeg",
+  };
+}
+
+/**
  * Marca un mensaje como leído (muestra los dos ticks azules)
  */
 async function markRead(messageId) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const token = process.env.WHATSAPP_TOKEN;
-
   try {
     const res = await fetch(`${GRAPH_URL}/${phoneNumberId}/messages`, {
       method: "POST",
@@ -76,7 +107,6 @@ async function markRead(messageId) {
 }
 
 // ── Internal ─────────────────────────────────────────────────────────────────
-
 async function _post(to, messageFields) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const token = process.env.WHATSAPP_TOKEN;
@@ -98,13 +128,11 @@ async function _post(to, messageFields) {
   });
 
   const data = await res.json();
-
   if (!res.ok) {
     console.error(`❌ Meta API error (${res.status}):`, JSON.stringify(data));
     throw new Error(`Meta API error: ${data?.error?.message || res.status}`);
   }
-
   return data;
 }
 
-module.exports = { sendText, sendButtons, sendList, markRead };
+module.exports = { sendText, sendButtons, sendList, markRead, downloadMedia };
