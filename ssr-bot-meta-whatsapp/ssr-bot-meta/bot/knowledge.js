@@ -9,7 +9,6 @@ const KNOWLEDGE = {
     sinpe_numero: "+50671981370",
     sinpe_nombre: "SS Remodelaciones / Melvin Zúñiga",
   },
-
   visita: {
     costo: 25000,
     costo_texto: "₡25.000",
@@ -19,7 +18,7 @@ const KNOWLEDGE = {
       "Medición y evaluación del espacio",
       "Asesoría técnica en materiales y acabados",
       "Recomendaciones de diseño",
-      "Presupuesto detallado enviado en 24-48 horas después de la visita",
+      "Presupuesto detallado enviado en un máximo de 72 horas después de la visita (puede ser antes según la demanda del momento).",
     ],
     formas_pago: ["SINPE Móvil", "Transferencia bancaria", "Efectivo en el momento de la visita"],
     pago: "Se coordina con el cliente — SINPE Móvil, transferencia o efectivo al llegar",
@@ -27,7 +26,6 @@ const KNOWLEDGE = {
     horarios: "9:00 am a 5:00 pm",
     nota_descuento: "Si el cliente contrata la obra, el costo de la visita se descuenta del total del proyecto.",
   },
-
   servicios: [
     "Pintura interior y exterior",
     "Remodelaciones de baños",
@@ -42,22 +40,19 @@ const KNOWLEDGE = {
     "Instalación de puertas y ventanas",
     "Decoración con Wall Panel",
   ],
-
   proceso_obra: [
     "Visita de diagnóstico (₡25.000, se descuenta si contratás la obra).",
-    "Presupuesto detallado enviado en 24-48h después de la visita.",
+    "Presupuesto detallado enviado en un máximo de 72 horas después de la visita (puede ser antes según la demanda).",
     "Aprobación del presupuesto y firma de contrato.",
     "Coordinación de inicio de obra según disponibilidad.",
     "Pagos por avance de obra: adelanto, avances y pago final.",
     "Entrega con verificación conjunta del trabajo terminado.",
   ],
-
   formas_pago_obra: [
     "Transferencia bancaria",
     "SINPE Móvil",
     "Efectivo (montos menores)",
   ],
-
   preguntas_frecuentes: [
     {
       q: "¿Cuánto cuesta la remodelación?",
@@ -66,6 +61,10 @@ const KNOWLEDGE = {
     {
       q: "¿El presupuesto es gratis?",
       a: "La visita de diagnóstico tiene un costo de ₡25.000, que incluye medición, asesoría y presupuesto detallado. Si luego contratás la obra, ese monto se descuenta del total."
+    },
+    {
+      q: "¿Cuándo recibo el presupuesto?",
+      a: "El presupuesto detallado se envía en un máximo de 72 horas después de la visita. Dependiendo de la demanda del momento, puede llegar antes."
     },
     {
       q: "¿Cuánto tiempo tarda una remodelación?",
@@ -89,5 +88,4 @@ const KNOWLEDGE = {
     },
   ],
 };
-
 module.exports = KNOWLEDGE;
