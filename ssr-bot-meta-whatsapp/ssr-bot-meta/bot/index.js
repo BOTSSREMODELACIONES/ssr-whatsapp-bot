@@ -32,7 +32,7 @@ async function handleMessage(from, text, messageId) {
     const dayMentioned = detectDay(normalized);
     let availabilityContext = "";
 
-    if (dayMentioned && !session.slots_shown) {
+    if (dayMentioned && dayMentioned !== session.slots_shown) {
       const slots = await getAvailableSlots(dayMentioned);
       update(from, { slots_shown: dayMentioned });
 
@@ -46,7 +46,7 @@ async function handleMessage(from, text, messageId) {
           const h12 = hNum > 12 ? hNum - 12 : hNum;
           return `${h12}:${m} ${ampm}`;
         }).join(", ");
-        availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrecé SOLO estos horarios al cliente, no otros.]`;
+        availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrecé SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a confirmar disponibilidad ni que necesitás verificarla. Si el cliente ya eligió uno de estos horarios, procedé INMEDIATAMENTE al siguiente paso: pedirle la ubicación.]`;
       }
     }
 
@@ -61,11 +61,6 @@ async function handleMessage(from, text, messageId) {
     const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${normalized}\n🤖 *Sasha:* ${cleanMessage}`;
     for (const supervisor of SUPERVISORES) {
       sendText(supervisor, monitorMsg).catch(() => {});
-    }
-
-    // Reset slots_shown si cambia de día
-    if (dayMentioned && dayMentioned !== session.slots_shown) {
-      update(from, { slots_shown: null });
     }
 
     if (flag === "ESCALAR") {
@@ -169,8 +164,8 @@ function detectDay(text) {
 
 function parseFlags(response) {
   const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*))]\s*$/;
-  // Elimina cualquier mensaje interno [SISTEMA:...] que Claude pueda haber incluido en su respuesta
-  const sistemaRegex = /\[SISTEMA:[^\]]*\]/g;
+  // FIX: usar [\s\S]*? para capturar saltos de línea dentro de [SISTEMA:...]
+  const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
   const match = response.match(flagRegex);
 
   if (!match) return { cleanMessage: response.replace(sistemaRegex, "").trim(), flag: null, flagData: null };
