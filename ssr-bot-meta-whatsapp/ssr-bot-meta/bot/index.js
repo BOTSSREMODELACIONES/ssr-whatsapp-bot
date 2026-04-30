@@ -1,6 +1,6 @@
 const { get, update, addMsg, reset } = require("./state");
 const { ask } = require("./claude");
-const { sendText, markRead } = require("./messenger");
+const { sendText, markRead, downloadMedia } = require("./messenger");
 const { createVisitEvent, getAvailableSlots } = require("./calendar");
 const { sendVisitConfirmation } = require("./email");
 const KNOWLEDGE = require("./knowledge");
@@ -11,10 +11,17 @@ const SUPERVISORES = ["+50683091817", "+50671981370"];
 // Números que el bot debe ignorar completamente (dejar vacío salvo que haya loops reales)
 const IGNORAR = [];
 
-async function handleMessage(from, text, messageId) {
+/**
+ * Procesa un mensaje entrante de WhatsApp.
+ * @param {string} from        - Número del cliente (con +)
+ * @param {string} text        - Texto del mensaje (puede ser vacío si solo envió foto)
+ * @param {string} messageId   - ID del mensaje de Meta
+ * @param {string|null} mediaId - ID del media si el cliente envió una imagen
+ */
+async function handleMessage(from, text, messageId, mediaId = null) {
   if (messageId) markRead(messageId).catch(() => {});
 
-  const normalized = text.trim();
+  const normalized = (text || "").trim();
   const session = get(from);
 
   if (normalized === "/reset") {
@@ -29,9 +36,26 @@ async function handleMessage(from, text, messageId) {
   if (session.escalated) return;
 
   try {
-    addMsg(from, "user", normalized);
+    // ── Descargar imagen si el cliente envió una foto ──────────────────────
+    let imageData = null;
+    if (mediaId) {
+      try {
+        imageData = await downloadMedia(mediaId);
+        console.log(`🖼️ Imagen descargada de +${from} (${imageData.mimeType})`);
+      } catch (mediaErr) {
+        console.error("❌ Error descargando media:", mediaErr.message);
+        // Si falla la descarga, continuamos sin imagen
+      }
+    }
 
-    // Detectar si el cliente mencionó un día para consultar disponibilidad
+    // Si no hay texto ni imagen, no hay nada que procesar
+    if (!normalized && !imageData) return;
+
+    // Registrar en historial el texto (o indicador de foto)
+    const historyText = normalized || "[Cliente envió una foto]";
+    addMsg(from, "user", historyText);
+
+    // ── Detectar día mencionado para disponibilidad ────────────────────────
     const dayMentioned = detectDay(normalized);
     let availabilityContext = "";
 
@@ -53,19 +77,28 @@ async function handleMessage(from, text, messageId) {
       }
     }
 
-    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext);
+    // ── Llamar a Claude con o sin imagen ──────────────────────────────────
+    const rawResponse = await ask(
+      session.history.slice(0, -1),
+      normalized + availabilityContext,
+      imageData
+    );
     const { cleanMessage, flag, flagData } = parseFlags(rawResponse);
 
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
 
-    // Enviar copia de la conversación a los supervisores en tiempo real
+    // ── Enviar copia a supervisores en tiempo real ─────────────────────────
     const clientName = session.name ? `${session.name} (${from})` : from;
-    const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${normalized}\n🤖 *Sasha:* ${cleanMessage}`;
+    const clientMsg = imageData
+      ? `📷 [Foto]${normalized ? ` "${normalized}"` : ""}`
+      : normalized;
+    const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${clientMsg}\n🤖 *Sasha:* ${cleanMessage}`;
     for (const supervisor of SUPERVISORES) {
       sendText(supervisor, monitorMsg).catch(() => {});
     }
 
+    // ── Procesar flags ─────────────────────────────────────────────────────
     if (flag === "ESCALAR") {
       update(from, { escalated: true });
       await sendText(from, `📲 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
@@ -158,7 +191,7 @@ async function handleMessage(from, text, messageId) {
 }
 
 function detectDay(text) {
-  const normalized = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const normalized = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (normalized.includes("lunes")) return "lunes";
   if (normalized.includes("martes")) return "martes";
   if (normalized.includes("viernes")) return "viernes";
