@@ -8,6 +8,9 @@ const KNOWLEDGE = require("./knowledge");
 // Números que reciben copia de cada conversación en tiempo real
 const SUPERVISORES = ["+50683091817", "+50671981370"];
 
+// Números que el bot debe ignorar completamente (dejar vacío salvo que haya loops reales)
+const IGNORAR = [];
+
 async function handleMessage(from, text, messageId) {
   if (messageId) markRead(messageId).catch(() => {});
 
@@ -20,8 +23,8 @@ async function handleMessage(from, text, messageId) {
     return;
   }
 
-  // Ignorar mensajes de los supervisores para no crear bucles
-  if (SUPERVISORES.includes(`+${from}`) || SUPERVISORES.includes(from)) return;
+  // Ignorar solo números en la lista IGNORAR (ya no bloquea a supervisores)
+  if (IGNORAR.includes(`+${from}`) || IGNORAR.includes(from)) return;
 
   if (session.escalated) return;
 
@@ -164,7 +167,6 @@ function detectDay(text) {
 
 function parseFlags(response) {
   const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*))]\s*$/;
-  // FIX: usar [\s\S]*? para capturar saltos de línea dentro de [SISTEMA:...]
   const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
   const match = response.match(flagRegex);
 
