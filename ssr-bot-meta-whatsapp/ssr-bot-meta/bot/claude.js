@@ -1,4 +1,4 @@
-onst Anthropic = require("@anthropic-ai/sdk");
+const Anthropic = require("@anthropic-ai/sdk");
 const KNOWLEDGE = require("./knowledge");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
