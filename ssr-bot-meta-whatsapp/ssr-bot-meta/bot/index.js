@@ -156,11 +156,13 @@ function detectDay(text) {
 
 function parseFlags(response) {
   const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*))]\s*$/;
+  // Elimina cualquier mensaje interno [SISTEMA:...] que Claude pueda haber incluido en su respuesta
+  const sistemaRegex = /\[SISTEMA:[^\]]*\]/g;
   const match = response.match(flagRegex);
 
-  if (!match) return { cleanMessage: response.trim(), flag: null, flagData: null };
+  if (!match) return { cleanMessage: response.replace(sistemaRegex, "").trim(), flag: null, flagData: null };
 
-  const cleanMessage = response.replace(flagRegex, "").trim();
+  const cleanMessage = response.replace(flagRegex, "").replace(sistemaRegex, "").trim();
   const fullFlag = match[1];
 
   if (fullFlag === "ESCALAR") return { cleanMessage, flag: "ESCALAR", flagData: null };
