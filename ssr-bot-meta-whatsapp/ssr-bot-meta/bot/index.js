@@ -5,6 +5,9 @@ const { createVisitEvent, getAvailableSlots } = require("./calendar");
 const { sendVisitConfirmation } = require("./email");
 const KNOWLEDGE = require("./knowledge");
 
+// Números que reciben copia de cada conversación en tiempo real
+const SUPERVISORES = ["+50683091817", "+50671981370"];
+
 async function handleMessage(from, text, messageId) {
   if (messageId) markRead(messageId).catch(() => {});
 
@@ -16,6 +19,9 @@ async function handleMessage(from, text, messageId) {
     await sendText(from, "🔄 Reiniciado.");
     return;
   }
+
+  // Ignorar mensajes de los supervisores para no crear bucles
+  if (SUPERVISORES.includes(`+${from}`) || SUPERVISORES.includes(from)) return;
 
   if (session.escalated) return;
 
@@ -50,6 +56,13 @@ async function handleMessage(from, text, messageId) {
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
 
+    // Enviar copia de la conversación a los supervisores en tiempo real
+    const clientName = session.name ? `${session.name} (${from})` : from;
+    const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${normalized}\n🤖 *Sasha:* ${cleanMessage}`;
+    for (const supervisor of SUPERVISORES) {
+      sendText(supervisor, monitorMsg).catch(() => {});
+    }
+
     // Reset slots_shown si cambia de día
     if (dayMentioned && dayMentioned !== session.slots_shown) {
       update(from, { slots_shown: null });
@@ -57,7 +70,7 @@ async function handleMessage(from, text, messageId) {
 
     if (flag === "ESCALAR") {
       update(from, { escalated: true });
-      await sendText(from, `📲 Te conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
+      await sendText(from, `📲 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
       await notifyMelvin(from, session, normalized, "escalacion");
 
     } else if (flag === "LEAD") {
@@ -135,13 +148,13 @@ async function handleMessage(from, text, messageId) {
       await notifyMelvin(from, updated, normalized, "visita_solicitada");
       logLead(from, updated, "visita_solicitada");
 
-      await sendText(from, `✅ ¡Listo! Tu cita quedó agendada para el *${dateStr} a las ${timeStr}*. Te llegará una confirmación por correo y un recordatorio el día anterior 📧`);
+      await sendText(from, `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo y un recordatorio el día anterior 📧`);
     }
 
   } catch (err) {
     console.error("❌ Error:", err.message);
     await sendText(from,
-      `Tuve un problema técnico 😔 Escribile directamente a *${KNOWLEDGE.empresa.encargado}* al ${KNOWLEDGE.empresa.whatsapp_melvin}.`
+      `Tuve un problema técnico 😔 Por favor escríbale directamente a *${KNOWLEDGE.empresa.encargado}* al ${KNOWLEDGE.empresa.whatsapp_melvin}.`
     );
   }
 }
