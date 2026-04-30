@@ -3,21 +3,15 @@ const { ask } = require("./claude");
 const { sendText, markRead, downloadMedia } = require("./messenger");
 const { createVisitEvent, getAvailableSlots } = require("./calendar");
 const { sendVisitConfirmation } = require("./email");
+const { upsertLead, registerVisit } = require("./crm");
 const KNOWLEDGE = require("./knowledge");
 
 // Números que reciben copia de cada conversación en tiempo real
 const SUPERVISORES = ["+50683091817", "+50671981370"];
 
-// Números que el bot debe ignorar completamente (dejar vacío salvo que haya loops reales)
+// Números que el bot debe ignorar completamente
 const IGNORAR = [];
 
-/**
- * Procesa un mensaje entrante de WhatsApp.
- * @param {string} from        - Número del cliente (con +)
- * @param {string} text        - Texto del mensaje (puede ser vacío si solo envió foto)
- * @param {string} messageId   - ID del mensaje de Meta
- * @param {string|null} mediaId - ID del media si el cliente envió una imagen
- */
 async function handleMessage(from, text, messageId, mediaId = null) {
   if (messageId) markRead(messageId).catch(() => {});
 
@@ -30,9 +24,7 @@ async function handleMessage(from, text, messageId, mediaId = null) {
     return;
   }
 
-  // Ignorar solo números en la lista IGNORAR (ya no bloquea a supervisores)
   if (IGNORAR.includes(`+${from}`) || IGNORAR.includes(from)) return;
-
   if (session.escalated) return;
 
   try {
@@ -44,18 +36,15 @@ async function handleMessage(from, text, messageId, mediaId = null) {
         console.log(`🖼️ Imagen descargada de +${from} (${imageData.mimeType})`);
       } catch (mediaErr) {
         console.error("❌ Error descargando media:", mediaErr.message);
-        // Si falla la descarga, continuamos sin imagen
       }
     }
 
-    // Si no hay texto ni imagen, no hay nada que procesar
     if (!normalized && !imageData) return;
 
-    // Registrar en historial el texto (o indicador de foto)
     const historyText = normalized || "[Cliente envió una foto]";
     addMsg(from, "user", historyText);
 
-    // ── Detectar día mencionado para disponibilidad ────────────────────────
+    // ── Detectar día para disponibilidad ──────────────────────────────────
     const dayMentioned = detectDay(normalized);
     let availabilityContext = "";
 
@@ -77,7 +66,7 @@ async function handleMessage(from, text, messageId, mediaId = null) {
       }
     }
 
-    // ── Llamar a Claude con o sin imagen ──────────────────────────────────
+    // ── Llamar a Claude ────────────────────────────────────────────────────
     const rawResponse = await ask(
       session.history.slice(0, -1),
       normalized + availabilityContext,
@@ -88,7 +77,7 @@ async function handleMessage(from, text, messageId, mediaId = null) {
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
 
-    // ── Enviar copia a supervisores en tiempo real ─────────────────────────
+    // ── Monitor supervisores ───────────────────────────────────────────────
     const clientName = session.name ? `${session.name} (${from})` : from;
     const clientMsg = imageData
       ? `📷 [Foto]${normalized ? ` "${normalized}"` : ""}`
@@ -114,6 +103,8 @@ async function handleMessage(from, text, messageId, mediaId = null) {
       if (!session.lead_saved) {
         update(from, { lead_saved: true });
         logLead(from, updated);
+        // ── Registrar en CRM ──────────────────────────────────────────────
+        upsertLead({ ...updated, phone: from }).catch(() => {});
       }
 
     } else if (flag === "VISITA") {
@@ -175,6 +166,9 @@ async function handleMessage(from, text, messageId, mediaId = null) {
       } catch (emailErr) {
         console.error("❌ Error enviando email:", emailErr.message);
       }
+
+      // ── Registrar visita en CRM ──────────────────────────────────────────
+      registerVisit({ ...updated, phone: from }).catch(() => {});
 
       await notifyMelvin(from, updated, normalized, "visita_solicitada");
       logLead(from, updated, "visita_solicitada");
