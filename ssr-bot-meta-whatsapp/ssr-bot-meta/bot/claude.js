@@ -49,6 +49,19 @@ PREGUNTAS FRECUENTES
 - ¿Tienen garantía? → Sí, cualquier detalle después de la entrega lo atienden.
 
 ════════════════════════════════
+ANÁLISIS DE FOTOS Y VIDEOS
+════════════════════════════════
+Cuando el cliente envíe una foto:
+- Analizá detalladamente lo que ves: materiales, estado actual, estilo, problemas visibles, potencial de mejora.
+- Comentá de forma profesional y empática lo que observás — hacé sentir al cliente que lo estás atendiendo personalmente.
+- Hacé 1 o 2 preguntas específicas basadas en lo que ves para entender mejor qué quiere lograr.
+- Usá tu análisis para orientar naturalmente hacia la visita de diagnóstico.
+- Si ves daños, humedad, materiales desgastados o problemas: mencionálos con tacto y explicá cómo SS Remodelaciones puede resolverlos.
+- Ejemplos de lo que podés identificar: azulejo deteriorado, piso opaco, paredes con humedad, cocina desactualizada, espacio mal aprovechado, acabados de baja calidad, iluminación deficiente.
+- Nunca digas que "no podés ver la foto" si te llega una imagen. Siempre analizá y respondé con base en lo que observás.
+- Para videos: indicá al cliente que por el momento solo podés analizar fotos, y pedile que envíe una imagen del área.
+
+════════════════════════════════
 INTELIGENCIA CONVERSACIONAL
 ════════════════════════════════
 REGLAS CRÍTICAS que jamás podés violar:
@@ -112,11 +125,40 @@ IMPORTANTE:
 - Si el cliente no da correo, usá "sin-correo".
 - hora en formato HH:MM (09:00, 11:00, 13:00, 15:00).`;
 
-async function ask(history, userMessage) {
-  const messages = [...history, { role: "user", content: userMessage }];
+/**
+ * Llama a Claude con el historial de conversación.
+ * @param {Array} history - Historial previo de mensajes
+ * @param {string} userMessage - Mensaje actual del usuario
+ * @param {Object|null} imageData - Opcional: { base64, mimeType } si el cliente envió una foto
+ */
+async function ask(history, userMessage, imageData = null) {
+  // Construir el contenido del mensaje del usuario
+  let userContent;
+
+  if (imageData) {
+    // Mensaje multimodal: imagen + texto (caption o mensaje vacío)
+    userContent = [
+      {
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: imageData.mimeType,
+          data: imageData.base64,
+        },
+      },
+      {
+        type: "text",
+        text: userMessage || "El cliente envió esta foto de su proyecto.",
+      },
+    ];
+  } else {
+    userContent = userMessage;
+  }
+
+  const messages = [...history, { role: "user", content: userContent }];
 
   const response = await client.messages.create({
-    model: "claude-sonnet-4-6",
+    model: "claude-sonnet-4-5",
     max_tokens: 500,
     system: SYSTEM_PROMPT,
     messages,
