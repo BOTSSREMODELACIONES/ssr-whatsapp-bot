@@ -1,6 +1,9 @@
 require("dotenv").config();
 const express = require("express");
+const cron = require("node-cron");
 const { handleMessage } = require("./bot/index");
+const { sendDailyReminders } = require("./bot/reminders");
+
 const app = express();
 app.use(express.json());
 
@@ -18,6 +21,18 @@ if (missing.length) {
   process.exit(1);
 }
 
+// ── Cron: recordatorios diarios a las 8:00 AM hora Costa Rica ────────────────
+cron.schedule(
+  "0 8 * * *",
+  async () => {
+    console.log("⏰ Cron activado — enviando recordatorios del día...");
+    await sendDailyReminders();
+  },
+  { timezone: "America/Costa_Rica" }
+);
+console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
+
+// ── Webhook verification ──────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
@@ -30,6 +45,7 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
+// ── Webhook messages ──────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
   try {
@@ -73,11 +89,11 @@ app.post("/webhook", async (req, res) => {
       } else if (msg.type === "image") {
         // ── Foto del cliente ─────────────────────────────────────────────
         mediaId = msg.image?.id;
-        text    = msg.image?.caption || "";   // caption opcional
+        text    = msg.image?.caption || "";
         console.log(`🖼️ Imagen recibida de +${from} (mediaId: ${mediaId})`);
 
       } else if (msg.type === "video") {
-        // ── Video: por ahora pedimos foto ────────────────────────────────
+        // ── Video: pedimos foto ──────────────────────────────────────────
         console.log(`🎥 Video recibido de +${from} — solicitando foto`);
         await sendText(
           from,
@@ -87,7 +103,7 @@ app.post("/webhook", async (req, res) => {
 
       } else {
         // ── Audio, sticker, documento, etc. ─────────────────────────────
-        console.log(`⚠️ Tipo de mensaje no soportado: ${msg.type} de +${from}`);
+        console.log(`⚠️ Tipo no soportado: ${msg.type} de +${from}`);
         await sendText(
           from,
           "Por el momento solo proceso mensajes de texto, fotos y ubicaciones 😊 ¿En qué le puedo ayudar?"
@@ -95,7 +111,6 @@ app.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // Si no hay texto ni mediaId, no hay nada que procesar
       if (!text && !mediaId) continue;
 
       console.log(`📨 De +${from}: "${(text || "[foto]").substring(0, 80)}"`);
@@ -108,16 +123,27 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ── Health & status ───────────────────────────────────────────────────────────
 app.get("/", (req, res) =>
   res.json({
     bot: "SS Remodelaciones — Sasha",
     status: "✅ operando",
     api: "Meta WhatsApp Business API",
+    features: ["visión de fotos", "recordatorios automáticos", "detección de idioma"],
     ts: new Date().toISOString(),
   })
 );
 
-app.get("/health", (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
+app.get("/health", (_req, res) =>
+  res.json({ ok: true, uptime: process.uptime() })
+);
+
+// ── Endpoint manual para probar recordatorios sin esperar el cron ─────────────
+app.get("/test-reminders", async (_req, res) => {
+  console.log("🧪 Recordatorios disparados manualmente");
+  await sendDailyReminders();
+  res.json({ ok: true, message: "Recordatorios ejecutados" });
+});
 
 app.listen(PORT, () => {
   console.log(`
@@ -125,6 +151,8 @@ app.listen(PORT, () => {
 ║  🏗️  SS Remodelaciones — WhatsApp Bot (Sasha)        ║
 ║  📡  Meta WhatsApp Business API                      ║
 ║  🤖  IA: Claude Sonnet (visión activada)             ║
+║  ⏰  Recordatorios: 8:00 AM CR diario               ║
+║  🌐  Idiomas: ES / EN automático                     ║
 ║  🚀  Puerto: ${PORT}                                    ║
 ║  📬  Webhook: GET|POST /webhook                      ║
 ╚══════════════════════════════════════════════════════╝
