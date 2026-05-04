@@ -410,6 +410,83 @@ const KNOWLEDGE = {
       },
     },
   },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // EMERGENCIAS Y URGENCIAS
+  // ─────────────────────────────────────────────────────────────────────────────
+  emergencias: {
+    palabras_clave: [
+      "emergencia", "urgente", "urgencia", "se está lloviendo", "se me está lloviendo",
+      "tubería rota", "tubo roto", "inundación", "se inundó", "se cayó", "derrumbe",
+      "grieta nueva", "grieta grande", "sin agua", "cortocircuito", "corto circuito",
+      "se fue la luz", "humo", "incendio", "hundimiento", "losa cayó",
+    ],
+    instrucciones_contencion: {
+      tuberia_inundacion: "Cierre la llave de paso principal mientras llegamos. Generalmente está en la entrada del terreno o bajo el fregadero.",
+      electrico: "Baje el breaker de ese circuito en el tablero eléctrico. Si no sabe cuál es, baje el breaker general.",
+      filtracion_techo: "Coloque recipientes bajo las goteras y cubra muebles y electrodomésticos con plástico por ahora.",
+      grieta_estructura: "No use esa área hasta que la revisemos. Evite cargas adicionales (muebles pesados, personas).",
+      general: "Aleje a las personas del área afectada y espere a nuestro equipo.",
+    },
+    mensaje_respuesta: "Entiendo, tranquilo/a — le vamos a ayudar. Le contactará nuestro equipo en los próximos minutos.",
+    tiempo_respuesta: "Melvin se comunica en un máximo de 30 minutos en horario laboral.",
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // MANEJO DE OBJECIONES
+  // ─────────────────────────────────────────────────────────────────────────────
+  objeciones: {
+    nota: "Sasha usa estas orientaciones cuando el cliente expresa resistencia. Siempre con empatía, nunca con presión.",
+    respuestas: [
+      {
+        trigger: "Es muy caro / está muy alto / no tengo presupuesto",
+        estrategia: "Calificar presupuesto real. Posicionar valor. Nunca bajar precio sin ver el proyecto.",
+        respuesta_guia: "Entiendo perfectamente. ¿Me permite preguntarle qué rango de inversión tiene en mente? Así le orientamos hacia las opciones que mejor le funcionen — hay soluciones para distintos presupuestos.",
+      },
+      {
+        trigger: "Lo pienso / le aviso / déjeme consultarlo",
+        estrategia: "Crear ventana de acción sin presionar. Usar escasez real de agenda.",
+        respuesta_guia: "Claro, con toda confianza. Solo le cuento que los espacios de visita esta semana están limitados — si quiere lo reservamos hoy y si cambia de opinión lo cancelamos sin ningún problema.",
+      },
+      {
+        trigger: "Tengo otro presupuesto más barato / el vecino me lo hace menos",
+        estrategia: "Nunca atacar a la competencia. Preguntar qué incluye. Posicionar diferenciadores reales.",
+        respuesta_guia: "Es normal comparar y está bien hacerlo. ¿Qué incluye el otro presupuesto? Nosotros trabajamos con materiales de primera, garantía del trabajo y un equipo con experiencia comprobada — eso marca diferencia en el resultado final.",
+      },
+      {
+        trigger: "Estoy cotizando / primero veo más opciones",
+        estrategia: "Posicionar la visita como herramienta de información neutral, no como compromiso.",
+        respuesta_guia: "Perfecto, es lo más sensato. Mientras cotiza, ¿le agendo la visita? Le va a dar información real del proyecto — la use con quien decida contratar. No hay compromiso.",
+      },
+      {
+        trigger: "No confío / cómo sé que son serios / quiero referencias",
+        estrategia: "Prueba social concreta. Fotos de proyectos. Contacto humano disponible.",
+        respuesta_guia: "Completamente válido. ¿Le comparto fotos de proyectos similares que hemos hecho? Y si prefiere hablar directamente con Melvin, nuestro encargado, con gusto lo conecto.",
+      },
+    ],
+  },
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CALIFICACIÓN DE PRESUPUESTO
+  // ─────────────────────────────────────────────────────────────────────────────
+  calificacion_presupuesto: {
+    nota: "Sasha pregunta por el rango de presupuesto UNA sola vez, al inicio cuando el cliente describe el proyecto. Si no quiere darlo, se continúa sin insistir.",
+    pregunta: "Para orientarle mejor: ¿tiene en mente un rango de inversión aproximado? No necesita ser exacto.",
+    respuesta_bajo: "Para ese rango podemos enfocarnos en las prioridades del proyecto — hay soluciones inteligentes que maximizan el resultado. En la visita lo definimos.",
+    respuesta_alto: "Con ese presupuesto tenemos buena amplitud para trabajar con materiales de primera y un acabado de alto nivel. En la visita lo detallamos.",
+    respuesta_no_da: "Sin problema, en la visita lo evaluamos con calma.",
+    rangos_internos: {
+      nota: "Solo para contexto de Sasha. NO cotizar con estos rangos, son orientativos.",
+      pintura_casa_completa: { min: 800000, max: 2500000, referencia: "casa 100-150 m²" },
+      bano_completo: { min: 1500000, max: 5000000, referencia: "baño 4-8 m²" },
+      cocina_completa: { min: 2000000, max: 8000000, referencia: "cocina 6-12 m²" },
+      pisos_ceramica: { min: 500000, max: 2000000, referencia: "área 30-50 m²" },
+      ampliacion_habitacion: { min: 5000000, max: 15000000, referencia: "cuarto 12-20 m²" },
+      cielo_raso_gypsum: { min: 400000, max: 1500000, referencia: "área 30-50 m²" },
+      muebles_cocina: { min: 1500000, max: 6000000, referencia: "3-5 metros lineales" },
+      impermeabilizacion_techo: { min: 300000, max: 1200000, referencia: "techo 60-100 m²" },
+    },
+  },
 };
 
 module.exports = KNOWLEDGE;
