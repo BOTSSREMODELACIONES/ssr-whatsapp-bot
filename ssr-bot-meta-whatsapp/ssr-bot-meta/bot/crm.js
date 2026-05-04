@@ -32,6 +32,21 @@ const COL = {
   NOTAS:            19,
 };
 
+// Columnas de la hoja "Visitas" (A=1, B=2, ...)
+const VCOL = {
+  FECHA_REGISTRO: 1,  // A
+  FECHA_VISITA:   2,  // B
+  HORA_VISITA:    3,  // C
+  TELEFONO:       4,  // D
+  NOMBRE:         5,  // E
+  PROYECTO:       6,  // F
+  ZONA:           7,  // G
+  UBICACION:      8,  // H
+  EMAIL:          9,  // I
+  ESTADO:         10, // J
+  NOTAS:          11, // K
+};
+
 async function getSheetsClient() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   const auth = new google.auth.GoogleAuth({
@@ -65,6 +80,43 @@ async function findClientRow(sheets, phone) {
     console.error("❌ CRM findClientRow error:", err.message);
   }
   return null;
+}
+
+// ── NUEVO: Marca como CANCELADA cualquier visita activa del cliente en hoja Visitas ──
+async function cancelOldVisits(sheets, phone) {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "'Visitas'!A3:K500",
+    });
+    const rows = res.data.values || [];
+    let cancelled = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const rowPhone = rows[i][VCOL.TELEFONO - 1] || ""; // col D
+      const status   = rows[i][VCOL.ESTADO - 1]   || ""; // col J
+
+      const sameClient = rowPhone === phone || rowPhone === phone.replace("+", "");
+      const isActive   = status === "Agendada";
+
+      if (sameClient && isActive) {
+        const rowNum = i + 3;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `'Visitas'!J${rowNum}`,
+          valueInputOption: "USER_ENTERED",
+          resource: { values: [["CANCELADA - Reagendada"]] },
+        });
+        cancelled++;
+        console.log(`🗑️ CRM Visitas: fila ${rowNum} marcada como CANCELADA (${phone})`);
+      }
+    }
+
+    return cancelled;
+  } catch (err) {
+    console.error("❌ CRM cancelOldVisits error:", err.message);
+    return 0;
+  }
 }
 
 async function upsertLead(session) {
@@ -174,19 +226,25 @@ async function registerVisit(session) {
       console.log(`✅ CRM: Fila nueva con visita — ${phone}`);
     }
 
-    // Registrar en hoja Visitas
+    // ── NUEVO: Cancelar visitas anteriores activas antes de registrar la nueva ──
+    const cancelledCount = await cancelOldVisits(sheets, phone);
+    if (cancelledCount > 0) {
+      console.log(`🔄 CRM: ${cancelledCount} visita(s) anterior(es) cancelada(s) para ${phone}`);
+    }
+
+    // Registrar nueva visita en hoja Visitas
     const visitRow = [
-      nowCR(),
-      session.visit_day || "—",
-      session.visit_hour || "—",
-      phone,
-      session.name || "—",
-      session.project_desc || "—",
-      session.zone || "—",
-      session.waze_link || "—",
-      session.client_email || "—",
-      "Agendada",
-      "",
+      nowCR(),                       // A - Fecha registro
+      session.visit_day  || "—",     // B - Fecha visita
+      session.visit_hour || "—",     // C - Hora visita
+      phone,                         // D - Teléfono
+      session.name       || "—",     // E - Nombre
+      session.project_desc || "—",   // F - Proyecto
+      session.zone       || "—",     // G - Zona
+      session.waze_link  || "—",     // H - Ubicación
+      session.client_email || "—",   // I - Email
+      "Agendada",                    // J - Estado
+      "",                            // K - Notas
     ];
 
     await sheets.spreadsheets.values.append({
