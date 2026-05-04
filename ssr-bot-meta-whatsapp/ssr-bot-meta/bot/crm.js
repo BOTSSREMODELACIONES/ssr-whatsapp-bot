@@ -8,7 +8,7 @@
 
 const { google } = require("googleapis");
 
-const SPREADSHEET_ID = "1ml93G-Mi92MhauD3PhooL5_k51XxxWSa";
+const SPREADSHEET_ID = "1LOUDwOe8W5pAF0QV0lTqC9uCcQ0fc_JaIMcGu2f5aZ4";
 
 const COL = {
   FECHA_REGISTRO:   1,
