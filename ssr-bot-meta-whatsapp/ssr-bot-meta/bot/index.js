@@ -12,7 +12,8 @@ const SUPERVISORES = ["+50683091817", "+50671981370"];
 // Números que el bot debe ignorar completamente
 const IGNORAR = [];
 
-async function handleMessage(from, text, messageId, mediaId = null) {
+// mediaIds puede ser: null | string | string[]
+async function handleMessage(from, text, messageId, mediaIds = null) {
   if (messageId) markRead(messageId).catch(() => {});
 
   const normalized = (text || "").trim();
@@ -28,20 +29,41 @@ async function handleMessage(from, text, messageId, mediaId = null) {
   if (session.escalated) return;
 
   try {
-    // ── Descargar imagen si el cliente envió una foto ──────────────────────
-    let imageData = null;
-    if (mediaId) {
-      try {
-        imageData = await downloadMedia(mediaId);
-        console.log(`🖼️ Imagen descargada de +${from} (${imageData.mimeType})`);
-      } catch (mediaErr) {
-        console.error("❌ Error descargando media:", mediaErr.message);
-      }
+    // ── Descargar todas las imágenes en paralelo ───────────────────────────
+    let imageDataArray = [];
+
+    if (mediaIds) {
+      const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
+      console.log(`🖼️ Descargando ${ids.length} imagen(es) de +${from}...`);
+
+      const results = await Promise.allSettled(ids.map(id => downloadMedia(id)));
+
+      imageDataArray = results
+        .map((r, i) => {
+          if (r.status === "fulfilled" && r.value) {
+            console.log(`✅ Imagen ${i + 1}/${ids.length} descargada (${r.value.mimeType})`);
+            return r.value;
+          } else {
+            console.error(`❌ Error descargando imagen ${i + 1}/${ids.length}:`, r.reason?.message);
+            return null;
+          }
+        })
+        .filter(Boolean);
     }
 
-    if (!normalized && !imageData) return;
+    // imageData que se pasa a ask(): null | objeto | array
+    const imageData = imageDataArray.length === 0 ? null
+      : imageDataArray.length === 1 ? imageDataArray[0]
+      : imageDataArray;
 
-    const historyText = normalized || "[Cliente envió una foto]";
+    if (!normalized && imageDataArray.length === 0) return;
+
+    // Texto de historial: describe cuántas fotos si las hay
+    const historyText = normalized ||
+      (imageDataArray.length === 1
+        ? "[Cliente envió una foto]"
+        : `[Cliente envió ${imageDataArray.length} fotos]`);
+
     addMsg(from, "user", historyText);
 
     // ── Detectar día para disponibilidad ──────────────────────────────────
@@ -79,8 +101,8 @@ async function handleMessage(from, text, messageId, mediaId = null) {
 
     // ── Monitor supervisores ───────────────────────────────────────────────
     const clientName = session.name ? `${session.name} (${from})` : from;
-    const clientMsg = imageData
-      ? `📷 [Foto]${normalized ? ` "${normalized}"` : ""}`
+    const clientMsg = imageDataArray.length > 0
+      ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
       : normalized;
     const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${clientMsg}\n🤖 *Sasha:* ${cleanMessage}`;
     for (const supervisor of SUPERVISORES) {
@@ -103,7 +125,6 @@ async function handleMessage(from, text, messageId, mediaId = null) {
       if (!session.lead_saved) {
         update(from, { lead_saved: true });
         logLead(from, updated);
-        // ── Registrar en CRM ──────────────────────────────────────────────
         upsertLead({ ...updated, phone: from }).catch(() => {});
       }
 
@@ -145,7 +166,7 @@ async function handleMessage(from, text, messageId, mediaId = null) {
           weekday: "long", day: "numeric", month: "long",
           timeZone: "America/Costa_Rica",
         });
-        console.log(`📅 Visita agendada en Calendar: ${eventData.eventLink}`);
+        console.log(`📅 Visita agendada en Calendar: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`);
       } catch (calErr) {
         console.error("❌ Error creando evento en Calendar:", calErr.message);
       }
@@ -167,9 +188,7 @@ async function handleMessage(from, text, messageId, mediaId = null) {
         console.error("❌ Error enviando email:", emailErr.message);
       }
 
-      // ── Registrar visita en CRM ──────────────────────────────────────────
       registerVisit({ ...updated, phone: from }).catch(() => {});
-
       await notifyMelvin(from, updated, normalized, "visita_solicitada");
       logLead(from, updated, "visita_solicitada");
 
