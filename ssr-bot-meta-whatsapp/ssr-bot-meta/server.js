@@ -32,6 +32,52 @@ cron.schedule(
 );
 console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BUFFER DE MENSAJES — agrupa fotos múltiples del mismo cliente en un solo lote
+// Si llegan 3 imágenes en 1.5s, se procesan juntas en UNA sola llamada
+// ─────────────────────────────────────────────────────────────────────────────
+const messageBuffer = new Map(); // phone → { items: [], timer }
+const BATCH_WINDOW_MS = 1500;    // ventana de agrupación en milisegundos
+
+function flushBuffer(from) {
+  const buffer = messageBuffer.get(from);
+  if (!buffer || !buffer.items.length) {
+    messageBuffer.delete(from);
+    return;
+  }
+
+  const items = buffer.items;
+  messageBuffer.delete(from);
+
+  // Tomar el último messageId, combinar textos, recolectar todos los mediaIds
+  const messageId   = items[items.length - 1].messageId;
+  const texts       = items.map(i => i.text).filter(Boolean);
+  const mediaIds    = items.map(i => i.mediaId).filter(Boolean);
+  const combinedText = texts.join(" ") || null;
+
+  console.log(
+    `📦 Lote de +${from}: ${items.length} mensaje(s), ` +
+    `${mediaIds.length} foto(s), texto: "${combinedText || "[ninguno]"}"`
+  );
+
+  handleMessage("+" + from, combinedText, messageId, mediaIds.length ? mediaIds : null)
+    .catch(err => console.error("❌ Error procesando lote de", from, ":", err));
+}
+
+function addToBuffer(from, messageId, text, mediaId) {
+  if (!messageBuffer.has(from)) {
+    messageBuffer.set(from, { items: [], timer: null });
+  }
+
+  const buffer = messageBuffer.get(from);
+
+  // Cancelar timer anterior y crear uno nuevo (reset de ventana)
+  if (buffer.timer) clearTimeout(buffer.timer);
+
+  buffer.items.push({ messageId, text: text || null, mediaId: mediaId || null });
+  buffer.timer = setTimeout(() => flushBuffer(from), BATCH_WINDOW_MS);
+}
+
 // ── Webhook verification ──────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
@@ -58,65 +104,63 @@ app.post("/webhook", async (req, res) => {
     const messages = value?.messages;
     if (!messages?.length) return;
 
-    const { sendText } = require("./bot/messenger");
-
     for (const msg of messages) {
       const from      = msg.from;
       const messageId = msg.id;
-      let text    = null;
-      let mediaId = null;
 
       if (msg.type === "text") {
         // ── Mensaje de texto normal ──────────────────────────────────────
-        text = msg.text?.body;
+        const text = msg.text?.body;
+        if (!text) continue;
+        console.log(`📨 Texto de +${from}: "${text.substring(0, 80)}"`);
+        addToBuffer(from, messageId, text, null);
 
       } else if (msg.type === "interactive") {
         // ── Botones o listas ─────────────────────────────────────────────
-        text =
+        const text =
           msg.interactive?.button_reply?.id ||
           msg.interactive?.list_reply?.id ||
           msg.interactive?.button_reply?.title;
+        if (!text) continue;
+        addToBuffer(from, messageId, text, null);
 
       } else if (msg.type === "location") {
         // ── Pin de ubicación desde WhatsApp ──────────────────────────────
         const { latitude, longitude, name, address } = msg.location;
         const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
-        text = name
+        const text = name
           ? `Mi ubicación: ${name}${address ? ", " + address : ""} — ${mapsLink}`
           : `Mi ubicación: ${mapsLink}`;
-        console.log(`📍 Ubicación recibida de +${from}: ${text}`);
+        console.log(`📍 Ubicación de +${from}: ${text}`);
+        addToBuffer(from, messageId, text, null);
 
       } else if (msg.type === "image") {
-        // ── Foto del cliente ─────────────────────────────────────────────
-        mediaId = msg.image?.id;
-        text    = msg.image?.caption || "";
-        console.log(`🖼️ Imagen recibida de +${from} (mediaId: ${mediaId})`);
+        // ── Foto — se agrega al buffer y se agrupa con otras fotos ───────
+        const mediaId = msg.image?.id;
+        const caption = msg.image?.caption || "";
+        console.log(`🖼️ Imagen de +${from} (mediaId: ${mediaId})`);
+        addToBuffer(from, messageId, caption || null, mediaId);
 
       } else if (msg.type === "video") {
-        // ── Video: pedimos foto ──────────────────────────────────────────
-        console.log(`🎥 Video recibido de +${from} — solicitando foto`);
-        await sendText(
-          from,
-          "Recibí su video 📹 Por el momento solo puedo analizar fotos. ¿Podría enviarme una imagen del área? Así le asesoro mejor 😊"
-        );
-        continue;
+        // ── Video — Sasha lo maneja con contexto, sin mensaje hardcoded ──
+        console.log(`🎥 Video de +${from}`);
+        const caption = msg.video?.caption || "";
+        // Pasamos contexto textual para que Sasha responda naturalmente
+        const videoContext = caption
+          ? `[El cliente envió un video con el mensaje: "${caption}"]`
+          : "[El cliente envió un video de su proyecto]";
+        addToBuffer(from, messageId, videoContext, null);
+
+      } else if (msg.type === "audio") {
+        // ── Audio ────────────────────────────────────────────────────────
+        console.log(`🎙️ Audio de +${from} — tipo no procesable`);
+        const audioContext = "[El cliente envió un mensaje de voz]";
+        addToBuffer(from, messageId, audioContext, null);
 
       } else {
-        // ── Audio, sticker, documento, etc. ─────────────────────────────
-        console.log(`⚠️ Tipo no soportado: ${msg.type} de +${from}`);
-        await sendText(
-          from,
-          "Por el momento solo proceso mensajes de texto, fotos y ubicaciones 😊 ¿En qué le puedo ayudar?"
-        );
-        continue;
+        // ── Sticker, documento, etc. — ignorar silenciosamente ───────────
+        console.log(`⚠️ Tipo ignorado: ${msg.type} de +${from}`);
       }
-
-      if (!text && !mediaId) continue;
-
-      console.log(`📨 De +${from}: "${(text || "[foto]").substring(0, 80)}"`);
-      handleMessage("+" + from, text, messageId, mediaId).catch((err) =>
-        console.error("❌ Error procesando mensaje de", from, ":", err)
-      );
     }
   } catch (err) {
     console.error("❌ Error en POST /webhook:", err);
@@ -129,7 +173,13 @@ app.get("/", (req, res) =>
     bot: "SS Remodelaciones — Sasha",
     status: "✅ operando",
     api: "Meta WhatsApp Business API",
-    features: ["visión de fotos", "recordatorios automáticos", "detección de idioma"],
+    features: [
+      "visión de fotos (múltiples)",
+      "análisis de videos",
+      "recordatorios automáticos",
+      "detección de idioma",
+      "asesoría de diseño e ingeniería",
+    ],
     ts: new Date().toISOString(),
   })
 );
@@ -138,7 +188,6 @@ app.get("/health", (_req, res) =>
   res.json({ ok: true, uptime: process.uptime() })
 );
 
-// ── Endpoint manual para probar recordatorios sin esperar el cron ─────────────
 app.get("/test-reminders", async (_req, res) => {
   console.log("🧪 Recordatorios disparados manualmente");
   await sendDailyReminders();
