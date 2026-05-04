@@ -106,7 +106,12 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       : normalized;
     const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${clientMsg}\n🤖 *Sasha:* ${cleanMessage}`;
     for (const supervisor of SUPERVISORES) {
-      sendText(supervisor, monitorMsg).catch(() => {});
+      sendText(supervisor, monitorMsg).catch((err) => {
+        console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
+        if (err.message.includes("window") || err.message.includes("131047") || err.message.includes("131026")) {
+          console.warn(`⚠️  Ventana 24h cerrada para ${supervisor}. Ese número debe escribirle al bot para reactivar el monitor.`);
+        }
+      });
     }
 
     // ── Procesar flags ─────────────────────────────────────────────────────
