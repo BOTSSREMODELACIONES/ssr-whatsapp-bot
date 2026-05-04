@@ -91,11 +91,58 @@ async function getAvailableSlots(dayName) {
   }
 }
 
+// ── NUEVO: Busca y elimina eventos futuros de un cliente por teléfono ──────────
+async function cancelClientEvents(calendar, phone) {
+  try {
+    const now = new Date();
+    const future = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000); // 90 días adelante
+
+    const response = await calendar.events.list({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      timeMin: now.toISOString(),
+      timeMax: future.toISOString(),
+      singleEvents: true,
+      q: phone, // Google Calendar filtra por texto en descripción/título
+    });
+
+    const events = response.data.items || [];
+
+    // Filtro adicional para asegurarnos que el número es de este cliente
+    const clientEvents = events.filter(e =>
+      e.description && (
+        e.description.includes(phone) ||
+        e.description.includes(phone.replace("+", ""))
+      )
+    );
+
+    for (const event of clientEvents) {
+      await calendar.events.delete({
+        calendarId: process.env.GOOGLE_CALENDAR_ID,
+        eventId: event.id,
+        sendUpdates: "none",
+      });
+      console.log(`🗑️ Evento anterior eliminado: "${event.summary}" (${event.id})`);
+    }
+
+    return clientEvents.length;
+  } catch (err) {
+    console.error("❌ Error eliminando eventos anteriores:", err.message);
+    return 0;
+  }
+}
+
 async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail }) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
   if (!process.env.GOOGLE_CALENDAR_ID) throw new Error("GOOGLE_CALENDAR_ID no configurado");
 
   const calendar = await getCalendarClient();
+
+  // ── NUEVO: Eliminar citas anteriores del mismo cliente antes de crear ──────
+  const deleted = await cancelClientEvents(calendar, phone);
+  if (deleted > 0) {
+    console.log(`🔄 Reagendamiento: ${deleted} cita(s) anterior(es) eliminada(s) para ${phone}`);
+  }
+
   const startDate = getNextAvailableDate(day, hour);
   const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
 
@@ -143,6 +190,7 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
     eventId: response.data.id,
     eventLink: response.data.htmlLink,
     startDate,
+    rescheduled: deleted > 0, // indica si fue un reagendamiento
   };
 }
 
