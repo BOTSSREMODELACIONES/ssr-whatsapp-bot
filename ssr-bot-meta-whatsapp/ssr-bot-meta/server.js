@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cron = require("node-cron");
+const path = require("path");
 const { handleMessage } = require("./bot/index");
 const { sendDailyReminders } = require("./bot/reminders");
 
@@ -197,6 +198,29 @@ app.get("/", (req, res) =>
 app.get("/health", (_req, res) =>
   res.json({ ok: true, uptime: process.uptime() })
 );
+
+// ── Cotizador Web App ─────────────────────────────────────────────────────────
+app.get("/cotizador", (_req, res) => {
+  res.sendFile(path.join(__dirname, "public", "cotizador.html"));
+});
+
+// PWA manifest para instalación en celular
+app.get("/cotizador-manifest.json", (_req, res) => {
+  res.json({
+    name: "Cotizador SSR",
+    short_name: "Cotizador",
+    description: "SS Remodelaciones — Sistema de cotizaciones",
+    start_url: "/cotizador",
+    display: "standalone",
+    background_color: "#F4F6F9",
+    theme_color: "#1B3A6B",
+    icons: [{
+      src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%231B3A6B'/><text y='68' x='50' font-size='55' text-anchor='middle' fill='%23D4541A' font-family='Arial' font-weight='bold'>SS</text></svg>",
+      sizes: "192x192",
+      type: "image/svg+xml"
+    }]
+  });
+});
 
 app.get("/test-reminders", async (_req, res) => {
   console.log("🧪 Recordatorios disparados manualmente");
