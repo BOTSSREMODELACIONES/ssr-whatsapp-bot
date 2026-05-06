@@ -212,7 +212,7 @@ app.post("/api/cotizacion", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Faltan datos requeridos" });
     }
     console.log(`📋 POST /api/cotizacion — ${client.referencia} (${client.nombre})`);
-    const { procesarCotizacion } = require("./cotizacion");
+    const { procesarCotizacion } = require("./bot/cotizacion");
     const result = await procesarCotizacion({ client, items });
     res.json(result);
   } catch (err) {
