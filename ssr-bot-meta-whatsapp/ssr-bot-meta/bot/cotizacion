@@ -1,0 +1,390 @@
+/**
+ * cotizacion.js — Motor de cotizaciones SSR
+ * Genera Excel interno + Word cliente, crea carpeta en Drive y notifica a Darwin
+ */
+
+const { google } = require("googleapis");
+const XLSX = require("xlsx");
+const {
+  Document, Packer, Paragraph, Table, TableRow, TableCell,
+  TextRun, AlignmentType, BorderStyle, WidthType, ShadingType,
+  TabStopType
+} = require("docx");
+const { sendText } = require("./messenger");
+const KNOWLEDGE = require("./knowledge");
+
+const DRIVE_FOLDER_2026 = "1z3pmO0oMfY24PRSWwN4Kh1-1oqgXzPBG";
+const IVA = 0.13;
+const DARWIN_WHATSAPP = "+50683091817";
+
+// ── Google Drive client ───────────────────────────────────────────────────────
+async function getDriveClient() {
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/drive"],
+  });
+  return google.drive({ version: "v3", auth });
+}
+
+// ── Calcular totales ──────────────────────────────────────────────────────────
+function calcTotals(items) {
+  const subtotal = items.reduce((s, i) => s + i.subtotal, 0);
+  const iva = subtotal * IVA;
+  const total = subtotal + iva - 25000;
+  const subtotalMat = items.reduce((s, i) => s + i.matTotal, 0);
+  const subtotalMO = items.reduce((s, i) => s + i.moTotal, 0);
+  return { subtotal, iva, total, subtotalMat, subtotalMO };
+}
+
+// ── Formato moneda CR ─────────────────────────────────────────────────────────
+function fmtCR(n) {
+  return "₡" + Number(n || 0).toLocaleString("es-CR", {
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  });
+}
+
+// ── Generar Excel ─────────────────────────────────────────────────────────────
+function generarExcel(client, items) {
+  const wb = XLSX.utils.book_new();
+  const { subtotal, iva, total, subtotalMat, subtotalMO } = calcTotals(items);
+  const fecha = new Date().toLocaleDateString("es-CR");
+
+  // Hoja 1: Detalle interno con materiales desglosados
+  const rows = [
+    ["SS REMODELACIONES — PRESUPUESTO INTERNO"],
+    ["Ref:", client.referencia, "Fecha:", fecha, "Cliente:", client.nombre],
+    ["Proyecto:", client.asunto],
+    [],
+    ["Ítem", "Detalle", "Und", "Cantidad", "Precio Unit.", "Subtotal Mat.",
+     "Días", "Operarios", "Ayudantes", "MO Base", "Utilidad MO", "Total MO", "TOTAL ACTIVIDAD"],
+  ];
+
+  items.forEach(item => {
+    rows.push([
+      item.id, item.descripcion, "", "", "", "",
+      item.dias, item.operarios, item.ayudantes,
+      item.moBase, item.moUtilidad, item.moTotal, item.subtotal
+    ]);
+    item.materiales.forEach(m => {
+      rows.push([
+        "", `  → ${m.detalle} (${m.fuente})`,
+        m.und, m.cantidad, m.precio_unitario,
+        m.cantidad * m.precio_unitario
+      ]);
+    });
+    rows.push(["", "Subtotal materiales:", "", "", "", item.matTotal]);
+    rows.push([]);
+  });
+
+  rows.push(["", "TOTAL MATERIALES", "", "", "", subtotalMat,
+             "", "", "", "", "", "TOTAL M.O.", subtotalMO]);
+
+  // Hoja 2: Resumen para cotización
+  const resumen = [
+    ["Descripción", "Unidad", "Cantidad", "Materiales", "M.O.", "SUB TOTAL"],
+    ...items.map(i => [i.descripcion, i.unidad, i.cantidad, i.matTotal, i.moTotal, i.subtotal]),
+    [],
+    ["", "", "", "", "Sub total", subtotal],
+    ["", "", "", "", "IVA 13%", iva],
+    ["", "", "", "", "Reembolso visita", -25000],
+    ["", "", "", "", "TOTAL", total],
+  ];
+
+  const ws1 = XLSX.utils.aoa_to_sheet(rows);
+  const ws2 = XLSX.utils.aoa_to_sheet(resumen);
+
+  // Ancho de columnas
+  ws1["!cols"] = [{ wch: 6 }, { wch: 40 }, { wch: 8 }, { wch: 10 }, { wch: 12 }, { wch: 14 }];
+  ws2["!cols"] = [{ wch: 40 }, { wch: 8 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 16 }];
+
+  XLSX.utils.book_append_sheet(wb, ws1, "Detalle Interno");
+  XLSX.utils.book_append_sheet(wb, ws2, "Resumen Cotizacion");
+
+  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+}
+
+// ── Generar Word ──────────────────────────────────────────────────────────────
+async function generarWord(client, items) {
+  const { subtotal, iva, total } = calcTotals(items);
+  const fecha = new Date().toLocaleDateString("es-CR");
+
+  const NAVY = "1B3A6B";
+  const GOLD = "C8922A";
+  const LIGHT = "EEF2F8";
+  const WHITE = "FFFFFF";
+  const FONT = "Arial";
+
+  const run = (text, opts = {}) => new TextRun({ text, font: FONT, size: 20, ...opts });
+  const bold = (text, size = 20) => run(text, { bold: true, size });
+  const cell = (text, shade = false, center = false, hdr = false) =>
+    new TableCell({
+      shading: { fill: hdr ? NAVY : shade ? LIGHT : WHITE, type: ShadingType.CLEAR },
+      margins: { top: 60, bottom: 60, left: 100, right: 100 },
+      children: [new Paragraph({
+        alignment: center ? AlignmentType.CENTER : AlignmentType.LEFT,
+        children: [new TextRun({
+          text, font: FONT, size: hdr ? 18 : 18,
+          bold: hdr, color: hdr ? WHITE : "000000"
+        })]
+      })]
+    });
+
+  const doc = new Document({
+    sections: [{
+      properties: { page: { margin: { top: 1000, right: 1000, bottom: 1000, left: 1000 } } },
+      children: [
+
+        // Header empresa
+        new Paragraph({
+          spacing: { after: 120 },
+          children: [
+            bold("Solo Senso Sociedad Anónima", 28),
+            run("   |   San Isidro de Heredia   |   Tel: 7006-8477 / 6205-2075", { color: "555555" }),
+          ]
+        }),
+        new Paragraph({
+          spacing: { after: 200 },
+          border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: GOLD } },
+          children: [run("gerencia@ssremodelaciones.com   |   www.ssremodelaciones.com", { color: "555555" })]
+        }),
+
+        // Datos cotización
+        new Paragraph({ spacing: { before: 160, after: 60 }, children: [
+          bold("Fecha: "), run(fecha),
+          run("          "), bold("Ref.: "), run(client.referencia),
+        ]}),
+        new Paragraph({ spacing: { after: 60 }, children: [
+          bold("Dirigido a: "), run(client.nombre),
+          ...(client.email ? [run("          "), bold("Email: "), run(client.email)] : []),
+          ...(client.telefono ? [run("          "), bold("Tel: "), run(client.telefono)] : []),
+        ]}),
+        new Paragraph({ spacing: { after: 200 }, children: [bold("Asunto: "), run(client.asunto)] }),
+
+        new Paragraph({ spacing: { after: 80 }, children: [run(`Estimado/a `), bold(client.nombre), run(`;`)] }),
+        new Paragraph({ spacing: { after: 200 }, children: [
+          run("Atendiendo a su solicitud, anexo la propuesta correspondiente a: "), bold(client.asunto), run(".")
+        ]}),
+
+        // Trabajos incluidos
+        new Paragraph({ spacing: { after: 80 }, children: [bold("DETALLES DE LA OFERTA", 22)] }),
+        new Paragraph({ spacing: { after: 60 }, children: [bold("Los trabajos incluidos comprenden:")] }),
+        ...items.map(i => new Paragraph({
+          bullet: { level: 0 },
+          spacing: { after: 40 },
+          children: [run(i.descripcion)]
+        })),
+
+        new Paragraph({ spacing: { before: 200, after: 80 }, children: [] }),
+
+        // Tabla de partidas
+        new Table({
+          width: { size: 9360, type: WidthType.DXA },
+          columnWidths: [3600, 900, 900, 1320, 1320, 1320],
+          rows: [
+            new TableRow({ children: [
+              cell("Descripción", false, false, true),
+              cell("Unidad", false, true, true),
+              cell("Cantidad", false, true, true),
+              cell("Materiales", false, true, true),
+              cell("M.O.", false, true, true),
+              cell("SUB TOTAL", false, true, true),
+            ]}),
+            ...items.map((i, idx) => new TableRow({ children: [
+              cell(i.descripcion, idx % 2 === 1),
+              cell(i.unidad || "Und", idx % 2 === 1, true),
+              cell(String(i.cantidad || 1), idx % 2 === 1, true),
+              cell(fmtCR(i.matTotal), idx % 2 === 1, true),
+              cell(fmtCR(i.moTotal), idx % 2 === 1, true),
+              cell(fmtCR(i.subtotal), idx % 2 === 1, true),
+            ]})),
+            new TableRow({ children: [
+              new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [bold("Sub total")] })] }),
+              cell(fmtCR(subtotal), false, true),
+            ]}),
+            new TableRow({ children: [
+              new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("IVA 13%")] })] }),
+              cell(fmtCR(iva), false, true),
+            ]}),
+            new TableRow({ children: [
+              new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("Reembolso pago de visita")] })] }),
+              cell(fmtCR(-25000), false, true),
+            ]}),
+            new TableRow({ children: [
+              new TableCell({ columnSpan: 5, shading: { fill: NAVY, type: ShadingType.CLEAR }, children: [
+                new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: "TOTAL", font: FONT, bold: true, size: 22, color: WHITE })] })
+              ]}),
+              new TableCell({ shading: { fill: NAVY, type: ShadingType.CLEAR }, children: [
+                new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: fmtCR(total), font: FONT, bold: true, size: 22, color: WHITE })] })
+              ]}),
+            ]}),
+          ]
+        }),
+
+        // Condiciones
+        new Paragraph({ spacing: { before: 240, after: 80 }, children: [bold("CONDICIONES DE LA OFERTA", 22)] }),
+        ...[
+          "Todos los pagos mediante transferencia bancaria a cuentas de SS Remodelaciones.",
+          "Para iniciar obras se requiere aprobación por escrito de los trabajos cotizados.",
+          "Forma de pago: 60% para iniciar, 10% semanal (viernes) hasta finalizar, saldo al terminar.",
+          "No incluye costos de reparaciones ocultas no contempladas en esta cotización.",
+          "El área de trabajo debe estar libre de obstáculos al inicio de la obra.",
+          "Vigencia de la cotización: 15 días hábiles.",
+        ].map(t => new Paragraph({ bullet: { level: 0 }, spacing: { after: 40 }, children: [run(t)] })),
+
+        // Garantía
+        new Paragraph({ spacing: { before: 160, after: 80 }, children: [
+          bold("Garantía: "), run("SS Remodelaciones ofrece garantía de "),
+          bold("12 meses por desperfecto en la instalación"),
+          run(", a partir de la fecha de entrega y firma de recibido del cliente.")
+        ]}),
+
+        // Datos bancarios
+        new Paragraph({ spacing: { before: 160, after: 60 }, children: [bold("DATOS BANCARIOS", 22)] }),
+        new Paragraph({ spacing: { after: 40 }, children: [
+          bold("BAC Colones"), run(" | Nombre: Solo Senso SA | Cédula: 3-101-435423")
+        ]}),
+        new Paragraph({ spacing: { after: 200 }, children: [
+          run("Cuenta: 938419603 | IBAN: CR29010200009384196033 | "),
+          run("gerencia@ssremodelaciones.com")
+        ]}),
+
+        // Firmas
+        new Paragraph({ spacing: { before: 400, after: 400 }, children: [
+          run("_________________________          _________________________")
+        ]}),
+        new Paragraph({ spacing: { after: 40 }, children: [
+          bold("Ing. Darwin J. Guillón M."),
+          run("                    "), bold(client.nombre)
+        ]}),
+        new Paragraph({ children: [run("Gerente General — SS Remodelaciones")] }),
+
+        // Footer
+        new Paragraph({
+          spacing: { before: 400 },
+          border: { top: { style: BorderStyle.SINGLE, size: 6, color: NAVY } },
+          children: [run("WWW.SSREMODELACIONES.COM  |  @ssremodelaciones  |  Tel: 7006-8477  |  gerencia@ssremodelaciones.com",
+            { color: "888888", size: 16 })]
+        }),
+      ]
+    }]
+  });
+
+  return Packer.toBuffer(doc);
+}
+
+// ── Crear carpeta en Drive ────────────────────────────────────────────────────
+async function crearCarpetaDrive(client) {
+  const drive = await getDriveClient();
+
+  // Nombre limpio para la carpeta
+  const nombreCliente = (client.nombre || "Cliente")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9\s]/g, "").replace(/\s+/g, "_").slice(0, 30);
+
+  const folderName = `${client.referencia}_${nombreCliente}`;
+
+  const folder = await drive.files.create({
+    requestBody: {
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [DRIVE_FOLDER_2026],
+    },
+    fields: "id, name, webViewLink",
+  });
+
+  console.log(`📁 Drive: carpeta creada — ${folderName} (${folder.data.id})`);
+  return { id: folder.data.id, name: folderName, link: folder.data.webViewLink };
+}
+
+// ── Subir archivo a Drive ─────────────────────────────────────────────────────
+async function subirArchivo(drive, folderId, nombre, buffer, mimeType) {
+  const { Readable } = require("stream");
+  const stream = Readable.from(buffer);
+
+  const file = await drive.files.create({
+    requestBody: {
+      name: nombre,
+      parents: [folderId],
+    },
+    media: {
+      mimeType,
+      body: stream,
+    },
+    fields: "id, name, webViewLink",
+  });
+
+  console.log(`📄 Drive: archivo subido — ${nombre}`);
+  return file.data;
+}
+
+// ── Proceso completo de cotización ────────────────────────────────────────────
+async function procesarCotizacion({ client, items }) {
+  console.log(`📋 Procesando cotización ${client.referencia} — ${client.nombre}`);
+
+  try {
+    // 1. Generar archivos
+    console.log("⚙️  Generando Excel y Word...");
+    const [excelBuffer, wordBuffer] = await Promise.all([
+      Promise.resolve(generarExcel(client, items)),
+      generarWord(client, items),
+    ]);
+
+    // 2. Crear carpeta en Drive
+    const carpeta = await crearCarpetaDrive(client);
+
+    // 3. Subir archivos
+    const drive = await getDriveClient();
+    const [excelFile, wordFile] = await Promise.all([
+      subirArchivo(drive, carpeta.id,
+        `${client.referencia}_presupuesto_interno.xlsx`, excelBuffer,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+      subirArchivo(drive, carpeta.id,
+        `${client.referencia}_cotizacion_cliente.docx`, wordBuffer,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ]);
+
+    // 4. Crear nota de estado en la carpeta
+    await drive.files.create({
+      requestBody: {
+        name: "📋 ESTADO",
+        mimeType: "application/vnd.google-apps.document",
+        parents: [carpeta.id],
+      },
+    });
+
+    const { total } = calcTotals(items);
+
+    // 5. Notificar a Darwin por WhatsApp
+    const notif = [
+      "✅ *Nueva cotización lista en Drive*",
+      "",
+      `📋 *${client.referencia}*`,
+      `👤 Cliente: ${client.nombre}`,
+      `🏗️ Proyecto: ${client.asunto}`,
+      `💰 Total: ${fmtCR(total)}`,
+      "",
+      `📁 Carpeta: ${carpeta.link}`,
+      "",
+      "_SS Remodelaciones — Sistema automático_",
+    ].join("\n");
+
+    await sendText(DARWIN_WHATSAPP, notif);
+    console.log(`✅ Cotización ${client.referencia} procesada y notificada`);
+
+    return {
+      ok: true,
+      referencia: client.referencia,
+      carpeta: carpeta.link,
+      excel: excelFile.webViewLink,
+      word: wordFile.webViewLink,
+      total: fmtCR(total),
+    };
+
+  } catch (err) {
+    console.error("❌ Error procesando cotización:", err.message);
+    throw err;
+  }
+}
+
+module.exports = { procesarCotizacion };
