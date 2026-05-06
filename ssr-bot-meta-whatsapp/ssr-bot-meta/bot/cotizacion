@@ -52,7 +52,7 @@ function fmtCR(n) {
 // ── Generar Excel ─────────────────────────────────────────────────────────────
 function generarExcel(client, items) {
   const wb = XLSX.utils.book_new();
-  const { subtotal, iva, total, subtotalMat, subtotalMO } = calcTotals(items);
+  const { subtotal, imprevistos, baseImponible, iva, total, subtotalMat, subtotalMO } = calcTotals(items);
   const fecha = new Date().toLocaleDateString("es-CR");
 
   // Hoja 1: Detalle interno con materiales desglosados
@@ -113,7 +113,7 @@ function generarExcel(client, items) {
 
 // ── Generar Word ──────────────────────────────────────────────────────────────
 async function generarWord(client, items) {
-  const { subtotal, iva, total } = calcTotals(items);
+  const { subtotal, imprevistos, baseImponible, iva, total } = calcTotals(items);
   const fecha = new Date().toLocaleDateString("es-CR");
 
   const NAVY = "1B3A6B";
@@ -215,14 +215,6 @@ async function generarWord(client, items) {
             new TableRow({ children: [
               new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [bold("Sub total")] })] }),
               cell(fmtCR(subtotal), false, true),
-            ]}),
-            new TableRow({ children: [
-              new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("Imprevistos 5%")] })] }),
-              cell(fmtCR(imprevistos), false, true),
-            ]}),
-            new TableRow({ children: [
-              new TableCell({ columnSpan: 5, shading: { fill: "EEF2F8", type: ShadingType.CLEAR }, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [bold("Base imponible")] })] }),
-              new TableCell({ shading: { fill: "EEF2F8", type: ShadingType.CLEAR }, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [bold(fmtCR(baseImponible))] })] }),
             ]}),
             new TableRow({ children: [
               new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("IVA 13%")] })] }),
