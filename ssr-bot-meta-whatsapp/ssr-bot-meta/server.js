@@ -228,6 +228,46 @@ app.get("/test-reminders", async (_req, res) => {
   res.json({ ok: true, message: "Recordatorios ejecutados" });
 });
 
+// ── Cotizador: procesar notas con IA ─────────────────────────────────────────
+app.post("/api/procesar-notas", async (req, res) => {
+  try {
+    const { notas, fotos, pdfs } = req.body;
+    const Anthropic = require("@anthropic-ai/sdk");
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const pdfCtx = (pdfs||[]).length > 0
+      ? "\n\nDOCUMENTOS/PLANOS:\n" + pdfs.map(p => "--- " + p.name + " ---\n" + p.text).join("\n\n")
+      : "";
+
+    const prompt = "Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n" +
+      (notas || "(ver fotos/documentos)") + pdfCtx +
+      "\n\nPrecios: Construplaza, EPA, El Lagar CR. MO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%.\nMax 8 actividades. SOLO NUMEROS en precios, sin simbolos de moneda.\n\n" +
+      'RESPONDE SOLO JSON VALIDO:\n{"asunto":"texto","items":[{"id":1,"descripcion":"texto","unidad":"Und","cantidad":1,"dias":2,"operarios":1,"ayudantes":1,"materiales":[{"detalle":"texto","und":"Und","cantidad":5,"precio_unitario":3500,"fuente":"Construplaza"}]}]}';
+
+    const content = (fotos||[]).length > 0
+      ? [...fotos.map(f => ({ type: "image", source: { type: "base64", media_type: f.mimeType, data: f.base64 } })), { type: "text", text: prompt }]
+      : prompt;
+
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 4000,
+      system: "Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.",
+      messages: [{ role: "user", content }],
+    });
+
+    const text = response.content?.[0]?.text || "";
+    let json = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+    const a = json.indexOf("{"), b = json.lastIndexOf("}");
+    if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
+    json = json.slice(a, b + 1).replace(/,(\s*[}\]])/g, "$1");
+
+    res.json({ ok: true, data: JSON.parse(json) });
+  } catch (err) {
+    console.error("❌ /api/procesar-notas:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Cotizador SSR ─────────────────────────────────────────────────────────────
 app.post("/api/cotizacion", async (req, res) => {
   try {
