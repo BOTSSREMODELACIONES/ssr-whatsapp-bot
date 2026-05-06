@@ -473,22 +473,15 @@ async function procesar(){
   const prompt="Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n"+(S.notas||"(ver fotos/documentos)")+pdfCtx+"\n\nPrecios: Construplaza, EPA, El Lagar CR. MO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%.\nMax 8 actividades. SOLO NUMEROS en precios, sin simbolos de moneda.\n\nRESPONDE SOLO JSON VALIDO:\n{\"asunto\":\"texto\",\"items\":[{\"id\":1,\"descripcion\":\"texto\",\"unidad\":\"Und\",\"cantidad\":1,\"dias\":2,\"operarios\":1,\"ayudantes\":1,\"materiales\":[{\"detalle\":\"texto\",\"und\":\"Und\",\"cantidad\":5,\"precio_unitario\":3500,\"fuente\":\"Construplaza\"}]}]}";
 
   try{
-    const content=S.fotos.length>0
-      ?[...S.fotos.map(f=>({type:"image",source:{type:"base64",media_type:f.mimeType,data:f.base64}})),{type:"text",text:prompt}]
-      :prompt;
-
-    const r=await fetch("https://api.anthropic.com/v1/messages",{
+    // Llamar al backend Railway (que llama a Claude server-side)
+    const r=await fetch(BACKEND+"/api/procesar-notas",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,
-        system:"Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.",
-        messages:[{role:"user",content}]})
+      body:JSON.stringify({notas:S.notas,fotos:S.fotos,pdfs:S.pdfs})
     });
     const data=await r.json();
     clearInterval(iv);
-    if(data.error) throw new Error(data.error.message);
-    const tb=data.content?.find(b=>b.type==="text");
-    if(!tb?.text) throw new Error("Sin respuesta de texto");
-    const parsed=JSON.parse(cleanJSON(tb.text));
+    if(!data.ok) throw new Error(data.error||"Error del servidor");
+    const parsed=data.data;
     if(parsed.asunto&&!S.client.asunto) S.client.asunto=parsed.asunto;
     S.items=(parsed.items||[]).map(calcItem);
     goStep(2);
