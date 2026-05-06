@@ -1,0 +1,568 @@
+import { useState, useRef } from "react";
+import * as XLSX from "xlsx";
+
+const COST_OPERARIO = 27000;
+const COST_AYUDANTE = 20000;
+const IVA = 0.13;
+const UTILIDAD_MO = 0.5;
+
+const REF_PREFIX = () => {
+  const now = new Date();
+  const yy = String(now.getFullYear()).slice(-2);
+  const count = String(Math.floor(Math.random() * 900) + 100);
+  return `REF-${count}-${yy}`;
+};
+
+const fmt = (n) => "₡" + Number(n || 0).toLocaleString("es-CR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+export default function CotizadorSSR() {
+  const [step, setStep] = useState("input");
+  const [client, setClient] = useState({ nombre: "", email: "", telefono: "", asunto: "", referencia: REF_PREFIX() });
+  const [notas, setNotas] = useState("");
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loadMsg, setLoadMsg] = useState("");
+  const [error, setError] = useState("");
+  const previewRef = useRef(null);
+
+  async function procesar() {
+    if (!notas.trim() || !client.nombre) { setError("Completá el nombre del cliente y las notas de la visita."); return; }
+    setError(""); setLoading(true); setStep("processing");
+
+    const msgs = ["Interpretando notas de visita...", "Buscando precios en Construplaza...", "Consultando EPA y El Lagar...", "Armando presupuesto..."];
+    let mi = 0;
+    setLoadMsg(msgs[mi]);
+    const interval = setInterval(() => { mi = (mi + 1) % msgs.length; setLoadMsg(msgs[mi]); }, 2200);
+
+    try {
+      const prompt = `Sos un maestro de obras y presupuestista experto en remodelaciones en Costa Rica. Analizá estas notas de visita y generá un presupuesto estructurado.
+
+NOTAS DE VISITA:
+${notas}
+
+INSTRUCCIONES:
+1. Identificá cada actividad/partida de trabajo
+2. Para cada actividad, listá los materiales necesarios con cantidades estimadas y busca precios ACTUALES en Construplaza CR, EPA CR o El Lagar CR usando web search
+3. Estimá días de trabajo, operarios y ayudantes necesarios
+4. Usá estos costos de mano de obra: Operario ₡27.000/día, Ayudante ₡20.000/día, Utilidad MO = 50%
+
+Respondé SOLO con JSON puro, sin markdown ni texto adicional:
+{
+  "asunto": "descripción breve del proyecto para el encabezado de cotización",
+  "items": [
+    {
+      "id": 1,
+      "descripcion": "nombre de la actividad",
+      "unidad": "Und|m2|ml|etc",
+      "cantidad": 1,
+      "dias": 2,
+      "operarios": 1,
+      "ayudantes": 1,
+      "materiales": [
+        {
+          "detalle": "nombre material",
+          "und": "unidad",
+          "cantidad": 5,
+          "precio_unitario": 3500,
+          "fuente": "Construplaza|EPA|El Lagar|Estimado"
+        }
+      ],
+      "nota_precio": "breve nota sobre cómo se obtuvieron los precios"
+    }
+  ]
+}`;
+
+      const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 4000,
+          system: `Sos maestro de obras y presupuestista experto en remodelaciones en Costa Rica con mas de 10 anos de experiencia. Conoces perfectamente los precios actuales de Construplaza, EPA y El Lagar CR. Respondes SOLO con JSON valido y puro, absolutamente sin markdown, sin backticks, sin texto antes ni despues del JSON.`,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+
+      const data = await resp.json();
+      clearInterval(interval);
+
+      if (data.error) throw new Error(data.error.message || "Error de API");
+
+      const textBlock = data.content?.find(b => b.type === "text");
+      if (!textBlock?.text) throw new Error("Sin respuesta de texto");
+
+      // Extraccion robusta del JSON
+      let raw = textBlock.text.trim();
+      // Remover markdown si viene igual
+      raw = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "").trim();
+      // Encontrar primer { y ultimo }
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start === -1 || end === -1) throw new Error("No se encontro JSON en la respuesta");
+      const parsed = JSON.parse(raw.slice(start, end + 1));
+
+      if (parsed.asunto && !client.asunto) setClient(c => ({ ...c, asunto: parsed.asunto }));
+
+      const enriched = (parsed.items || []).map(item => {
+        const matTotal = item.materiales.reduce((s, m) => s + (m.cantidad * m.precio_unitario), 0);
+        const moBase = (item.dias || 1) * ((item.operarios || 1) * COST_OPERARIO + (item.ayudantes || 0) * COST_AYUDANTE);
+        const moUtilidad = moBase * UTILIDAD_MO;
+        const moTotal = moBase + moUtilidad;
+        return { ...item, matTotal, moBase, moUtilidad, moTotal, subtotal: matTotal + moTotal };
+      });
+
+      setItems(enriched);
+      setStep("review");
+    } catch (e) {
+      clearInterval(interval);
+      setError("Error procesando: " + e.message);
+      setStep("input");
+    }
+    setLoading(false);
+  }
+
+  function updateMaterial(itemIdx, matIdx, field, value) {
+    setItems(prev => {
+      const next = prev.map((item, i) => {
+        if (i !== itemIdx) return item;
+        const mats = item.materiales.map((m, j) => j !== matIdx ? m : { ...m, [field]: field === "detalle" || field === "und" || field === "fuente" ? value : parseFloat(value) || 0 });
+        const matTotal = mats.reduce((s, m) => s + (m.cantidad * m.precio_unitario), 0);
+        const moBase = (item.dias || 1) * ((item.operarios || 1) * COST_OPERARIO + (item.ayudantes || 0) * COST_AYUDANTE);
+        const moUtilidad = moBase * UTILIDAD_MO;
+        const moTotal = moBase + moUtilidad;
+        return { ...item, materiales: mats, matTotal, moBase, moUtilidad, moTotal, subtotal: matTotal + moTotal };
+      });
+      return next;
+    });
+  }
+
+  function updateItem(idx, field, value) {
+    setItems(prev => prev.map((item, i) => {
+      if (i !== idx) return item;
+      const updated = { ...item, [field]: field === "descripcion" || field === "unidad" ? value : parseFloat(value) || 0 };
+      const moBase = (updated.dias || 1) * ((updated.operarios || 1) * COST_OPERARIO + (updated.ayudantes || 0) * COST_AYUDANTE);
+      const moUtilidad = moBase * UTILIDAD_MO;
+      const moTotal = moBase + moUtilidad;
+      return { ...updated, moBase, moUtilidad, moTotal, subtotal: updated.matTotal + moTotal };
+    }));
+  }
+
+  function addMaterial(itemIdx) {
+    setItems(prev => prev.map((item, i) => i !== itemIdx ? item : {
+      ...item, materiales: [...item.materiales, { detalle: "", und: "Und", cantidad: 1, precio_unitario: 0, fuente: "Estimado" }]
+    }));
+  }
+
+  function removeMaterial(itemIdx, matIdx) {
+    setItems(prev => prev.map((item, i) => {
+      if (i !== itemIdx) return item;
+      const mats = item.materiales.filter((_, j) => j !== matIdx);
+      const matTotal = mats.reduce((s, m) => s + (m.cantidad * m.precio_unitario), 0);
+      return { ...item, materiales: mats, matTotal, subtotal: matTotal + item.moTotal };
+    }));
+  }
+
+  const subtotalMat = items.reduce((s, i) => s + i.matTotal, 0);
+  const subtotalMO = items.reduce((s, i) => s + i.moTotal, 0);
+  const subtotal = items.reduce((s, i) => s + i.subtotal, 0);
+  const iva = subtotal * IVA;
+  const total = subtotal + iva - 25000;
+
+  // URL del backend Railway
+  const BACKEND = "https://ssr-whatsapp-bot-production.up.railway.app";
+
+  async function guardarEnDrive() {
+    try {
+      const resp = await fetch(`${BACKEND}/api/cotizacion`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client, items }),
+      });
+      const data = await resp.json();
+      if (data.ok) {
+        alert(`✅ Cotización guardada en Drive!\n\nCarpeta: ${data.carpeta}\nTotal: ${data.total}`);
+      } else {
+        alert("❌ Error: " + data.error);
+      }
+    } catch (e) {
+      alert("❌ Error conectando con el servidor: " + e.message);
+    }
+  }
+
+  function descargarExcel() {
+    const wb = XLSX.utils.book_new();
+
+    // Hoja 1: Detalle de materiales
+    const detalleRows = [
+      ["SS REMODELACIONES — PRESUPUESTO INTERNO"],
+      ["Ref:", client.referencia, "Fecha:", new Date().toLocaleDateString("es-CR"), "Cliente:", client.nombre],
+      [],
+      ["Ítem", "Detalle", "Und", "Cantidad", "Precio Unit.", "Subtotal Mat.", "Días", "Operarios", "Ayudantes", "MO Base", "Utilidad MO", "Total MO", "TOTAL ACTIVIDAD"],
+    ];
+
+    items.forEach(item => {
+      detalleRows.push([item.id, item.descripcion, "", "", "", "", item.dias, item.operarios, item.ayudantes, item.moBase, item.moUtilidad, item.moTotal, item.subtotal]);
+      item.materiales.forEach(m => {
+        detalleRows.push(["", "  → " + m.detalle + " (" + m.fuente + ")", m.und, m.cantidad, m.precio_unitario, m.cantidad * m.precio_unitario]);
+      });
+      detalleRows.push(["", "Subtotal materiales:", "", "", "", item.matTotal]);
+      detalleRows.push([]);
+    });
+
+    detalleRows.push(["", "TOTAL MATERIALES", "", "", "", subtotalMat, "", "", "", "", "", "TOTAL MO", subtotalMO]);
+    detalleRows.push([]);
+
+    // Hoja 2: Resumen (igual al Word)
+    const resumenRows = [
+      ["Descripción", "Unidad", "Cantidad", "Materiales", "MO", "SUB TOTAL"],
+      ...items.map(i => [i.descripcion, i.unidad, i.cantidad, i.matTotal, i.moTotal, i.subtotal]),
+      [],
+      ["", "", "", "", "Sub total", subtotal],
+      ["", "", "", "", "IVA 13%", iva],
+      ["", "", "", "", "Reembolso visita", -25000],
+      ["", "", "", "", "TOTAL", total],
+    ];
+
+    const ws1 = XLSX.utils.aoa_to_sheet(detalleRows);
+    const ws2 = XLSX.utils.aoa_to_sheet(resumenRows);
+    XLSX.utils.book_append_sheet(wb, ws1, "Detalle Interno");
+    XLSX.utils.book_append_sheet(wb, ws2, "Resumen Cotizacion");
+    XLSX.writeFile(wb, `${client.referencia}_presupuesto_interno.xlsx`);
+  }
+
+  function imprimirWord() {
+    const content = document.getElementById("word-preview");
+    const w = window.open("", "_blank");
+    w.document.write(`<html><head><title>${client.referencia}</title><style>
+      body{font-family:Arial,sans-serif;font-size:11pt;margin:2cm}
+      table{width:100%;border-collapse:collapse;margin:10px 0}
+      th{background:#1B3A6B;color:white;padding:6px 8px;font-size:10pt}
+      td{border:1px solid #ccc;padding:5px 8px;font-size:10pt}
+      .totals td{border:none;padding:3px 8px}
+      .total-row{font-weight:bold;background:#EEF2F8}
+      h3{color:#1B3A6B}
+      .footer-table td{border:none;font-size:9pt;color:#555}
+    </style></head><body>${content.innerHTML}</body></html>`);
+    w.document.close();
+    w.print();
+  }
+
+  const S = styles;
+
+  return (
+    <div style={S.root}>
+      {/* Header */}
+      <div style={S.header}>
+        <div style={S.headerLeft}>
+          <div style={S.logo}>SS</div>
+          <div>
+            <div style={S.headerTitle}>Agente de Cotizaciones</div>
+            <div style={S.headerSub}>SS Remodelaciones — Sistema automático</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {["Datos", "Procesando", "Revisión", "Exportar"].map((s, i) => {
+            const stepMap = ["input", "processing", "review", "export"];
+            const active = step === stepMap[i];
+            const done = ["input", "processing", "review", "export"].indexOf(step) > i;
+            return (
+              <div key={s} style={{ ...S.stepDot, background: active ? "#1B3A6B" : done ? "#2ECC71" : "#e0e0e0", color: active || done ? "white" : "#aaa" }}>
+                {done ? "✓" : i + 1}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div style={S.body}>
+        {/* STEP 1: INPUT */}
+        {step === "input" && (
+          <div>
+            <div style={S.sectionTitle}>Información del cliente</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 20 }}>
+              {[
+                ["Nombre / Empresa", "nombre", "Nathalie Alpízar"],
+                ["Email", "email", "cliente@email.com"],
+                ["Teléfono", "telefono", "+506 8888-0000"],
+                ["N° Referencia", "referencia", "REF-037-26"],
+                ["Asunto (se autogenera)", "asunto", "Remodelación baño..."],
+              ].map(([label, field, ph]) => (
+                <div key={field}>
+                  <div style={S.label}>{label}</div>
+                  <input value={client[field]} onChange={e => setClient(c => ({ ...c, [field]: e.target.value }))} placeholder={ph}
+                    style={S.input} />
+                </div>
+              ))}
+            </div>
+
+            <div style={S.sectionTitle}>Notas de la visita</div>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 8 }}>
+              Escribí o dictá exactamente lo que anotó Melvin en la visita. Cuanto más detalle, más precisa la cotización.
+            </div>
+            <textarea
+              value={notas}
+              onChange={e => setNotas(e.target.value)}
+              rows={12}
+              placeholder={`Ejemplo:\nCliente: Nathalie, baño principal en San Francisco de Heredia\n\n- Demoler tina existente y reparar el piso, zona de unos 2m2\n- Cambiar todo el enchape del baño, paredes y piso, aprox 19m2. Cerámica tipo KEROS o similar de EPA\n- Fabricar mueble de baño melamina blanca 80cm con lavamanos sobre el mueble\n- Instalar mampara de vidrio 6mm y puerta de vidrio con accesorios inox para la ducha nueva\n- Bote de escombros y transporte de materiales\n\nObservaciones: baño en buen estado general, problema principal es la tina que quieren eliminar.`}
+              style={{ ...S.input, resize: "vertical", fontFamily: "monospace", fontSize: 13, lineHeight: 1.6 }}
+            />
+
+            {error && <div style={S.error}>{error}</div>}
+
+            <button onClick={procesar} style={S.btnPrimary}>
+              → Procesar notas y buscar precios
+            </button>
+          </div>
+        )}
+
+        {/* STEP 2: PROCESSING */}
+        {step === "processing" && (
+          <div style={{ textAlign: "center", padding: "60px 20px" }}>
+            <div style={{ fontSize: 32, marginBottom: 20 }}>⟳</div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: "#1B3A6B", marginBottom: 8 }}>{loadMsg}</div>
+            <div style={{ fontSize: 13, color: "#aaa" }}>Buscando precios en Construplaza, EPA y El Lagar...</div>
+            <div style={{ marginTop: 24, height: 4, background: "#eee", borderRadius: 2, overflow: "hidden" }}>
+              <div style={{ height: "100%", background: "#1B3A6B", animation: "progress 3s ease-in-out infinite", width: "60%", borderRadius: 2 }} />
+            </div>
+            <style>{`@keyframes progress{0%{transform:translateX(-100%)}100%{transform:translateX(200%)}}`}</style>
+          </div>
+        )}
+
+        {/* STEP 3: REVIEW */}
+        {step === "review" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <span style={S.sectionTitle}>Revisión del presupuesto</span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setStep("input")} style={S.btnSecondary}>← Volver</button>
+                <button onClick={() => setStep("export")} style={S.btnPrimary}>Aprobar y exportar →</button>
+              </div>
+            </div>
+
+            {/* Client summary */}
+            <div style={{ ...S.card, marginBottom: 16, display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 12 }}>
+              {[["Ref", client.referencia], ["Cliente", client.nombre], ["Fecha", new Date().toLocaleDateString("es-CR")], ["Total", fmt(total)]].map(([k, v]) => (
+                <div key={k}><div style={S.label}>{k}</div><div style={{ fontWeight: 600, color: "#1B3A6B" }}>{v}</div></div>
+              ))}
+            </div>
+
+            {items.map((item, ii) => (
+              <div key={item.id} style={{ ...S.card, marginBottom: 12 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "3fr 1fr 1fr 1fr 1fr 1fr", gap: 8, marginBottom: 10, alignItems: "end" }}>
+                  <div>
+                    <div style={S.label}>Actividad {item.id}</div>
+                    <input value={item.descripcion} onChange={e => updateItem(ii, "descripcion", e.target.value)} style={S.inputSm} />
+                  </div>
+                  {[["Und", "unidad"], ["Días", "dias"], ["Operarios", "operarios"], ["Ayudantes", "ayudantes"]].map(([l, f]) => (
+                    <div key={f}>
+                      <div style={S.label}>{l}</div>
+                      <input value={item[f]} onChange={e => updateItem(ii, f, e.target.value)} style={{ ...S.inputSm, width: "100%" }} />
+                    </div>
+                  ))}
+                  <div>
+                    <div style={S.label}>Total MO</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "#555", paddingTop: 8 }}>{fmt(item.moTotal)}</div>
+                  </div>
+                </div>
+
+                {/* Materiales */}
+                <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ background: "#f5f7fb" }}>
+                      {["Material", "Und", "Cantidad", "P. Unitario", "Subtotal", "Fuente", ""].map(h => (
+                        <th key={h} style={{ textAlign: "left", padding: "5px 8px", color: "#555", fontWeight: 500 }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {item.materiales.map((m, mi) => (
+                      <tr key={mi} style={{ borderBottom: "1px solid #eee" }}>
+                        <td style={{ padding: "4px 6px" }}><input value={m.detalle} onChange={e => updateMaterial(ii, mi, "detalle", e.target.value)} style={S.inputXs} /></td>
+                        <td style={{ padding: "4px 6px" }}><input value={m.und} onChange={e => updateMaterial(ii, mi, "und", e.target.value)} style={{ ...S.inputXs, width: 50 }} /></td>
+                        <td style={{ padding: "4px 6px" }}><input type="number" value={m.cantidad} onChange={e => updateMaterial(ii, mi, "cantidad", e.target.value)} style={{ ...S.inputXs, width: 70 }} /></td>
+                        <td style={{ padding: "4px 6px" }}><input type="number" value={m.precio_unitario} onChange={e => updateMaterial(ii, mi, "precio_unitario", e.target.value)} style={{ ...S.inputXs, width: 90 }} /></td>
+                        <td style={{ padding: "4px 6px", fontWeight: 600, color: "#1B3A6B" }}>{fmt(m.cantidad * m.precio_unitario)}</td>
+                        <td style={{ padding: "4px 6px" }}>
+                          <select value={m.fuente} onChange={e => updateMaterial(ii, mi, "fuente", e.target.value)} style={S.inputXs}>
+                            {["Construplaza", "EPA", "El Lagar", "Estimado"].map(f => <option key={f}>{f}</option>)}
+                          </select>
+                        </td>
+                        <td><button onClick={() => removeMaterial(ii, mi)} style={{ background: "none", border: "none", color: "#e74c3c", cursor: "pointer", fontSize: 14 }}>✕</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
+                  <button onClick={() => addMaterial(ii)} style={{ ...S.btnSecondary, fontSize: 12, padding: "4px 10px" }}>+ Material</button>
+                  <div style={{ fontSize: 13 }}>Mat: <b>{fmt(item.matTotal)}</b> | MO: <b>{fmt(item.moTotal)}</b> | <span style={{ color: "#1B3A6B", fontWeight: 700 }}>Total: {fmt(item.subtotal)}</span></div>
+                </div>
+              </div>
+            ))}
+
+            {/* Totales */}
+            <div style={{ ...S.card, maxWidth: 380, marginLeft: "auto" }}>
+              {[["Subtotal materiales", subtotalMat], ["Subtotal M.O.", subtotalMO], ["Sub total", subtotal], ["IVA 13%", iva], ["Reembolso visita", -25000]].map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 13, borderBottom: "1px solid #eee" }}>
+                  <span style={{ color: "#666" }}>{k}</span><span>{fmt(v)}</span>
+                </div>
+              ))}
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", fontSize: 16, fontWeight: 700, color: "#1B3A6B" }}>
+                <span>TOTAL</span><span>{fmt(total)}</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* STEP 4: EXPORT */}
+        {step === "export" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+              <div style={S.sectionTitle}>Exportar documentos</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setStep("review")} style={S.btnSecondary}>← Editar</button>
+                <button onClick={guardarEnDrive} style={{ ...S.btnPrimary, background: "#C8922A" }}>☁ Guardar en Drive + Notificar</button>
+                <button onClick={descargarExcel} style={{ ...S.btnPrimary, background: "#1E8449" }}>↓ Excel local</button>
+                <button onClick={imprimirWord} style={{ ...S.btnPrimary, background: "#1B3A6B" }}>⎙ Imprimir</button>
+              </div>
+            </div>
+
+            {/* Word Preview */}
+            <div id="word-preview" ref={previewRef} style={{ background: "white", padding: "40px 50px", border: "1px solid #ddd", borderRadius: 4, fontFamily: "Arial, sans-serif", fontSize: "11pt", color: "#000", lineHeight: 1.5 }}>
+              {/* Header */}
+              <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 16 }}>
+                <tbody>
+                  <tr>
+                    <td style={{ width: 120, verticalAlign: "top" }}>
+                      <div style={{ fontWeight: 700, fontSize: 16, color: "#1B3A6B" }}>SS</div>
+                      <div style={{ fontSize: 9, color: "#1B3A6B" }}>REMODELACIONES</div>
+                    </td>
+                    <td style={{ fontSize: 10, color: "#333" }}>
+                      <b>Solo Senso Sociedad Anónima</b><br />
+                      San Isidro de Heredia | Tel: (506) 7006-8477 / 6205-2075<br />
+                      gerencia@ssremodelaciones.com | www.ssremodelaciones.com
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 12, fontSize: 10 }}>
+                <tbody>
+                  <tr>
+                    <td style={{ border: "1px solid #ccc", padding: "4px 8px" }}><b>Fecha:</b> {new Date().toLocaleDateString("es-CR")}</td>
+                    <td style={{ border: "1px solid #ccc", padding: "4px 8px" }}><b>Ref.:</b> {client.referencia}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ border: "1px solid #ccc", padding: "4px 8px" }} colSpan={2}>
+                      <b>Dirigido a:</b> {client.nombre} &nbsp;&nbsp;
+                      {client.email && <><b>Email:</b> {client.email} &nbsp;&nbsp;</>}
+                      {client.telefono && <><b>Tel:</b> {client.telefono}</>}
+                    </td>
+                  </tr>
+                  <tr>
+                    <td style={{ border: "1px solid #ccc", padding: "4px 8px" }} colSpan={2}><b>Asunto:</b> {client.asunto}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <p>Estimado/a <b>{client.nombre}</b>;</p>
+              <p>Atendiendo a su solicitud, anexo la propuesta correspondiente a: <b>{client.asunto}</b>.</p>
+
+              <h3 style={{ color: "#1B3A6B", fontSize: 12 }}>DETALLES DE LA OFERTA</h3>
+              <p><b>Los trabajos incluidos en esta propuesta comprenden:</b></p>
+              <ul style={{ margin: "6px 0 12px 0", paddingLeft: 20 }}>
+                {items.map(i => <li key={i.id} style={{ marginBottom: 3 }}>{i.descripcion}</li>)}
+              </ul>
+
+              <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 12 }}>
+                <thead>
+                  <tr style={{ background: "#1B3A6B" }}>
+                    {["Descripción", "Unidad", "Cantidad", "Materiales", "M.O.", "SUB TOTAL"].map(h => (
+                      <th key={h} style={{ color: "white", padding: "6px 8px", fontSize: 10, textAlign: h === "Descripción" ? "left" : "right" }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((i, idx) => (
+                    <tr key={i.id} style={{ background: idx % 2 ? "#f5f7fb" : "white" }}>
+                      <td style={{ border: "1px solid #ddd", padding: "5px 8px", fontSize: 10 }}>{i.descripcion}</td>
+                      <td style={{ border: "1px solid #ddd", padding: "5px 8px", fontSize: 10, textAlign: "center" }}>{i.unidad}</td>
+                      <td style={{ border: "1px solid #ddd", padding: "5px 8px", fontSize: 10, textAlign: "right" }}>{i.cantidad?.toLocaleString()}</td>
+                      <td style={{ border: "1px solid #ddd", padding: "5px 8px", fontSize: 10, textAlign: "right" }}>{fmt(i.matTotal)}</td>
+                      <td style={{ border: "1px solid #ddd", padding: "5px 8px", fontSize: 10, textAlign: "right" }}>{fmt(i.moTotal)}</td>
+                      <td style={{ border: "1px solid #ddd", padding: "5px 8px", fontSize: 10, textAlign: "right", fontWeight: 600 }}>{fmt(i.subtotal)}</td>
+                    </tr>
+                  ))}
+                  {[["Sub total", subtotal], ["IVA 13%", iva], ["Reembolso pago de visita", -25000]].map(([k, v]) => (
+                    <tr key={k}>
+                      <td colSpan={5} style={{ border: "1px solid #ddd", padding: "4px 8px", fontSize: 10, textAlign: "right" }}>{k}</td>
+                      <td style={{ border: "1px solid #ddd", padding: "4px 8px", fontSize: 10, textAlign: "right" }}>{fmt(v)}</td>
+                    </tr>
+                  ))}
+                  <tr style={{ background: "#1B3A6B" }}>
+                    <td colSpan={5} style={{ padding: "6px 8px", fontSize: 11, textAlign: "right", color: "white", fontWeight: 700 }}>TOTAL</td>
+                    <td style={{ padding: "6px 8px", fontSize: 11, textAlign: "right", color: "white", fontWeight: 700 }}>{fmt(total)}</td>
+                  </tr>
+                </tbody>
+              </table>
+
+              <h3 style={{ color: "#1B3A6B", fontSize: 12 }}>C) CONDICIONES DE LA OFERTA</h3>
+              <ul style={{ fontSize: 10, paddingLeft: 20, lineHeight: 1.7 }}>
+                <li>Todos los pagos mediante transferencia bancaria a cuentas de SS Remodelaciones.</li>
+                <li>Para iniciar obras se requiere aprobación por escrito de los trabajos cotizados.</li>
+                <li><b>Forma de pago:</b> 60% para iniciar, 10% semanal (viernes) hasta finalizar, saldo al terminar.</li>
+                <li>No incluye costos de reparaciones ocultas no contempladas en esta cotización.</li>
+                <li>Vigencia de la cotización: <b>15 días hábiles</b>.</li>
+              </ul>
+
+              <p style={{ fontSize: 10, marginTop: 8 }}><b>Garantía:</b> SS Remodelaciones ofrece garantía de <b>12 meses por desperfecto en la instalación</b>, a partir de la fecha de entrega y firma de recibido del cliente.</p>
+
+              <h3 style={{ color: "#1B3A6B", fontSize: 12 }}>DATOS BANCARIOS</h3>
+              <p style={{ fontSize: 10 }}>
+                <b>BAC Colones</b> | Nombre: Solo Senso SA | Cédula: 3-101-435423<br />
+                Cuenta corriente: 938419603 | IBAN: CR29010200009384196033<br />
+                Email notif.: gerencia@ssremodelaciones.com
+              </p>
+
+              <div style={{ marginTop: 30, display: "flex", justifyContent: "space-between", fontSize: 10 }}>
+                <div style={{ textAlign: "center", width: "40%" }}>
+                  <div style={{ borderTop: "1px solid #333", paddingTop: 4 }}>Ing. Darwin J. Guillón M.<br /><b>Gerente General</b></div>
+                </div>
+                <div style={{ textAlign: "center", width: "40%" }}>
+                  <div style={{ borderTop: "1px solid #333", paddingTop: 4 }}>{client.nombre}<br /><b>Cliente</b></div>
+                </div>
+              </div>
+
+              <table style={{ width: "100%", marginTop: 20, borderTop: "2px solid #1B3A6B" }}>
+                <tbody>
+                  <tr>
+                    <td style={{ fontSize: 9, color: "#555", paddingTop: 6 }}>WWW.SSREMODELACIONES.COM | @ssremodelaciones | Tel: 7006-8477 | gerencia@ssremodelaciones.com</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  root: { fontFamily: "'Segoe UI', Arial, sans-serif", background: "#F4F6F9", minHeight: "100vh" },
+  header: { background: "#1B3A6B", padding: "14px 24px", display: "flex", alignItems: "center", justifyContent: "space-between" },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
+  logo: { width: 36, height: 36, background: "#C8922A", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, color: "white", fontSize: 14 },
+  headerTitle: { color: "white", fontWeight: 600, fontSize: 15 },
+  headerSub: { color: "rgba(255,255,255,0.6)", fontSize: 11 },
+  stepDot: { width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600, transition: "all .2s" },
+  body: { maxWidth: 1000, margin: "0 auto", padding: "24px 20px" },
+  sectionTitle: { fontSize: 14, fontWeight: 600, color: "#1B3A6B", marginBottom: 12, borderBottom: "2px solid #C8922A", paddingBottom: 6, display: "block" },
+  card: { background: "white", borderRadius: 8, padding: "16px 18px", boxShadow: "0 1px 4px rgba(0,0,0,0.08)" },
+  label: { fontSize: 11, color: "#888", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" },
+  input: { width: "100%", border: "1px solid #ddd", borderRadius: 6, padding: "9px 12px", fontSize: 13, outline: "none", background: "white", color: "#222" },
+  inputSm: { width: "100%", border: "1px solid #ddd", borderRadius: 4, padding: "6px 8px", fontSize: 12, outline: "none" },
+  inputXs: { border: "1px solid #e5e5e5", borderRadius: 3, padding: "3px 6px", fontSize: 12, outline: "none", width: "100%" },
+  btnPrimary: { background: "#1B3A6B", color: "white", border: "none", borderRadius: 6, padding: "10px 20px", fontSize: 13, cursor: "pointer", fontWeight: 600, marginTop: 16 },
+  btnSecondary: { background: "white", color: "#1B3A6B", border: "1px solid #1B3A6B", borderRadius: 6, padding: "9px 18px", fontSize: 13, cursor: "pointer" },
+  error: { background: "#ffeaea", border: "1px solid #f5c6c6", borderRadius: 6, padding: "10px 14px", color: "#c0392b", fontSize: 13, marginTop: 12 },
+};
