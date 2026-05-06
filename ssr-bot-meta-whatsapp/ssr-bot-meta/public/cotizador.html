@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Cotizador SSR">
+<title>Cotizador SSR</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Segoe UI",Arial,sans-serif;background:#F4F6F9;min-height:100vh}
+input,textarea,select,button{font-family:inherit}
+@media(max-width:600px){input,textarea,select{font-size:16px!important}}
+#app{max-width:960px;margin:0 auto}
+.hdr{background:#1B3A6B;padding:14px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
+.logo{width:36px;height:36px;background:#D4541A;border-radius:4px;display:flex;align-items:center;justify-content:center;font-weight:900;color:#fff;font-size:13px;flex-shrink:0}
+.steps{display:flex;gap:6px}
+.step{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;background:rgba(255,255,255,.2);color:rgba(255,255,255,.4);transition:.2s}
+.step.active{background:#D4541A;color:#fff}
+.step.done{background:#2ECC71;color:#fff}
+.body{padding:20px 16px}
+.sec{font-size:14px;font-weight:600;color:#1B3A6B;border-bottom:2px solid #D4541A;padding-bottom:6px;margin-bottom:12px;display:block}
+.lbl{font-size:11px;color:#888;margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em;display:block}
+.inp{width:100%;border:1px solid #ddd;border-radius:6px;padding:9px 12px;font-size:13px;outline:none;background:#fff;color:#222}
+.inp:focus{border-color:#1B3A6B}
+.inp-sm{width:100%;border:1px solid #ddd;border-radius:4px;padding:6px 8px;font-size:12px;outline:none}
+.inp-xs{border:1px solid #e5e5e5;border-radius:3px;padding:3px 6px;font-size:12px;outline:none;width:100%}
+.btn{border:none;border-radius:6px;padding:10px 18px;font-size:13px;cursor:pointer;font-weight:600;transition:.15s}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-p{background:#1B3A6B;color:#fff}
+.btn-s{background:#fff;color:#1B3A6B;border:1px solid #1B3A6B}
+.btn-g{background:#1E8449;color:#fff}
+.btn-o{background:#D4541A;color:#fff}
+.card{background:#fff;border-radius:8px;padding:16px 18px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:12px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.g5{display:grid;grid-template-columns:3fr 1fr 1fr 1fr 1fr;gap:8px;align-items:end;margin-bottom:10px}
+@media(max-width:600px){.g2,.g3{grid-template-columns:1fr}.g5{grid-template-columns:1fr 1fr}}
+.err-box{background:#ffeaea;border:1px solid #f5c6c6;border-radius:6px;padding:10px 14px;color:#c0392b;font-size:13px;margin-top:10px;display:none}
+.ok-box{background:#f0fff4;border:1px solid #2ECC71;border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:13px;display:none}
+.err-box2{background:#fff5f5;border:1px solid #e74c3c;border-radius:8px;padding:14px 18px;margin-bottom:16px;font-size:12px;display:none}
+.tbl{width:100%;border-collapse:collapse;font-size:12px}
+.tbl th{text-align:left;padding:5px 8px;color:#555;font-weight:500;background:#f5f7fb}
+.tbl td{border-bottom:1px solid #eee;padding:4px 6px}
+.thumb-wrap{position:relative;display:inline-block}
+.thumb{width:72px;height:72px;object-fit:cover;border-radius:6px;border:1px solid #ddd}
+.thumb-del{position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:#e74c3c;color:#fff;border:none;cursor:pointer;font-size:10px}
+.cam-btn{width:72px;height:72px;border-radius:6px;border:2px dashed #1B3A6B;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;color:#1B3A6B;font-size:11px;text-align:center;background:#f0f4ff;vertical-align:top}
+.pdf-btn{display:inline-flex;align-items:center;gap:6px;background:#f0f4ff;border:2px dashed #1B3A6B;border-radius:6px;padding:10px 16px;cursor:pointer;color:#1B3A6B;font-size:13px}
+.pdf-chip{display:inline-flex;align-items:center;gap:6px;background:#fff;border:1px solid #ddd;border-radius:6px;padding:8px 12px;font-size:12px}
+.bar{height:3px;background:linear-gradient(to right,#D4541A,#1B3A6B)}
+.spin{display:inline-block;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.progress{height:4px;background:#eee;border-radius:2px;overflow:hidden;margin-top:16px}
+.prog-fill{height:100%;width:60%;background:#1B3A6B;border-radius:2px;animation:slide 2s ease-in-out infinite}
+@keyframes slide{0%{transform:translateX(-150%)}100%{transform:translateX(250%)}}
+.tot-row{display:flex;justify-content:space-between;padding:4px 0;font-size:13px;border-bottom:1px solid #eee}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.hidden{display:none}
+.preview-tbl th{background:#1B3A6B;color:#fff;padding:6px 8px;font-size:10pt;text-align:right}
+.preview-tbl th:first-child{text-align:left}
+.preview-tbl td{border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="hdr">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="logo">SS</div>
+      <div>
+        <div style="color:#fff;font-weight:600;font-size:15px">Cotizador</div>
+        <div style="color:rgba(255,255,255,.55);font-size:11px">SS Remodelaciones</div>
+      </div>
+    </div>
+    <div class="steps">
+      <div class="step active" id="s0">1</div>
+      <div class="step" id="s1">2</div>
+      <div class="step" id="s2">3</div>
+      <div class="step" id="s3">4</div>
+    </div>
+  </div>
+
+  <div class="body" id="main"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+"use strict";
+// ── Estado global ─────────────────────────────────────────────────────────────
+const S = {
+  step: 0,
+  client: { nombre:"", email:"", telefono:"", asunto:"", referencia: newRef() },
+  notas: "",
+  items: [],
+  fotos: [],
+  pdfs: [],
+  saving: false,
+  driveOk: null,
+  driveErr: null,
+};
+
+const COST_OP=27000, COST_AY=20000, IVA=0.13, MAT_OH=0.05, IMP=0.05;
+const BACKEND="https://ssr-whatsapp-bot-production.up.railway.app";
+const MONEDA="\u20A1";
+
+function newRef(){ return "REF-"+(Math.floor(Math.random()*900)+100)+"-"+String(new Date().getFullYear()).slice(-2); }
+const fmt = n => MONEDA+Number(n||0).toLocaleString("es-CR",{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+
+function calcItem(item){
+  const mats=item.materiales||[];
+  const matBase=mats.reduce((s,m)=>s+(+m.cantidad)*(+m.precio_unitario),0);
+  const matTotal=Math.round(matBase*(1+MAT_OH));
+  const moBase=(+item.dias||1)*((+item.operarios||1)*COST_OP+(+item.ayudantes||0)*COST_AY);
+  const moUtilidad=moBase*0.5;
+  const moTotal=moBase+moUtilidad;
+  return {...item,matTotal,moBase,moUtilidad,moTotal,subtotal:matTotal+moTotal};
+}
+
+function calcTotals(){
+  const items=S.items;
+  const subtotal=items.reduce((s,i)=>s+i.subtotal,0);
+  const imp=Math.round(subtotal*IMP);
+  const base=subtotal+imp;
+  return {
+    subtotalMat:items.reduce((s,i)=>s+i.matTotal,0),
+    subtotalMO:items.reduce((s,i)=>s+i.moTotal,0),
+    subtotal, imprevistos:imp, baseImponible:base,
+    iva:Math.round(base*IVA), total:Math.round(base*(1+IVA))-25000
+  };
+}
+
+function cleanJSON(raw){
+  let s=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
+  const a=s.indexOf("{"),b=s.lastIndexOf("}");
+  if(a<0||b<0) throw new Error("No JSON en la respuesta");
+  return s.slice(a,b+1).replace(/,(\s*[}\]])/g,"$1");
+}
+
+async function extractPDF(file){
+  try{
+    if(typeof pdfjsLib==="undefined") return "";
+    pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+    const ab=await file.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:new Uint8Array(ab)}).promise;
+    let txt="";
+    for(let i=1;i<=Math.min(pdf.numPages,10);i++){
+      const pg=await pdf.getPage(i);
+      const ct=await pg.getTextContent();
+      txt+=ct.items.map(x=>x.str).join(" ")+"\n";
+    }
+    return txt.trim();
+  }catch(e){ return ""; }
+}
+
+function readB64(file){
+  return new Promise(res=>{
+    const r=new FileReader();
+    r.onload=e=>res({base64:e.target.result.split(",")[1],mimeType:file.type,name:file.name,preview:e.target.result});
+    r.readAsDataURL(file);
+  });
+}
+
+// ── Pasos ─────────────────────────────────────────────────────────────────────
+function goStep(n){
+  S.step=n;
+  [0,1,2,3].forEach(i=>{
+    const el=document.getElementById("s"+i);
+    el.className="step"+(i===n?" active":i<n?" done":"");
+    el.textContent=i<n?"✓":i+1;
+  });
+  render();
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render(){
+  const m=document.getElementById("main");
+  if(S.step===0) m.innerHTML=renderInput();
+  else if(S.step===1) m.innerHTML=renderProcessing();
+  else if(S.step===2) m.innerHTML=renderReview();
+  else if(S.step===3) m.innerHTML=renderExport();
+  bindEvents();
+}
+
+// ── STEP 0: INPUT ─────────────────────────────────────────────────────────────
+function renderInput(){
+  const c=S.client;
+  const fotoThumbs=S.fotos.map((f,i)=>`
+    <div class="thumb-wrap">
+      <img class="thumb" src="${esc(f.preview)}" alt="${esc(f.name)}">
+      <button class="thumb-del" onclick="removeFoto(${i})">✕</button>
+    </div>`).join("");
+  const pdfChips=S.pdfs.map((p,i)=>`
+    <span class="pdf-chip">📄 ${esc(p.name)}
+      <button onclick="removePdf(${i})" style="background:none;border:none;color:#e74c3c;cursor:pointer">✕</button>
+    </span>`).join("");
+  return `
+    <span class="sec">Información del cliente</span>
+    <div class="g3" style="margin-bottom:20px">
+      <div><span class="lbl">Nombre / Empresa</span><input class="inp" id="c-nombre" value="${esc(c.nombre)}" placeholder="Nathalie Alpizar"></div>
+      <div><span class="lbl">Email</span><input class="inp" id="c-email" value="${esc(c.email)}" placeholder="correo@test.com"></div>
+      <div><span class="lbl">Teléfono</span><input class="inp" id="c-telefono" value="${esc(c.telefono)}" placeholder="+506 8888-0000"></div>
+      <div><span class="lbl">N° Referencia</span><input class="inp" id="c-referencia" value="${esc(c.referencia)}"></div>
+      <div><span class="lbl">Asunto (se autogenera)</span><input class="inp" id="c-asunto" value="${esc(c.asunto)}" placeholder="Remodelacion bano..."></div>
+    </div>
+
+    <span class="sec">Notas de la visita</span>
+    <p style="font-size:12px;color:#888;margin-bottom:8px">Escribí lo que anotó Melvin — sin formato, como un WhatsApp</p>
+    <textarea class="inp" id="notas" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;line-height:1.6"
+      placeholder="Ej: Bano principal, San Francisco de Heredia. Demoler tina existente, cambiar enchape piso y paredes 19m2...">${esc(S.notas)}</textarea>
+
+    <div style="margin-top:16px">
+      <span class="sec">📷 Fotos de la visita</span>
+      <p style="font-size:12px;color:#888;margin-bottom:8px">La IA analiza las fotos para presupuestar con más precisión</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:8px">
+        ${fotoThumbs}
+        <label class="cam-btn">
+          <span style="font-size:22px">📷</span><span>Cámara</span>
+          <input type="file" accept="image/*" capture="environment" multiple id="inp-fotos" style="display:none">
+        </label>
+      </div>
+      ${S.fotos.length>0?`<p style="font-size:11px;color:#1B3A6B">✅ ${S.fotos.length} foto(s) lista(s)</p>`:""}
+    </div>
+
+    <div style="margin-top:16px">
+      <span class="sec">📄 Planos / Documentos PDF</span>
+      <p style="font-size:12px;color:#888;margin-bottom:8px">Subí planos o documentos — la IA extrae medidas y especificaciones</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        ${pdfChips}
+        <label class="pdf-btn">
+          <span style="font-size:18px">📄</span><span>Subir PDF</span>
+          <input type="file" accept="application/pdf" multiple id="inp-pdfs" style="display:none">
+        </label>
+      </div>
+      ${S.pdfs.length>0?`<p style="font-size:11px;color:#1B3A6B">✅ ${S.pdfs.length} documento(s) listo(s)</p>`:""}
+    </div>
+
+    <div class="err-box" id="err-input"></div>
+    <button class="btn btn-p" id="btn-procesar" style="margin-top:16px;width:100%;padding:13px;font-size:14px">
+      ${S.fotos.length>0||S.pdfs.length>0?"→ Procesar notas + adjuntos":"→ Procesar notas y buscar precios"}
+    </button>`;
+}
+
+// ── STEP 1: PROCESSING ────────────────────────────────────────────────────────
+function renderProcessing(){
+  return `<div style="text-align:center;padding:60px 20px">
+    <div style="font-size:36px;margin-bottom:16px">⚙️</div>
+    <div style="font-size:16px;font-weight:600;color:#1B3A6B;margin-bottom:8px" id="load-msg">Analizando notas...</div>
+    <div style="font-size:13px;color:#aaa">Construplaza · EPA · El Lagar</div>
+    <div class="progress"><div class="prog-fill"></div></div>
+  </div>`;
+}
+
+// ── STEP 2: REVIEW ────────────────────────────────────────────────────────────
+function renderReview(){
+  const T=calcTotals();
+  const c=S.client;
+  const itemCards=S.items.map((item,ii)=>{
+    const matRows=(item.materiales||[]).map((m,mi)=>`
+      <tr>
+        <td><input class="inp-xs" value="${esc(m.detalle)}" onchange="updMat(${ii},${mi},'detalle',this.value)"></td>
+        <td><input class="inp-xs" value="${esc(m.und)}" onchange="updMat(${ii},${mi},'und',this.value)" style="width:50px"></td>
+        <td><input class="inp-xs" type="number" value="${m.cantidad}" onchange="updMat(${ii},${mi},'cantidad',this.value)" style="width:70px"></td>
+        <td><input class="inp-xs" type="number" value="${m.precio_unitario}" onchange="updMat(${ii},${mi},'precio_unitario',this.value)" style="width:90px"></td>
+        <td style="font-weight:600;color:#1B3A6B">${fmt(m.cantidad*m.precio_unitario)}</td>
+        <td><select class="inp-xs" onchange="updMat(${ii},${mi},'fuente',this.value)">
+          ${["Construplaza","EPA","El Lagar","Estimado"].map(f=>`<option${m.fuente===f?" selected":""}>${f}</option>`).join("")}
+        </select></td>
+        <td><button onclick="delMat(${ii},${mi})" style="background:none;border:none;color:#e74c3c;cursor:pointer">✕</button></td>
+      </tr>`).join("");
+    return `<div class="card">
+      <div class="g5">
+        <div><span class="lbl">Actividad ${item.id}</span>
+          <input class="inp-sm" value="${esc(item.descripcion)}" onchange="updItem(${ii},'descripcion',this.value)"></div>
+        <div><span class="lbl">Días</span><input class="inp-sm" type="number" value="${item.dias}" onchange="updItem(${ii},'dias',this.value)"></div>
+        <div><span class="lbl">Operarios</span><input class="inp-sm" type="number" value="${item.operarios}" onchange="updItem(${ii},'operarios',this.value)"></div>
+        <div><span class="lbl">Ayudantes</span><input class="inp-sm" type="number" value="${item.ayudantes}" onchange="updItem(${ii},'ayudantes',this.value)"></div>
+        <div><span class="lbl">Total MO</span><div style="font-size:13px;font-weight:600;color:#555;padding-top:8px">${fmt(item.moTotal)}</div></div>
+      </div>
+      <table class="tbl">
+        <thead><tr><th>Material</th><th>Und</th><th>Cantidad</th><th>P. Unit.</th><th>Subtotal</th><th>Fuente</th><th></th></tr></thead>
+        <tbody>${matRows}</tbody>
+      </table>
+      <div style="display:flex;justify-content:space-between;margin-top:8px;align-items:center">
+        <button class="btn btn-s" onclick="addMat(${ii})" style="font-size:12px;padding:4px 10px">+ Material</button>
+        <div style="font-size:13px">Mat: <b>${fmt(item.matTotal)}</b> | MO: <b>${fmt(item.moTotal)}</b> | <span style="color:#1B3A6B;font-weight:700">Total: ${fmt(item.subtotal)}</span></div>
+      </div>
+    </div>`;
+  }).join("");
+
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
+      <span class="sec" style="margin-bottom:0">Revisión del presupuesto</span>
+      <div class="btn-row">
+        <button class="btn btn-s" onclick="goStep(0)">← Volver</button>
+        <button class="btn btn-p" onclick="goStep(3)">Aprobar →</button>
+      </div>
+    </div>
+    <div class="card g2" style="margin-bottom:16px">
+      <div><span class="lbl">Ref</span><div style="font-weight:600;color:#1B3A6B">${esc(c.referencia)}</div></div>
+      <div><span class="lbl">Cliente</span><div style="font-weight:600;color:#1B3A6B">${esc(c.nombre)}</div></div>
+      <div><span class="lbl">Fecha</span><div style="font-weight:600;color:#1B3A6B">${new Date().toLocaleDateString("es-CR")}</div></div>
+      <div><span class="lbl">Total</span><div style="font-weight:600;color:#1B3A6B">${fmt(T.total)}</div></div>
+    </div>
+    ${itemCards}
+    <div class="card" style="max-width:400px;margin-left:auto">
+      ${[["Mat + 5% gestión",T.subtotalMat],["M.O. total",T.subtotalMO],["Sub total",T.subtotal],
+        ["Imprevistos 5%",T.imprevistos],["Base imponible",T.baseImponible],
+        ["IVA 13%",T.iva],["Reembolso visita",-25000]].map(([k,v])=>
+        `<div class="tot-row"><span style="color:#666">${k}</span><span style="font-weight:${k==="Base imponible"||k==="Sub total"?"600":"400"}">${fmt(v)}</span></div>`
+      ).join("")}
+      <div style="display:flex;justify-content:space-between;padding:8px 0;font-size:16px;font-weight:700;color:#1B3A6B">
+        <span>TOTAL</span><span>${fmt(T.total)}</span>
+      </div>
+    </div>`;
+}
+
+// ── STEP 3: EXPORT ────────────────────────────────────────────────────────────
+function renderExport(){
+  const T=calcTotals();
+  const c=S.client;
+  const irows=S.items.map((i,idx)=>`
+    <tr style="background:${idx%2?"#FDF5EF":"#fff"}">
+      <td class="preview-tbl" style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt">${esc(i.descripcion)}</td>
+      <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:center">${esc(i.unidad||"Und")}</td>
+      <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right">${i.cantidad||1}</td>
+      <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right">${fmt(i.matTotal)}</td>
+      <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right">${fmt(i.moTotal)}</td>
+      <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right;font-weight:600">${fmt(i.subtotal)}</td>
+    </tr>`).join("");
+  const trows=[["Sub total",T.subtotal,false],["Imprevistos 5%",T.imprevistos,false],
+    ["Base imponible",T.baseImponible,true],["IVA 13%",T.iva,false],["Reembolso visita",-25000,false]].map(([k,v,b])=>
+    `<tr style="${b?"background:#FDF5EF":""}"><td colspan="5" style="padding:4px 8px;font-size:10pt;text-align:right;font-weight:${b?600:400};border:1px solid #D9CFC7">${k}</td>
+    <td style="border:1px solid #D9CFC7;padding:4px 8px;font-size:10pt;text-align:right;font-weight:${b?600:400}">${fmt(v)}</td></tr>`).join("");
+
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:8px">
+      <span class="sec" style="margin-bottom:0">Exportar documentos</span>
+      <div class="btn-row">
+        <button class="btn btn-s" onclick="goStep(2)">← Editar</button>
+        <button class="btn btn-o" id="btn-drive" onclick="saveToDrive()" ${S.saving?"disabled":""}>
+          ${S.saving?'<span class="spin">⟳</span> Guardando...':"☁ Drive + WhatsApp"}
+        </button>
+        <button class="btn btn-g" onclick="doExcel()">↓ Excel</button>
+        <button class="btn btn-p" onclick="doWord()">↓ Word</button>
+      </div>
+    </div>
+
+    <div class="ok-box" id="ok-drive" ${S.driveOk?"style='display:block'":""}>
+      <div style="font-weight:700;color:#1E8449;margin-bottom:6px">✅ Guardado en Drive — WhatsApp enviado a Darwin</div>
+      ${S.driveOk?`<div>📁 <a href="${esc(S.driveOk.carpeta)}" target="_blank" style="color:#1B3A6B">Abrir carpeta en Drive</a></div>
+      <div style="margin-top:4px">💰 Total: <b>${S.driveOk.total||""}</b></div>`:""}
+    </div>
+    <div class="err-box2" id="err-drive" ${S.driveErr?"style='display:block'":""}>
+      <div style="font-weight:700;color:#c0392b;margin-bottom:4px">❌ Error Drive:</div>
+      <div style="font-family:monospace">${esc(S.driveErr||"")}</div>
+    </div>
+
+    <!-- Preview -->
+    <div style="background:#fff;padding:28px 36px;border:1px solid #ddd;border-radius:4px;font-family:Arial,sans-serif;color:#000;line-height:1.5">
+      <div class="bar" style="margin-bottom:10px"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div><span style="font-size:20pt;color:#D4541A;font-weight:900">SS</span><span style="font-size:20pt;color:#1B3A6B;font-weight:900"> REMODELACIONES</span></div>
+        <div style="font-size:10pt;text-align:right;color:#555">Solo Senso S.A.<br>7006-8477 | gerencia@ssremodelaciones.com</div>
+      </div>
+      <div class="bar" style="margin-bottom:10px"></div>
+      <p style="font-size:10pt;margin-bottom:10px">
+        <b>Fecha:</b> ${new Date().toLocaleDateString("es-CR")} &nbsp;
+        <b>Ref.:</b> ${esc(c.referencia)}<br>
+        <b>Para:</b> ${esc(c.nombre)} ${c.telefono?"|"+esc(c.telefono):""}<br>
+        <b>Asunto:</b> ${esc(c.asunto)}
+      </p>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:10px">
+        <thead><tr style="background:#1B3A6B">
+          ${["Descripción","Und","Cant","Materiales","M.O.","SUB TOTAL"].map((h,i)=>`<th style="color:#fff;padding:6px 8px;font-size:10pt;text-align:${i===0?"left":"right"}">${h}</th>`).join("")}
+        </tr></thead>
+        <tbody>${irows}${trows}
+          <tr style="background:#1B3A6B">
+            <td colspan="5" style="padding:7px 8px;font-size:11pt;text-align:right;color:#fff;font-weight:700">TOTAL</td>
+            <td style="padding:7px 8px;font-size:11pt;text-align:right;color:#fff;font-weight:700">${fmt(T.total)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="font-size:9pt;color:#888;border-top:2px solid #1B3A6B;padding-top:6px;text-align:center">
+        www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477
+      </p>
+    </div>`;
+}
+
+// ── Event bindings ────────────────────────────────────────────────────────────
+function bindEvents(){
+  // Input fields
+  ["nombre","email","telefono","referencia","asunto"].forEach(f=>{
+    const el=document.getElementById("c-"+f);
+    if(el) el.addEventListener("input",e=>{ S.client[f]=e.target.value; });
+  });
+  const notasEl=document.getElementById("notas");
+  if(notasEl) notasEl.addEventListener("input",e=>{ S.notas=e.target.value; });
+
+  // Fotos
+  const fEl=document.getElementById("inp-fotos");
+  if(fEl) fEl.addEventListener("change",async e=>{
+    const imgs=await Promise.all(Array.from(e.target.files||[]).map(readB64));
+    S.fotos=[...S.fotos,...imgs].slice(0,8);
+    render();
+  });
+
+  // PDFs
+  const pEl=document.getElementById("inp-pdfs");
+  if(pEl) pEl.addEventListener("change",async e=>{
+    const txts=await Promise.all(Array.from(e.target.files||[]).map(async f=>({name:f.name,text:await extractPDF(f)})));
+    S.pdfs=[...S.pdfs,...txts].slice(0,3);
+    render();
+  });
+
+  // Procesar
+  const bEl=document.getElementById("btn-procesar");
+  if(bEl) bEl.addEventListener("click",procesar);
+}
+
+// ── Acciones globales (llamadas desde HTML inline) ────────────────────────────
+window.removeFoto = i=>{ S.fotos.splice(i,1); render(); };
+window.removePdf  = i=>{ S.pdfs.splice(i,1); render(); };
+window.goStep     = goStep;
+
+window.updItem = (ii,f,v)=>{
+  const item={...S.items[ii],[f]:isNaN(v)||f==="descripcion"||f==="unidad"?v:parseFloat(v)||0};
+  S.items[ii]=calcItem(item);
+  // Actualizar solo el display de totales sin re-render completo
+  updateTotalsDisplay();
+};
+
+window.updMat = (ii,mi,f,v)=>{
+  const item=S.items[ii];
+  item.materiales[mi]={...item.materiales[mi],[f]:isNaN(v)||f==="detalle"||f==="und"||f==="fuente"?v:parseFloat(v)||0};
+  S.items[ii]=calcItem(item);
+  updateTotalsDisplay();
+};
+
+window.addMat = ii=>{
+  S.items[ii].materiales.push({detalle:"",und:"Und",cantidad:1,precio_unitario:0,fuente:"Construplaza"});
+  S.items[ii]=calcItem(S.items[ii]);
+  render();
+};
+
+window.delMat = (ii,mi)=>{
+  S.items[ii].materiales.splice(mi,1);
+  S.items[ii]=calcItem(S.items[ii]);
+  render();
+};
+
+function updateTotalsDisplay(){
+  // Re-render solo totales para no perder el foco de los inputs
+  S.items.forEach((item,ii)=>{
+    const moEl=document.querySelector(`[data-mo="${ii}"]`);
+    if(moEl) moEl.textContent=fmt(item.moTotal);
+  });
+}
+
+// ── Procesar notas ────────────────────────────────────────────────────────────
+async function procesar(){
+  const c=S.client;
+  if(!c.nombre){ showErr("err-input","Completá el nombre del cliente."); return; }
+  if(!S.notas.trim()&&S.fotos.length===0&&S.pdfs.length===0){ showErr("err-input","Agregá notas, fotos o un PDF."); return; }
+
+  goStep(1);
+  const msgs=["Analizando notas...","Interpretando fotos...","Estimando materiales...","Buscando precios CR...","Armando presupuesto..."];
+  let mi=0;
+  const iv=setInterval(()=>{ mi=(mi+1)%msgs.length; const el=document.getElementById("load-msg"); if(el) el.textContent=msgs[mi]; },2000);
+
+  const pdfCtx=S.pdfs.length>0?"\n\nDOCUMENTOS/PLANOS:\n"+S.pdfs.map(p=>"--- "+p.name+" ---\n"+p.text).join("\n\n"):"";
+  const prompt="Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n"+(S.notas||"(ver fotos/documentos)")+pdfCtx+"\n\nPrecios: Construplaza, EPA, El Lagar CR. MO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%.\nMax 8 actividades. SOLO NUMEROS en precios, sin simbolos de moneda.\n\nRESPONDE SOLO JSON VALIDO:\n{\"asunto\":\"texto\",\"items\":[{\"id\":1,\"descripcion\":\"texto\",\"unidad\":\"Und\",\"cantidad\":1,\"dias\":2,\"operarios\":1,\"ayudantes\":1,\"materiales\":[{\"detalle\":\"texto\",\"und\":\"Und\",\"cantidad\":5,\"precio_unitario\":3500,\"fuente\":\"Construplaza\"}]}]}";
+
+  try{
+    const content=S.fotos.length>0
+      ?[...S.fotos.map(f=>({type:"image",source:{type:"base64",media_type:f.mimeType,data:f.base64}})),{type:"text",text:prompt}]
+      :prompt;
+
+    const r=await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,
+        system:"Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.",
+        messages:[{role:"user",content}]})
+    });
+    const data=await r.json();
+    clearInterval(iv);
+    if(data.error) throw new Error(data.error.message);
+    const tb=data.content?.find(b=>b.type==="text");
+    if(!tb?.text) throw new Error("Sin respuesta de texto");
+    const parsed=JSON.parse(cleanJSON(tb.text));
+    if(parsed.asunto&&!S.client.asunto) S.client.asunto=parsed.asunto;
+    S.items=(parsed.items||[]).map(calcItem);
+    goStep(2);
+  }catch(e){
+    clearInterval(iv);
+    S.step=0;
+    render();
+    showErr("err-input","Error procesando: "+e.message);
+  }
+}
+
+// ── Guardar en Drive ──────────────────────────────────────────────────────────
+window.saveToDrive = async function(){
+  S.saving=true; S.driveOk=null; S.driveErr=null;
+  const btn=document.getElementById("btn-drive");
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> Guardando...'; }
+  try{
+    const r=await fetch(BACKEND+"/api/cotizacion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({client:S.client,items:S.items})});
+    const data=await r.json();
+    if(data.ok){ S.driveOk=data; }
+    else{ S.driveErr=data.error||"Error del servidor"; }
+  }catch(e){ S.driveErr=e.message; }
+  S.saving=false;
+  render();
+};
+
+// ── Excel ─────────────────────────────────────────────────────────────────────
+window.doExcel = function(){
+  const T=calcTotals(); const c=S.client;
+  const fecha=new Date().toLocaleDateString("es-CR");
+  const rows=[["SS REMODELACIONES - PRESUPUESTO INTERNO"],["Ref:",c.referencia,"Fecha:",fecha,"Cliente:",c.nombre],["Proyecto:",c.asunto],[],
+    ["Item","Descripcion","Und","Cant","Dias","Op","Ay","Mat.Base","Mat+5%","MO","Util","Total MO","TOTAL"]];
+  S.items.forEach(item=>{
+    rows.push([item.id,item.descripcion,item.unidad||"Und",item.cantidad||1,item.dias,item.operarios,item.ayudantes,
+      Math.round(item.matTotal/1.05),item.matTotal,item.moBase,item.moUtilidad,item.moTotal,item.subtotal]);
+    (item.materiales||[]).forEach(m=>rows.push(["","  > "+m.detalle+" ("+m.fuente+")",m.und,m.cantidad,m.precio_unitario,m.cantidad*m.precio_unitario]));
+    rows.push(["","Subtotal mat:","","","","","","",item.matTotal]);rows.push([]);
+  });
+  rows.push(["","Sub total","","","","","","","",T.subtotal]);
+  rows.push(["","Imprevistos 5%","","","","","","","",T.imprevistos]);
+  rows.push(["","Base imponible","","","","","","","",T.baseImponible]);
+  rows.push(["","IVA 13%","","","","","","","",T.iva]);
+  rows.push(["","Reembolso visita","","","","","","","",-25000]);
+  rows.push(["","TOTAL","","","","","","","",T.total]);
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"]=[{wch:5},{wch:38},{wch:8},{wch:7},{wch:6},{wch:5},{wch:5},{wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
+  XLSX.utils.book_append_sheet(wb,ws,"Detalle Interno");
+  const r2=[["Descripcion","Unidad","Cantidad","Materiales","MO","SUB TOTAL"],
+    ...S.items.map(i=>[i.descripcion,i.unidad||"Und",i.cantidad||1,i.matTotal,i.moTotal,i.subtotal]),
+    [],["","","","","Sub total",T.subtotal],["","","","","Imprevistos 5%",T.imprevistos],
+    ["","","","","Base imponible",T.baseImponible],["","","","","IVA 13%",T.iva],
+    ["","","","","Reembolso visita",-25000],["","","","","TOTAL",T.total]];
+  const ws2=XLSX.utils.aoa_to_sheet(r2);
+  ws2["!cols"]=[{wch:40},{wch:8},{wch:10},{wch:14},{wch:14},{wch:16}];
+  XLSX.utils.book_append_sheet(wb,ws2,"Resumen Cotizacion");
+  XLSX.writeFile(wb,c.referencia+"_presupuesto_interno.xlsx");
+};
+
+// ── Word HTML ─────────────────────────────────────────────────────────────────
+window.doWord = function(){
+  const T=calcTotals(); const c=S.client;
+  const fecha=new Date().toLocaleDateString("es-CR");
+  const irows=S.items.map((i,idx)=>`<tr style="background:${idx%2?"#FDF5EF":"#fff"}">
+    <td>${i.descripcion}</td><td align="center">${i.unidad||"Und"}</td>
+    <td align="right">${i.cantidad||1}</td><td align="right">${fmt(i.matTotal)}</td>
+    <td align="right">${fmt(i.moTotal)}</td><td align="right"><b>${fmt(i.subtotal)}</b></td></tr>`).join("");
+  const trows=[["Sub total",T.subtotal,""],["Imprevistos 5%",T.imprevistos,""],
+    ["Base imponible",T.baseImponible,"font-weight:600;background:#FDF5EF;border-top:2px solid #D4541A"],
+    ["IVA 13%",T.iva,""],["Reembolso pago de visita",-25000,""]
+  ].map(([k,v,s])=>`<tr><td colspan="5" align="right" style="${s}">${k}</td><td align="right" style="${s}">${fmt(v)}</td></tr>`).join("");
+  const lista=S.items.map(i=>`<li>${i.descripcion}</li>`).join("");
+  const h=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${c.referencia}</title>
+  <style>body{font-family:Arial,sans-serif;font-size:11pt;margin:2cm;color:#1a1a1a}
+  table{width:100%;border-collapse:collapse;margin:8px 0}
+  th{background:#1B3A6B;color:#fff;padding:7px 10px;font-size:10pt}
+  th:first-child{text-align:left}th{text-align:right}
+  td{border:1px solid #D9CFC7;padding:6px 10px;font-size:10pt}
+  .grand td{background:#1B3A6B;color:#fff;font-weight:700;font-size:12pt;padding:8px;border:none}
+  h3{color:#1B3A6B;font-size:12pt;border-bottom:2px solid #D4541A;padding-bottom:4px;margin:16px 0 8px}
+  ul{font-size:10pt;line-height:1.9;padding-left:20px}
+  .bar{height:3px;background:linear-gradient(to right,#D4541A,#1B3A6B)}
+  </style></head><body>
+  <div class="bar"></div>
+  <table style="border:none;margin-bottom:8px"><tr>
+    <td style="border:none"><span style="font-size:22pt;color:#D4541A;font-weight:900">SS</span><span style="font-size:22pt;color:#1B3A6B;font-weight:900"> REMODELACIONES</span></td>
+    <td style="border:none;text-align:right;font-size:10pt;color:#555"><b style="color:#1a1a1a">Solo Senso Sociedad Anonima</b><br>San Isidro de Heredia | Tel: 7006-8477<br>gerencia@ssremodelaciones.com</td>
+  </tr></table><div class="bar" style="margin-bottom:12px"></div>
+  <table style="border:none;font-size:10pt;margin-bottom:12px"><tr>
+    <td style="border:none"><b>Fecha:</b> ${fecha}</td><td style="border:none"><b>Ref.:</b> ${c.referencia}</td>
+  </tr><tr><td colspan="2" style="border:none">
+    <b>Para:</b> ${c.nombre}${c.telefono?" | "+c.telefono:""}${c.email?" | "+c.email:""}
+  </td></tr><tr><td colspan="2" style="border:none"><b>Asunto:</b> ${c.asunto}</td></tr></table>
+  <p>Estimado/a <b>${c.nombre}</b>; presentamos propuesta para: <b>${c.asunto}</b>.</p>
+  <h3>TRABAJOS INCLUIDOS</h3><ul>${lista}</ul>
+  <h3>PRESUPUESTO</h3>
+  <table><thead><tr><th style="text-align:left">Descripcion</th><th>Und</th><th>Cant</th><th>Materiales</th><th>M.O.</th><th>SUB TOTAL</th></tr></thead>
+  <tbody>${irows}${trows}<tr class="grand"><td colspan="5" align="right">TOTAL</td><td align="right">${fmt(T.total)}</td></tr></tbody></table>
+  <h3>CONDICIONES</h3><ul>
+    <li>Pagos por transferencia bancaria a SS Remodelaciones.</li>
+    <li><b>Forma de pago:</b> 60% para iniciar, 10% semanal viernes, saldo al terminar.</li>
+    <li>Vigencia: 15 dias habiles.</li></ul>
+  <p style="font-size:10pt;margin-top:10px"><b>Garantia:</b> 12 meses por desperfecto en la instalacion.</p>
+  <p style="font-size:10pt;margin-top:8px"><b>BAC Colones</b> | Solo Senso SA | Cuenta: 938419603 | IBAN: CR29010200009384196033</p>
+  <br><br>
+  <table style="border:none;width:100%"><tr>
+    <td style="border:none;width:45%;text-align:center;border-top:1px solid #333;padding-top:4px;font-size:10pt">Ing. Darwin J. Guilon M.<br><b>Gerente General</b></td>
+    <td style="border:none;width:10%"></td>
+    <td style="border:none;width:45%;text-align:center;border-top:1px solid #333;padding-top:4px;font-size:10pt">${c.nombre}<br><b>Cliente</b></td>
+  </tr></table>
+  <p style="border-top:2px solid #1B3A6B;padding-top:6px;font-size:9pt;color:#888;text-align:center;margin-top:20px">
+    www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477</p>
+  </body></html>`;
+  const blob=new Blob([h],{type:"text/html;charset=utf-8"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download=c.referencia+"_cotizacion.html";
+  document.body.appendChild(a);a.click();
+  setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function showErr(id,msg){ const el=document.getElementById(id); if(el){el.textContent=msg;el.style.display="block";} }
+
+// ── Iniciar ───────────────────────────────────────────────────────────────────
+render();
+</script>
+</body>
+</html>
