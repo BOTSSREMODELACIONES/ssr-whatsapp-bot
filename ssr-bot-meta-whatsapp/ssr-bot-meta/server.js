@@ -194,6 +194,23 @@ app.get("/test-reminders", async (_req, res) => {
   res.json({ ok: true, message: "Recordatorios ejecutados" });
 });
 
+// ── Cotizador SSR ─────────────────────────────────────────────────────────────
+app.post("/api/cotizacion", async (req, res) => {
+  try {
+    const { client, items } = req.body;
+    if (!client?.referencia || !client?.nombre || !items?.length) {
+      return res.status(400).json({ ok: false, error: "Faltan datos requeridos" });
+    }
+    console.log(`📋 POST /api/cotizacion — ${client.referencia} (${client.nombre})`);
+    const { procesarCotizacion } = require("./cotizacion");
+    const result = await procesarCotizacion({ client, items });
+    res.json(result);
+  } catch (err) {
+    console.error("❌ /api/cotizacion error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`
 ╔══════════════════════════════════════════════════════╗
