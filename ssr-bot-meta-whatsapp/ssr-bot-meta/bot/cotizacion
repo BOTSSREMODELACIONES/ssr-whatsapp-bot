@@ -25,12 +25,18 @@ const MAT_OVERHEAD      = 0.05;
 const IMPREVISTOS_PCT   = 0.05;
 const DARWIN_WHATSAPP   = "+50683091817";
 
-// ── Google Drive client ───────────────────────────────────────────────────────
+// ── Google Drive client — JWT Impersonation ──────────────────────────────────
+// La SA actúa como proyectos@ssremodelaciones.com → archivos quedan en su Drive
+// Requiere Domain-Wide Delegation en Google Workspace Admin:
+//   admin.google.com → Seguridad → Controles de API → Delegación en todo el dominio
+//   Agregar client_id de la SA con scope: https://www.googleapis.com/auth/drive
 async function getDriveClient() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
-  const auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/drive"],
+  const auth = new google.auth.JWT({
+    email:   credentials.client_email,
+    key:     credentials.private_key,
+    scopes:  ["https://www.googleapis.com/auth/drive"],
+    subject: "proyectos@ssremodelaciones.com",  // SA impersona esta cuenta
   });
   return google.drive({ version: "v3", auth });
 }
