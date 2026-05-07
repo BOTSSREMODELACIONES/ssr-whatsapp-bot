@@ -183,11 +183,23 @@ app.post("/api/procesar-notas", async (req, res) => {
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 4000,
-      system: "Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales. MUY IMPORTANTE: antes de generar el JSON, corrige automaticamente todos los errores ortograficos, agrega los acentos faltantes y corrige errores de transcripcion por voz (por ejemplo: 'seramica' → 'cerámica', 'pizo' → 'piso', 'demolor' → 'demoler'). Todas las descripciones del JSON deben estar en español correcto con tildes.",
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      system: `Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.
+
+REGLAS OBLIGATORIAS:
+1. Corrige automaticamente errores ortograficos y agrega acentos faltantes en todas las descripciones (ej: 'seramica'→'cerámica', 'pizo'→'piso', 'demolor'→'demoler').
+2. Para precios de materiales usa estas tiendas CR como referencia: Construplaza, EPA, El Lagar, Mundo Iluminacion, Ferreteria El Colono, Maderas MM.
+3. Si un material es especializado o no lo encontras en esas tiendas, BUSCALO en internet para encontrar el precio real en Costa Rica y pone en el campo "fuente" el nombre del sitio o tienda donde lo encontraste (ej: "ferromax.cr", "groupo-serta.com", etc.).
+4. Si despues de buscar no encontras precio confiable, pone fuente: "Cotizar" para que el equipo lo verifique antes de entregar la cotizacion.`,
       messages: [{ role: "user", content }],
     });
 
-    const text = response.content?.[0]?.text || "";
+    // Con web_search activo la respuesta puede tener múltiples bloques;
+    // extraemos solo los de tipo "text" para obtener el JSON final
+    const text = (response.content || [])
+      .filter(b => b.type === "text")
+      .map(b => b.text)
+      .join("") || "";
     let json = text.replace(/```json/gi, "").replace(/```/g, "").trim();
     const a = json.indexOf("{"), b = json.lastIndexOf("}");
     if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
