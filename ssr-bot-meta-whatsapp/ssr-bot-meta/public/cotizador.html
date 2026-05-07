@@ -765,6 +765,73 @@ window.doWord = function(){
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function showErr(id,msg){ const el=document.getElementById(id); if(el){el.textContent=msg;el.style.display="block";} }
 
+// ── Grabador de voz ──────────────────────────────────────────────────────────
+var _micRec = null;
+var _micOn = false;
+
+function toggleMic(){
+  if(!('webkitSpeechRecognition' in window)&&!('SpeechRecognition' in window)){
+    var err=document.getElementById('mic-error');
+    if(err){err.style.display='block';err.textContent='Tu navegador no soporta grabación. Usá Chrome o Edge.';}
+    return;
+  }
+  if(_micOn){ _stopMic(); } else { _startMic(); }
+}
+
+function _startMic(){
+  var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  _micRec=new SR();
+  _micRec.lang='es-CR';
+  _micRec.continuous=true;
+  _micRec.interimResults=true;
+
+  _micRec.onstart=function(){
+    _micOn=true;
+    var btn=document.getElementById('btn-mic');
+    if(btn){btn.style.background='#e74c3c';btn.style.color='#fff';btn.style.borderColor='#e74c3c';}
+    var lbl=document.getElementById('mic-label');
+    if(lbl) lbl.textContent='⏹ Detener grabación';
+    var st=document.getElementById('mic-status');
+    if(st) st.textContent='🔴 Grabando...';
+    var err=document.getElementById('mic-error');
+    if(err) err.style.display='none';
+  };
+
+  _micRec.onresult=function(e){
+    var interim='', final='';
+    for(var i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal) final+=e.results[i][0].transcript+' ';
+      else interim+=e.results[i][0].transcript;
+    }
+    if(final){
+      var ta=document.getElementById('notas');
+      if(ta){ta.value+=final;S.notas=ta.value;}
+    }
+    var st=document.getElementById('mic-status');
+    if(st) st.textContent=interim?'🔴 '+interim:'🔴 Grabando...';
+  };
+
+  _micRec.onerror=function(e){
+    _stopMic();
+    var err=document.getElementById('mic-error');
+    if(err){err.style.display='block';err.textContent='Error micrófono: '+e.error;}
+  };
+
+  _micRec.onend=function(){ if(_micOn) _micRec.start(); };
+  _micRec.start();
+}
+
+function _stopMic(){
+  _micOn=false;
+  if(_micRec){_micRec.onend=null;_micRec.stop();_micRec=null;}
+  var btn=document.getElementById('btn-mic');
+  if(btn){btn.style.background='';btn.style.color='';btn.style.borderColor='';}
+  var lbl=document.getElementById('mic-label');
+  if(lbl) lbl.textContent='🎤 Grabar nota de voz';
+  var st=document.getElementById('mic-status');
+  if(st){st.textContent='✅ Nota guardada';setTimeout(function(){if(st)st.textContent='';},3000);}
+}
+
 // ── Iniciar ───────────────────────────────────────────────────────────────────
 render();
 </script>
