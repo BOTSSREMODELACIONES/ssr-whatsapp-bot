@@ -247,9 +247,11 @@ app.post("/api/cotizacion", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+
 // ── Transcripción de voz ────────────────────────────────────────────────────
 // Fallback para Firefox / navegadores sin Web Speech API.
-// Se activa solo cuando el navegador usa MediaRecorder y no puede transcribir solo.
+// Se activa solo cuando el navegador usa MediaRecorder y no puede transcribir.
 app.post("/api/transcribir-voz", async (req, res) => {
   try {
     const { audio, mimeType } = req.body;
@@ -258,12 +260,11 @@ app.post("/api/transcribir-voz", async (req, res) => {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    // Intentar que Claude procese el audio como documento
     try {
       const r = await anthropic.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 1000,
-        system: "Sos un asistente que transcribe notas de obras de construcción en Costa Rica. Transcribí el audio exactamente, en español. Solo devolvé el texto transcrito, sin explicaciones ni formato.",
+        system: "Sos un asistente que transcribe notas de obras de construcción en Costa Rica. Transcribí el audio exactamente como fue dicho, en español. Solo devolvé el texto transcrito, sin explicaciones ni formato extra.",
         messages: [{
           role: "user",
           content: [
@@ -271,7 +272,7 @@ app.post("/api/transcribir-voz", async (req, res) => {
               type: "document",
               source: { type: "base64", media_type: mimeType || "audio/webm", data: audio }
             },
-            { type: "text", text: "Transcribí este audio de notas de obra de construcción." }
+            { type: "text", text: "Transcribí este audio de notas de obra de construcción en Costa Rica." }
           ]
         }]
       });
@@ -288,7 +289,7 @@ app.post("/api/transcribir-voz", async (req, res) => {
       console.warn("⚠ Claude no pudo procesar el audio:", e.message);
     }
 
-    // Si Claude no puede transcribir, decirle al cliente que descargue localmente
+    // Si Claude no puede transcribir, el cliente descarga el audio localmente
     res.json({ ok: false, error: "Transcripción no disponible — audio descargado localmente" });
 
   } catch (err) {
