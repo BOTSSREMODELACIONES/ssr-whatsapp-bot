@@ -162,6 +162,21 @@ function readB64(file){
   });
 }
 
+// ── Fetch con timeout (120s para análisis con fotos) ─────────────────────────
+async function fetchConTimeout(url, opts, timeoutMs=120000){
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), timeoutMs);
+  try{
+    const r = await fetch(url, {...opts, signal: ctrl.signal});
+    clearTimeout(timer);
+    return r;
+  }catch(e){
+    clearTimeout(timer);
+    if(e.name==="AbortError") throw new Error("Tiempo de espera agotado (>2 min). Intentá sin fotos o con menos fotos.");
+    throw new Error("No se pudo conectar al servidor. Verificá tu conexión e intentá de nuevo.");
+  }
+}
+
 // ── Pasos ─────────────────────────────────────────────────────────────────────
 function goStep(n){
   S.step=n;
@@ -215,9 +230,15 @@ function renderInput(){
       <p style="font-size:12px;color:#888;margin-bottom:8px">La IA analiza las fotos para presupuestar con más precisión</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:8px">
         ${fotoThumbs}
-        <label class="cam-btn">
+        <!-- ✅ NUEVO: Botón Cámara (foto directa) -->
+        <label class="cam-btn" title="Tomar foto con la cámara">
           <span style="font-size:22px">📷</span><span>Cámara</span>
           <input type="file" accept="image/*" capture="environment" multiple id="inp-fotos" style="display:none">
+        </label>
+        <!-- ✅ NUEVO: Botón Galería (imágenes guardadas) -->
+        <label class="cam-btn" title="Seleccionar de la galería">
+          <span style="font-size:22px">🖼️</span><span>Galería</span>
+          <input type="file" accept="image/*" multiple id="inp-galeria" style="display:none">
         </label>
       </div>
       ${S.fotos.length>0?`<p style="font-size:11px;color:#1B3A6B">✅ ${S.fotos.length} foto(s) lista(s)</p>`:""}
@@ -398,9 +419,17 @@ function bindEvents(){
   const notasEl=document.getElementById("notas");
   if(notasEl) notasEl.addEventListener("input",e=>{ S.notas=e.target.value; });
 
-  // Fotos
+  // Fotos (cámara directa)
   const fEl=document.getElementById("inp-fotos");
   if(fEl) fEl.addEventListener("change",async e=>{
+    const imgs=await Promise.all(Array.from(e.target.files||[]).map(readB64));
+    S.fotos=[...S.fotos,...imgs].slice(0,8);
+    render();
+  });
+
+  // ✅ NUEVO: Fotos desde galería
+  const gEl=document.getElementById("inp-galeria");
+  if(gEl) gEl.addEventListener("change",async e=>{
     const imgs=await Promise.all(Array.from(e.target.files||[]).map(readB64));
     S.fotos=[...S.fotos,...imgs].slice(0,8);
     render();
@@ -427,7 +456,6 @@ window.goStep     = goStep;
 window.updItem = (ii,f,v)=>{
   const item={...S.items[ii],[f]:isNaN(v)||f==="descripcion"||f==="unidad"?v:parseFloat(v)||0};
   S.items[ii]=calcItem(item);
-  // Actualizar solo el display de totales sin re-render completo
   updateTotalsDisplay();
 };
 
@@ -451,7 +479,6 @@ window.delMat = (ii,mi)=>{
 };
 
 function updateTotalsDisplay(){
-  // Re-render solo totales para no perder el foco de los inputs
   S.items.forEach((item,ii)=>{
     const moEl=document.querySelector(`[data-mo="${ii}"]`);
     if(moEl) moEl.textContent=fmt(item.moTotal);
@@ -469,15 +496,14 @@ async function procesar(){
   let mi=0;
   const iv=setInterval(()=>{ mi=(mi+1)%msgs.length; const el=document.getElementById("load-msg"); if(el) el.textContent=msgs[mi]; },2000);
 
-  const pdfCtx=S.pdfs.length>0?"\n\nDOCUMENTOS/PLANOS:\n"+S.pdfs.map(p=>"--- "+p.name+" ---\n"+p.text).join("\n\n"):"";
-  const prompt="Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n"+(S.notas||"(ver fotos/documentos)")+pdfCtx+"\n\nPrecios: Construplaza, EPA, El Lagar CR. MO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%.\nMax 8 actividades. SOLO NUMEROS en precios, sin simbolos de moneda.\n\nRESPONDE SOLO JSON VALIDO:\n{\"asunto\":\"texto\",\"items\":[{\"id\":1,\"descripcion\":\"texto\",\"unidad\":\"Und\",\"cantidad\":1,\"dias\":2,\"operarios\":1,\"ayudantes\":1,\"materiales\":[{\"detalle\":\"texto\",\"und\":\"Und\",\"cantidad\":5,\"precio_unitario\":3500,\"fuente\":\"Construplaza\"}]}]}";
-
   try{
-    // Llamar al backend Railway (que llama a Claude server-side)
-    const r=await fetch(BACKEND+"/api/procesar-notas",{
-      method:"POST",headers:{"Content-Type":"application/json"},
+    // ✅ FIX: fetchConTimeout reemplaza fetch directo — maneja timeout y errores de red
+    const r=await fetchConTimeout(BACKEND+"/api/procesar-notas",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
       body:JSON.stringify({notas:S.notas,fotos:S.fotos,pdfs:S.pdfs})
-    });
+    }, 120000);
+
     const data=await r.json();
     clearInterval(iv);
     if(!data.ok) throw new Error(data.error||"Error del servidor");
@@ -499,7 +525,11 @@ window.saveToDrive = async function(){
   const btn=document.getElementById("btn-drive");
   if(btn){ btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> Guardando...'; }
   try{
-    const r=await fetch(BACKEND+"/api/cotizacion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({client:S.client,items:S.items})});
+    const r=await fetchConTimeout(BACKEND+"/api/cotizacion",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({client:S.client,items:S.items})
+    }, 60000);
     const data=await r.json();
     if(data.ok){ S.driveOk=data; }
     else{ S.driveErr=data.error||"Error del servidor"; }
