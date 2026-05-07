@@ -163,56 +163,74 @@ app.post("/api/procesar-notas", async (req, res) => {
   try {
     const { notas, fotos, pdfs } = req.body;
     const Anthropic = require("@anthropic-ai/sdk");
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const pdfCtx = (pdfs||[]).length > 0
       ? "\n\nDOCUMENTOS/PLANOS:\n" + pdfs.map(p => "--- " + p.name + " ---\n" + p.text).join("\n\n")
       : "";
 
     const prompt =
-      "Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n" +
+      "Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos y genera un presupuesto.\n\nNOTAS:\n" +
       (notas || "(ver fotos/documentos)") + pdfCtx +
-      "\n\nPrecios: Construplaza, EPA, El Lagar CR. MO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%.\nMax 8 actividades. SOLO NUMEROS en precios, sin simbolos de moneda.\n\n" +
-      'RESPONDE SOLO JSON VALIDO:\n{"asunto":"texto","items":[{"id":1,"descripcion":"texto","unidad":"Und","cantidad":1,"dias":2,"operarios":1,"ayudantes":1,"materiales":[{"detalle":"texto","und":"Und","cantidad":5,"precio_unitario":3500,"fuente":"Construplaza"}]}]}';
+      "\n\nMO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%. Max 8 actividades. SOLO NUMEROS en precios.\n\n" +
+      'RESPONDE SOLO JSON: {"asunto":"texto","items":[{"id":1,"descripcion":"texto","unidad":"Und","cantidad":1,"dias":2,"operarios":1,"ayudantes":1,"materiales":[{"detalle":"texto","und":"Und","cantidad":5,"precio_unitario":3500,"fuente":"Construplaza"}]}]}';
+
+    const systemPrompt = "Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales. REGLAS: 1) Corrige ortografia y acentos en todas las descripciones. 2) Precios de referencia CR: Construplaza, EPA, El Lagar, Mundo Iluminacion, Ferreteria El Colono, Maderas MM. 3) Si el material es especializado y no esta en esas tiendas, BUSCALO en internet y pone en fuente el sitio donde lo encontraste. 4) Si no encontras precio confiable, fuente: Cotizar.";
 
     const content = (fotos||[]).length > 0
       ? [...fotos.map(f => ({ type: "image", source: { type: "base64", media_type: f.mimeType, data: f.base64 } })), { type: "text", text: prompt }]
       : prompt;
 
-    // ✅ Modelo actualizado a claude-sonnet-4-6
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4000,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      system: `Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.
+    // Limpieza robusta del JSON que devuelve Claude
+    function parsearJSON(raw) {
+      let s = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
+      const a = s.indexOf("{"), b = s.lastIndexOf("}");
+      if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
+      s = s.slice(a, b + 1)
+        .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, "") // control chars
+        .replace(/\r?\n/g, " ")  // saltos de línea literales
+        .replace(/\t/g, " ")     // tabs
+        .replace(/,(\s*[}\]])/g, "$1"); // trailing commas
+      return JSON.parse(s);
+    }
 
-REGLAS OBLIGATORIAS:
-1. Corrige automaticamente errores ortograficos y agrega acentos faltantes en todas las descripciones (ej: 'seramica'→'cerámica', 'pizo'→'piso', 'demolor'→'demoler').
-2. Para precios de materiales usa estas tiendas CR como referencia: Construplaza, EPA, El Lagar, Mundo Iluminacion, Ferreteria El Colono, Maderas MM.
-3. Si un material es especializado o no lo encontras en esas tiendas, BUSCALO en internet para encontrar el precio real en Costa Rica y pone en el campo "fuente" el nombre del sitio o tienda donde lo encontraste (ej: "ferromax.cr", "groupo-serta.com", etc.).
-4. Si despues de buscar no encontras precio confiable, pone fuente: "Cotizar" para que el equipo lo verifique antes de entregar la cotizacion.`,
-      messages: [{ role: "user", content }],
-    });
+    let data;
 
-    // Con web_search activo la respuesta puede tener múltiples bloques;
-    // extraemos solo los de tipo "text" para obtener el JSON final
-    const text = (response.content || [])
-      .filter(b => b.type === "text")
-      .map(b => b.text)
-      .join("") || "";
-    let json = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-    const a = json.indexOf("{"), b = json.lastIndexOf("}");
-    if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
-    json = json.slice(a, b + 1)
-      .replace(/\r?\n/g, " ")          // ✅ FIX: saltos de línea literales dentro de strings rompen el JSON
-      .replace(/\t/g, " ")             // tabs también
-      .replace(/,(\s*[}\]])/g, "$1");  // trailing commas
-    res.json({ ok: true, data: JSON.parse(json) });
+    // Intento 1: con web_search para materiales especializados
+    try {
+      const r1 = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 4000,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        system: systemPrompt,
+        messages: [{ role: "user", content }],
+      });
+      const text1 = (r1.content || []).filter(b => b.type === "text").map(b => b.text).join("");
+      if (!text1) throw new Error("Sin texto en respuesta con web_search");
+      data = parsearJSON(text1);
+      console.log("✅ /api/procesar-notas OK (con web_search)");
+    } catch (e1) {
+      // Fallback sin web_search — evita timeouts y errores del tool
+      console.warn("⚠️  web_search falló (" + e1.message + "), reintentando sin él...");
+      const r2 = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 4000,
+        system: systemPrompt,
+        messages: [{ role: "user", content }],
+      });
+      const text2 = (r2.content || []).filter(b => b.type === "text").map(b => b.text).join("")
+                    || r2.content?.[0]?.text || "";
+      data = parsearJSON(text2);
+      console.log("✅ /api/procesar-notas OK (fallback sin web_search)");
+    }
+
+    res.json({ ok: true, data });
   } catch (err) {
     console.error("❌ /api/procesar-notas:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
 
 // ── Cotizacion → Drive ────────────────────────────────────────────────────────
 app.post("/api/cotizacion", async (req, res) => {
