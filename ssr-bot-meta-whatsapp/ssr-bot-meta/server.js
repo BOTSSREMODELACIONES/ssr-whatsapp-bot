@@ -183,7 +183,7 @@ app.post("/api/procesar-notas", async (req, res) => {
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 4000,
-      system: "Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.",
+      system: "Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales. MUY IMPORTANTE: antes de generar el JSON, corrige automaticamente todos los errores ortograficos, agrega los acentos faltantes y corrige errores de transcripcion por voz (por ejemplo: 'seramica' → 'cerámica', 'pizo' → 'piso', 'demolor' → 'demoler'). Todas las descripciones del JSON deben estar en español correcto con tildes.",
       messages: [{ role: "user", content }],
     });
 
