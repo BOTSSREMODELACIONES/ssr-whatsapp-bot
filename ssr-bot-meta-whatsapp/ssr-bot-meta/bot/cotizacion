@@ -26,6 +26,40 @@ const IMPREVISTOS_PCT   = 0.05;
 const DARWIN_WHATSAPP   = "+50683091817";
 const MELVIN_WHATSAPP   = "+50671981370";
 
+// ── Obtener siguiente número de REF disponible en Drive ──────────────────────
+// Consulta las carpetas existentes en DRIVE_FOLDER_2026, encuentra el número
+// más alto y devuelve el siguiente (ej: si existe REF-041-26, devuelve REF-042-26)
+async function getNextRef(drive) {
+  try {
+    const year = new Date().getFullYear().toString().slice(-2);
+    const res = await drive.files.list({
+      q: `'${DRIVE_FOLDER_2026}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+      fields: "files(name)",
+      orderBy: "name desc",
+      pageSize: 20,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    const folders = res.data.files || [];
+    let maxNum = 0;
+    for (const f of folders) {
+      const m = f.name.match(/^REF-(\d+)-/);
+      if (m) {
+        const n = parseInt(m[1]);
+        if (n > maxNum) maxNum = n;
+      }
+    }
+    const next = String(maxNum + 1).padStart(3, "0");
+    console.log(`📋 Carpetas encontradas: ${folders.length} — Siguiente REF: REF-${next}-${year}`);
+    return `REF-${next}-${year}`;
+  } catch (err) {
+    console.warn("⚠️  No se pudo consultar REF en Drive, usando fallback:", err.message);
+    const year = new Date().getFullYear().toString().slice(-2);
+    const fallback = Math.floor(Math.random() * 900) + 100;
+    return `REF-${fallback}-${year}`;
+  }
+}
+
 // ── Google Drive client — JWT Impersonation ──────────────────────────────────
 // La SA actúa como proyectos@ssremodelaciones.com → archivos quedan en su Drive
 // Requiere Domain-Wide Delegation en Google Workspace Admin:
@@ -333,21 +367,28 @@ async function subirArchivo(drive, folderId, nombre, buffer, mimeType) {
 }
 
 // ── Proceso completo de cotización ────────────────────────────────────────────
-async function procesarCotizacion({ client, items }) {
+async function procesarCotizacion({ client: clientInput, items }) {
+  let client = { ...clientInput }; // copia mutable para asignar el REF real
   console.log(`📋 Procesando cotización ${client.referencia} — ${client.nombre}`);
 
   try {
-    // 1. Generar archivos
+    // 1. Obtener REF real y actualizar client
+    const drive0 = await getDriveClient();
+    const refReal = await getNextRef(drive0);
+    client = { ...client, referencia: refReal };
+    console.log(`📋 REF asignado: ${refReal}`);
+
+    // 2. Generar archivos
     console.log("⚙️  Generando Excel y Word...");
     const [excelBuffer, wordBuffer] = await Promise.all([
       Promise.resolve(generarExcel(client, items)),
       generarWord(client, items),
     ]);
 
-    // 2. Crear carpeta en Drive
+    // 3. Crear carpeta en Drive
     const carpeta = await crearCarpetaDrive(client);
 
-    // 3. Subir archivos
+    // 4. Subir archivos
     const drive = await getDriveClient();
     const [excelFile, wordFile] = await Promise.all([
       subirArchivo(drive, carpeta.id,
@@ -380,7 +421,7 @@ async function procesarCotizacion({ client, items }) {
 
     return {
       ok: true,
-      referencia: client.referencia,
+      referencia: refReal,   // REF real asignado por el backend
       carpeta: carpeta.link,
       excel: excelFile.webViewLink,
       word:  wordFile.webViewLink,
