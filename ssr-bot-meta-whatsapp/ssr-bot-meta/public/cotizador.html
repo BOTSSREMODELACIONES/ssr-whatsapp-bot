@@ -60,6 +60,11 @@ input,textarea,select,button{font-family:inherit}
 .preview-tbl th{background:#1B3A6B;color:#fff;padding:6px 8px;font-size:10pt;text-align:right}
 .preview-tbl th:first-child{text-align:left}
 .preview-tbl td{border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt}
+/* ── Dictado ── */
+.mic-btn{display:inline-flex;align-items:center;gap:6px;border:1px solid #1B3A6B;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;background:#fff;color:#1B3A6B;transition:.2s;user-select:none}
+.mic-btn.rec{background:#e74c3c;color:#fff;border-color:#e74c3c;animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(231,76,60,.4)}50%{box-shadow:0 0 0 8px rgba(231,76,60,0)}}
+.mic-hint{font-size:12px;color:#aaa;margin-top:4px;min-height:18px;font-style:italic}
 </style>
 </head>
 <body>
@@ -79,7 +84,6 @@ input,textarea,select,button{font-family:inherit}
       <div class="step" id="s3">4</div>
     </div>
   </div>
-
   <div class="body" id="main"></div>
 </div>
 
@@ -87,27 +91,76 @@ input,textarea,select,button{font-family:inherit}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
 "use strict";
+
 // ── Estado global ─────────────────────────────────────────────────────────────
-const S = {
-  step: 0,
-  client: { nombre:"", email:"", telefono:"", asunto:"", referencia: newRef() },
-  notas: "",
-  items: [],
-  fotos: [],
-  pdfs: [],
-  saving: false,
-  driveOk: null,
-  driveErr: null,
+const S={
+  step:0,
+  client:{nombre:"",email:"",telefono:"",asunto:"",referencia:newRef()},
+  notas:"",items:[],fotos:[],pdfs:[],
+  saving:false,driveOk:null,driveErr:null,
 };
 
-const COST_OP=27000, COST_AY=20000, IVA=0.13, MAT_OH=0.05, IMP=0.05;
+const COST_OP=27000,COST_AY=20000,IVA=0.13,MAT_OH=0.05,IMP=0.05;
 const BACKEND="https://ssr-whatsapp-bot-production.up.railway.app";
 const MONEDA="\u20A1";
 
-function newRef(){ return "REF-"+(Math.floor(Math.random()*900)+100)+"-"+String(new Date().getFullYear()).slice(-2); }
-const fmt = n => MONEDA+Number(n||0).toLocaleString("es-CR",{minimumFractionDigits:2,maximumFractionDigits:2});
-const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+function newRef(){return "REF-"+(Math.floor(Math.random()*900)+100)+"-"+String(new Date().getFullYear()).slice(-2);}
+const fmt=n=>MONEDA+Number(n||0).toLocaleString("es-CR",{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc=s=>String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
+// ── Dictado por voz ───────────────────────────────────────────────────────────
+let recognition=null,isListening=false;
+
+function getSR(){return window.SpeechRecognition||window.webkitSpeechRecognition||null;}
+
+function toggleDictado(){
+  const SR=getSR();
+  if(!SR){alert("Tu navegador no soporta dictado.\nUsá Safari en iPhone (iOS 14.5+) o Chrome.");return;}
+  if(isListening){recognition.stop();return;}
+
+  recognition=new SR();
+  recognition.lang="es-CR";
+  recognition.continuous=true;
+  recognition.interimResults=true;
+
+  recognition.onstart=()=>{isListening=true;_micUI();};
+
+  recognition.onresult=e=>{
+    let interim="";
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal){
+        const w=e.results[i][0].transcript.trim();
+        S.notas+=(S.notas&&!S.notas.endsWith(" ")?" ":"")+w;
+        const ta=document.getElementById("notas");
+        if(ta){ta.value=S.notas;ta.scrollTop=ta.scrollHeight;}
+      } else interim+=e.results[i][0].transcript;
+    }
+    const h=document.getElementById("mic-hint");
+    if(h) h.textContent=interim?"🎙️ "+interim:"🔴 Escuchando...";
+  };
+
+  recognition.onerror=e=>{
+    isListening=false;_micUI();
+    if(e.error==="not-allowed") alert("Permiso de micrófono denegado.\nHabilitalo en Configuración del celular.");
+  };
+
+  recognition.onend=()=>{isListening=false;_micUI();};
+  recognition.start();
+}
+
+function _micUI(){
+  const btn=document.getElementById("mic-btn");
+  const hint=document.getElementById("mic-hint");
+  if(btn){
+    btn.className="mic-btn"+(isListening?" rec":"");
+    btn.innerHTML=isListening
+      ?"<span style='font-size:15px'>⏹</span> Detener"
+      :"<span style='font-size:15px'>🎙️</span> Dictar";
+  }
+  if(hint) hint.textContent=isListening?"🔴 Escuchando...":"";
+}
+
+// ── Cálculos ─────────────────────────────────────────────────────────────────
 function calcItem(item){
   const mats=item.materiales||[];
   const matBase=mats.reduce((s,m)=>s+(+m.cantidad)*(+m.precio_unitario),0);
@@ -115,7 +168,7 @@ function calcItem(item){
   const moBase=(+item.dias||1)*((+item.operarios||1)*COST_OP+(+item.ayudantes||0)*COST_AY);
   const moUtilidad=moBase*0.5;
   const moTotal=moBase+moUtilidad;
-  return {...item,matTotal,moBase,moUtilidad,moTotal,subtotal:matTotal+moTotal};
+  return{...item,matTotal,moBase,moUtilidad,moTotal,subtotal:matTotal+moTotal};
 }
 
 function calcTotals(){
@@ -123,19 +176,12 @@ function calcTotals(){
   const subtotal=items.reduce((s,i)=>s+i.subtotal,0);
   const imp=Math.round(subtotal*IMP);
   const base=subtotal+imp;
-  return {
+  return{
     subtotalMat:items.reduce((s,i)=>s+i.matTotal,0),
     subtotalMO:items.reduce((s,i)=>s+i.moTotal,0),
-    subtotal, imprevistos:imp, baseImponible:base,
-    iva:Math.round(base*IVA), total:Math.round(base*(1+IVA))-25000
+    subtotal,imprevistos:imp,baseImponible:base,
+    iva:Math.round(base*IVA),total:Math.round(base*(1+IVA))-25000
   };
-}
-
-function cleanJSON(raw){
-  let s=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
-  const a=s.indexOf("{"),b=s.lastIndexOf("}");
-  if(a<0||b<0) throw new Error("No JSON en la respuesta");
-  return s.slice(a,b+1).replace(/,(\s*[}\]])/g,"$1");
 }
 
 async function extractPDF(file){
@@ -151,7 +197,7 @@ async function extractPDF(file){
       txt+=ct.items.map(x=>x.str).join(" ")+"\n";
     }
     return txt.trim();
-  }catch(e){ return ""; }
+  }catch(e){return "";}
 }
 
 function readB64(file){
@@ -160,6 +206,16 @@ function readB64(file){
     r.onload=e=>res({base64:e.target.result.split(",")[1],mimeType:file.type,name:file.name,preview:e.target.result});
     r.readAsDataURL(file);
   });
+}
+
+async function fetchConTimeout(url,opts,ms=120000){
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(),ms);
+  try{const r=await fetch(url,{...opts,signal:ctrl.signal});clearTimeout(t);return r;}
+  catch(e){clearTimeout(t);
+    if(e.name==="AbortError") throw new Error("Tiempo agotado. Intentá sin fotos o con menos fotos.");
+    throw new Error("Sin conexión al servidor. Verificá el internet e intentá de nuevo.");
+  }
 }
 
 // ── Pasos ─────────────────────────────────────────────────────────────────────
@@ -173,7 +229,6 @@ function goStep(n){
   render();
 }
 
-// ── Render ────────────────────────────────────────────────────────────────────
 function render(){
   const m=document.getElementById("main");
   if(S.step===0) m.innerHTML=renderInput();
@@ -186,6 +241,7 @@ function render(){
 // ── STEP 0: INPUT ─────────────────────────────────────────────────────────────
 function renderInput(){
   const c=S.client;
+  const hasSpeech=!!getSR();
   const fotoThumbs=S.fotos.map((f,i)=>`
     <div class="thumb-wrap">
       <img class="thumb" src="${esc(f.preview)}" alt="${esc(f.name)}">
@@ -206,8 +262,20 @@ function renderInput(){
     </div>
 
     <span class="sec">Notas de la visita</span>
-    <p style="font-size:12px;color:#888;margin-bottom:8px">Escribí lo que anotó Melvin — sin formato, como un WhatsApp</p>
-    <textarea class="inp" id="notas" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;line-height:1.6"
+    <p style="font-size:12px;color:#888;margin-bottom:8px">Escribí o dictá lo que observó Melvin en la visita</p>
+
+    ${hasSpeech?`
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap">
+      <button class="mic-btn${isListening?" rec":""}" id="mic-btn" onclick="toggleDictado()">
+        <span style="font-size:15px">${isListening?"⏹":"🎙️"}</span>
+        ${isListening?"Detener":"Dictar"}
+      </button>
+      <span style="font-size:12px;color:#888">${isListening?"":"Tocá para hablar, el texto aparece abajo"}</span>
+    </div>
+    <div class="mic-hint" id="mic-hint">${isListening?"🔴 Escuchando...":""}</div>`
+    :`<p style="font-size:11px;color:#bbb;margin-bottom:6px">⚠️ Dictado no disponible — usá Safari o Chrome</p>`}
+
+    <textarea class="inp" id="notas" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;line-height:1.6;margin-top:4px"
       placeholder="Ej: Bano principal, San Francisco de Heredia. Demoler tina existente, cambiar enchape piso y paredes 19m2...">${esc(S.notas)}</textarea>
 
     <div style="margin-top:16px">
@@ -215,9 +283,13 @@ function renderInput(){
       <p style="font-size:12px;color:#888;margin-bottom:8px">La IA analiza las fotos para presupuestar con más precisión</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:8px">
         ${fotoThumbs}
-        <label class="cam-btn">
+        <label class="cam-btn" title="Tomar foto con la cámara">
           <span style="font-size:22px">📷</span><span>Cámara</span>
           <input type="file" accept="image/*" capture="environment" multiple id="inp-fotos" style="display:none">
+        </label>
+        <label class="cam-btn" title="Elegir de la galería">
+          <span style="font-size:22px">🖼️</span><span>Galería</span>
+          <input type="file" accept="image/*" multiple id="inp-galeria" style="display:none">
         </label>
       </div>
       ${S.fotos.length>0?`<p style="font-size:11px;color:#1B3A6B">✅ ${S.fotos.length} foto(s) lista(s)</p>`:""}
@@ -254,8 +326,7 @@ function renderProcessing(){
 
 // ── STEP 2: REVIEW ────────────────────────────────────────────────────────────
 function renderReview(){
-  const T=calcTotals();
-  const c=S.client;
+  const T=calcTotals();const c=S.client;
   const itemCards=S.items.map((item,ii)=>{
     const matRows=(item.materiales||[]).map((m,mi)=>`
       <tr>
@@ -288,7 +359,6 @@ function renderReview(){
       </div>
     </div>`;
   }).join("");
-
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <span class="sec" style="margin-bottom:0">Revisión del presupuesto</span>
@@ -318,8 +388,7 @@ function renderReview(){
 
 // ── STEP 3: EXPORT ────────────────────────────────────────────────────────────
 function renderExport(){
-  const T=calcTotals();
-  const c=S.client;
+  const T=calcTotals();const c=S.client;
   const irows=S.items.map((i,idx)=>`
     <tr style="background:${idx%2?"#FDF5EF":"#fff"}">
       <td class="preview-tbl" style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt">${esc(i.descripcion)}</td>
@@ -329,11 +398,9 @@ function renderExport(){
       <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right">${fmt(i.moTotal)}</td>
       <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right;font-weight:600">${fmt(i.subtotal)}</td>
     </tr>`).join("");
-  const trows=[["Sub total",T.subtotal,false],["Imprevistos 5%",T.imprevistos,false],
-    ["Base imponible",T.baseImponible,true],["IVA 13%",T.iva,false],["Reembolso visita",-25000,false]].map(([k,v,b])=>
+  const trows=[["Sub total",T.subtotal,false],["IVA 13%",T.iva,false],["Reembolso pago de visita",-25000,false]].map(([k,v,b])=>
     `<tr style="${b?"background:#FDF5EF":""}"><td colspan="5" style="padding:4px 8px;font-size:10pt;text-align:right;font-weight:${b?600:400};border:1px solid #D9CFC7">${k}</td>
     <td style="border:1px solid #D9CFC7;padding:4px 8px;font-size:10pt;text-align:right;font-weight:${b?600:400}">${fmt(v)}</td></tr>`).join("");
-
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:8px">
       <span class="sec" style="margin-bottom:0">Exportar documentos</span>
@@ -346,7 +413,6 @@ function renderExport(){
         <button class="btn btn-p" onclick="doWord()">↓ Word</button>
       </div>
     </div>
-
     <div class="ok-box" id="ok-drive" ${S.driveOk?"style='display:block'":""}>
       <div style="font-weight:700;color:#1E8449;margin-bottom:6px">✅ Guardado en Drive — WhatsApp enviado a Darwin</div>
       ${S.driveOk?`<div>📁 <a href="${esc(S.driveOk.carpeta)}" target="_blank" style="color:#1B3A6B">Abrir carpeta en Drive</a></div>
@@ -356,8 +422,6 @@ function renderExport(){
       <div style="font-weight:700;color:#c0392b;margin-bottom:4px">❌ Error Drive:</div>
       <div style="font-family:monospace">${esc(S.driveErr||"")}</div>
     </div>
-
-    <!-- Preview -->
     <div style="background:#fff;padding:28px 36px;border:1px solid #ddd;border-radius:4px;font-family:Arial,sans-serif;color:#000;line-height:1.5">
       <div class="bar" style="margin-bottom:10px"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -390,134 +454,110 @@ function renderExport(){
 
 // ── Event bindings ────────────────────────────────────────────────────────────
 function bindEvents(){
-  // Input fields
   ["nombre","email","telefono","referencia","asunto"].forEach(f=>{
     const el=document.getElementById("c-"+f);
-    if(el) el.addEventListener("input",e=>{ S.client[f]=e.target.value; });
+    if(el) el.addEventListener("input",e=>{S.client[f]=e.target.value;});
   });
   const notasEl=document.getElementById("notas");
-  if(notasEl) notasEl.addEventListener("input",e=>{ S.notas=e.target.value; });
+  if(notasEl) notasEl.addEventListener("input",e=>{S.notas=e.target.value;});
 
-  // Fotos
   const fEl=document.getElementById("inp-fotos");
   if(fEl) fEl.addEventListener("change",async e=>{
     const imgs=await Promise.all(Array.from(e.target.files||[]).map(readB64));
-    S.fotos=[...S.fotos,...imgs].slice(0,8);
-    render();
+    S.fotos=[...S.fotos,...imgs].slice(0,8);render();
   });
 
-  // PDFs
+  const gEl=document.getElementById("inp-galeria");
+  if(gEl) gEl.addEventListener("change",async e=>{
+    const imgs=await Promise.all(Array.from(e.target.files||[]).map(readB64));
+    S.fotos=[...S.fotos,...imgs].slice(0,8);render();
+  });
+
   const pEl=document.getElementById("inp-pdfs");
   if(pEl) pEl.addEventListener("change",async e=>{
     const txts=await Promise.all(Array.from(e.target.files||[]).map(async f=>({name:f.name,text:await extractPDF(f)})));
-    S.pdfs=[...S.pdfs,...txts].slice(0,3);
-    render();
+    S.pdfs=[...S.pdfs,...txts].slice(0,3);render();
   });
 
-  // Procesar
   const bEl=document.getElementById("btn-procesar");
   if(bEl) bEl.addEventListener("click",procesar);
 }
 
-// ── Acciones globales (llamadas desde HTML inline) ────────────────────────────
-window.removeFoto = i=>{ S.fotos.splice(i,1); render(); };
-window.removePdf  = i=>{ S.pdfs.splice(i,1); render(); };
-window.goStep     = goStep;
-
-window.updItem = (ii,f,v)=>{
+// ── Acciones globales ─────────────────────────────────────────────────────────
+window.removeFoto=i=>{S.fotos.splice(i,1);render();};
+window.removePdf=i=>{S.pdfs.splice(i,1);render();};
+window.goStep=goStep;
+window.toggleDictado=toggleDictado;
+window.updItem=(ii,f,v)=>{
   const item={...S.items[ii],[f]:isNaN(v)||f==="descripcion"||f==="unidad"?v:parseFloat(v)||0};
-  S.items[ii]=calcItem(item);
-  // Actualizar solo el display de totales sin re-render completo
-  updateTotalsDisplay();
+  S.items[ii]=calcItem(item);updateTotalsDisplay();
 };
-
-window.updMat = (ii,mi,f,v)=>{
+window.updMat=(ii,mi,f,v)=>{
   const item=S.items[ii];
   item.materiales[mi]={...item.materiales[mi],[f]:isNaN(v)||f==="detalle"||f==="und"||f==="fuente"?v:parseFloat(v)||0};
-  S.items[ii]=calcItem(item);
-  updateTotalsDisplay();
+  S.items[ii]=calcItem(item);updateTotalsDisplay();
 };
-
-window.addMat = ii=>{
+window.addMat=ii=>{
   S.items[ii].materiales.push({detalle:"",und:"Und",cantidad:1,precio_unitario:0,fuente:"Construplaza"});
-  S.items[ii]=calcItem(S.items[ii]);
-  render();
+  S.items[ii]=calcItem(S.items[ii]);render();
 };
-
-window.delMat = (ii,mi)=>{
-  S.items[ii].materiales.splice(mi,1);
-  S.items[ii]=calcItem(S.items[ii]);
-  render();
+window.delMat=(ii,mi)=>{
+  S.items[ii].materiales.splice(mi,1);S.items[ii]=calcItem(S.items[ii]);render();
 };
 
 function updateTotalsDisplay(){
-  // Re-render solo totales para no perder el foco de los inputs
   S.items.forEach((item,ii)=>{
     const moEl=document.querySelector(`[data-mo="${ii}"]`);
     if(moEl) moEl.textContent=fmt(item.moTotal);
   });
 }
 
-// ── Procesar notas ────────────────────────────────────────────────────────────
+// ── Procesar ──────────────────────────────────────────────────────────────────
 async function procesar(){
+  if(isListening&&recognition) recognition.stop();
   const c=S.client;
-  if(!c.nombre){ showErr("err-input","Completá el nombre del cliente."); return; }
-  if(!S.notas.trim()&&S.fotos.length===0&&S.pdfs.length===0){ showErr("err-input","Agregá notas, fotos o un PDF."); return; }
-
+  if(!c.nombre){showErr("err-input","Completá el nombre del cliente.");return;}
+  if(!S.notas.trim()&&S.fotos.length===0&&S.pdfs.length===0){showErr("err-input","Agregá notas, fotos o un PDF.");return;}
   goStep(1);
   const msgs=["Analizando notas...","Interpretando fotos...","Estimando materiales...","Buscando precios CR...","Armando presupuesto..."];
   let mi=0;
-  const iv=setInterval(()=>{ mi=(mi+1)%msgs.length; const el=document.getElementById("load-msg"); if(el) el.textContent=msgs[mi]; },2000);
-
-  const pdfCtx=S.pdfs.length>0?"\n\nDOCUMENTOS/PLANOS:\n"+S.pdfs.map(p=>"--- "+p.name+" ---\n"+p.text).join("\n\n"):"";
-  const prompt="Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n"+(S.notas||"(ver fotos/documentos)")+pdfCtx+"\n\nPrecios: Construplaza, EPA, El Lagar CR. MO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%.\nMax 8 actividades. SOLO NUMEROS en precios, sin simbolos de moneda.\n\nRESPONDE SOLO JSON VALIDO:\n{\"asunto\":\"texto\",\"items\":[{\"id\":1,\"descripcion\":\"texto\",\"unidad\":\"Und\",\"cantidad\":1,\"dias\":2,\"operarios\":1,\"ayudantes\":1,\"materiales\":[{\"detalle\":\"texto\",\"und\":\"Und\",\"cantidad\":5,\"precio_unitario\":3500,\"fuente\":\"Construplaza\"}]}]}";
-
+  const iv=setInterval(()=>{mi=(mi+1)%msgs.length;const el=document.getElementById("load-msg");if(el) el.textContent=msgs[mi];},2000);
   try{
-    const content=S.fotos.length>0
-      ?[...S.fotos.map(f=>({type:"image",source:{type:"base64",media_type:f.mimeType,data:f.base64}})),{type:"text",text:prompt}]
-      :prompt;
-
-    const r=await fetch("https://api.anthropic.com/v1/messages",{
+    const r=await fetchConTimeout(BACKEND+"/api/procesar-notas",{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,
-        system:"Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.",
-        messages:[{role:"user",content}]})
-    });
+      body:JSON.stringify({notas:S.notas,fotos:S.fotos,pdfs:S.pdfs})
+    },120000);
     const data=await r.json();
     clearInterval(iv);
-    if(data.error) throw new Error(data.error.message);
-    const tb=data.content?.find(b=>b.type==="text");
-    if(!tb?.text) throw new Error("Sin respuesta de texto");
-    const parsed=JSON.parse(cleanJSON(tb.text));
-    if(parsed.asunto&&!S.client.asunto) S.client.asunto=parsed.asunto;
-    S.items=(parsed.items||[]).map(calcItem);
+    if(!data.ok) throw new Error(data.error||"Error del servidor");
+    if(data.data.asunto&&!S.client.asunto) S.client.asunto=data.data.asunto;
+    S.items=(data.data.items||[]).map(calcItem);
     goStep(2);
   }catch(e){
-    clearInterval(iv);
-    S.step=0;
-    render();
+    clearInterval(iv);S.step=0;render();
     showErr("err-input","Error procesando: "+e.message);
   }
 }
 
-// ── Guardar en Drive ──────────────────────────────────────────────────────────
-window.saveToDrive = async function(){
-  S.saving=true; S.driveOk=null; S.driveErr=null;
+// ── Drive ─────────────────────────────────────────────────────────────────────
+window.saveToDrive=async function(){
+  S.saving=true;S.driveOk=null;S.driveErr=null;
   const btn=document.getElementById("btn-drive");
-  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> Guardando...'; }
+  if(btn){btn.disabled=true;btn.innerHTML='<span class="spin">⟳</span> Guardando...';}
   try{
-    const r=await fetch(BACKEND+"/api/cotizacion",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({client:S.client,items:S.items})});
+    const r=await fetchConTimeout(BACKEND+"/api/cotizacion",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({client:S.client,items:S.items})
+    },60000);
     const data=await r.json();
-    if(data.ok){ S.driveOk=data; }
-    else{ S.driveErr=data.error||"Error del servidor"; }
-  }catch(e){ S.driveErr=e.message; }
-  S.saving=false;
-  render();
+    if(data.ok) S.driveOk=data; else S.driveErr=data.error||"Error del servidor";
+  }catch(e){S.driveErr=e.message;}
+  S.saving=false;render();
 };
 
 // ── Excel ─────────────────────────────────────────────────────────────────────
-window.doExcel = function(){
-  const T=calcTotals(); const c=S.client;
+window.doExcel=function(){
+  const T=calcTotals();const c=S.client;
   const fecha=new Date().toLocaleDateString("es-CR");
   const rows=[["SS REMODELACIONES - PRESUPUESTO INTERNO"],["Ref:",c.referencia,"Fecha:",fecha,"Cliente:",c.nombre],["Proyecto:",c.asunto],[],
     ["Item","Descripcion","Und","Cant","Dias","Op","Ay","Mat.Base","Mat+5%","MO","Util","Total MO","TOTAL"]];
@@ -527,12 +567,9 @@ window.doExcel = function(){
     (item.materiales||[]).forEach(m=>rows.push(["","  > "+m.detalle+" ("+m.fuente+")",m.und,m.cantidad,m.precio_unitario,m.cantidad*m.precio_unitario]));
     rows.push(["","Subtotal mat:","","","","","","",item.matTotal]);rows.push([]);
   });
-  rows.push(["","Sub total","","","","","","","",T.subtotal]);
-  rows.push(["","Imprevistos 5%","","","","","","","",T.imprevistos]);
-  rows.push(["","Base imponible","","","","","","","",T.baseImponible]);
-  rows.push(["","IVA 13%","","","","","","","",T.iva]);
-  rows.push(["","Reembolso visita","","","","","","","",-25000]);
-  rows.push(["","TOTAL","","","","","","","",T.total]);
+  rows.push(["","Sub total","","","","","","","",T.subtotal],["","Imprevistos 5%","","","","","","","",T.imprevistos],
+    ["","Base imponible","","","","","","","",T.baseImponible],["","IVA 13%","","","","","","","",T.iva],
+    ["","Reembolso visita","","","","","","","",-25000],["","TOTAL","","","","","","","",T.total]);
   const wb=XLSX.utils.book_new();
   const ws=XLSX.utils.aoa_to_sheet(rows);
   ws["!cols"]=[{wch:5},{wch:38},{wch:8},{wch:7},{wch:6},{wch:5},{wch:5},{wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
@@ -548,29 +585,23 @@ window.doExcel = function(){
   XLSX.writeFile(wb,c.referencia+"_presupuesto_interno.xlsx");
 };
 
-// ── Word HTML ─────────────────────────────────────────────────────────────────
-window.doWord = function(){
-  const T=calcTotals(); const c=S.client;
-  const fecha=new Date().toLocaleDateString("es-CR");
+// ── Word ──────────────────────────────────────────────────────────────────────
+window.doWord=function(){
+  const T=calcTotals();const c=S.client;const fecha=new Date().toLocaleDateString("es-CR");
   const irows=S.items.map((i,idx)=>`<tr style="background:${idx%2?"#FDF5EF":"#fff"}">
     <td>${i.descripcion}</td><td align="center">${i.unidad||"Und"}</td>
     <td align="right">${i.cantidad||1}</td><td align="right">${fmt(i.matTotal)}</td>
     <td align="right">${fmt(i.moTotal)}</td><td align="right"><b>${fmt(i.subtotal)}</b></td></tr>`).join("");
-  const trows=[["Sub total",T.subtotal,""],["Imprevistos 5%",T.imprevistos,""],
-    ["Base imponible",T.baseImponible,"font-weight:600;background:#FDF5EF;border-top:2px solid #D4541A"],
-    ["IVA 13%",T.iva,""],["Reembolso pago de visita",-25000,""]
+  const trows=[["Sub total",T.subtotal,""],["IVA 13%",T.iva,""],["Reembolso pago de visita",-25000,""]
   ].map(([k,v,s])=>`<tr><td colspan="5" align="right" style="${s}">${k}</td><td align="right" style="${s}">${fmt(v)}</td></tr>`).join("");
   const lista=S.items.map(i=>`<li>${i.descripcion}</li>`).join("");
   const h=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${c.referencia}</title>
   <style>body{font-family:Arial,sans-serif;font-size:11pt;margin:2cm;color:#1a1a1a}
-  table{width:100%;border-collapse:collapse;margin:8px 0}
-  th{background:#1B3A6B;color:#fff;padding:7px 10px;font-size:10pt}
-  th:first-child{text-align:left}th{text-align:right}
-  td{border:1px solid #D9CFC7;padding:6px 10px;font-size:10pt}
+  table{width:100%;border-collapse:collapse;margin:8px 0}th{background:#1B3A6B;color:#fff;padding:7px 10px;font-size:10pt}
+  th:first-child{text-align:left}th{text-align:right}td{border:1px solid #D9CFC7;padding:6px 10px;font-size:10pt}
   .grand td{background:#1B3A6B;color:#fff;font-weight:700;font-size:12pt;padding:8px;border:none}
   h3{color:#1B3A6B;font-size:12pt;border-bottom:2px solid #D4541A;padding-bottom:4px;margin:16px 0 8px}
-  ul{font-size:10pt;line-height:1.9;padding-left:20px}
-  .bar{height:3px;background:linear-gradient(to right,#D4541A,#1B3A6B)}
+  ul{font-size:10pt;line-height:1.9;padding-left:20px}.bar{height:3px;background:linear-gradient(to right,#D4541A,#1B3A6B)}
   </style></head><body>
   <div class="bar"></div>
   <table style="border:none;margin-bottom:8px"><tr>
@@ -579,9 +610,8 @@ window.doWord = function(){
   </tr></table><div class="bar" style="margin-bottom:12px"></div>
   <table style="border:none;font-size:10pt;margin-bottom:12px"><tr>
     <td style="border:none"><b>Fecha:</b> ${fecha}</td><td style="border:none"><b>Ref.:</b> ${c.referencia}</td>
-  </tr><tr><td colspan="2" style="border:none">
-    <b>Para:</b> ${c.nombre}${c.telefono?" | "+c.telefono:""}${c.email?" | "+c.email:""}
-  </td></tr><tr><td colspan="2" style="border:none"><b>Asunto:</b> ${c.asunto}</td></tr></table>
+  </tr><tr><td colspan="2" style="border:none"><b>Para:</b> ${c.nombre}${c.telefono?" | "+c.telefono:""}${c.email?" | "+c.email:""}</td>
+  </tr><tr><td colspan="2" style="border:none"><b>Asunto:</b> ${c.asunto}</td></tr></table>
   <p>Estimado/a <b>${c.nombre}</b>; presentamos propuesta para: <b>${c.asunto}</b>.</p>
   <h3>TRABAJOS INCLUIDOS</h3><ul>${lista}</ul>
   <h3>PRESUPUESTO</h3>
@@ -600,20 +630,15 @@ window.doWord = function(){
     <td style="border:none;width:45%;text-align:center;border-top:1px solid #333;padding-top:4px;font-size:10pt">${c.nombre}<br><b>Cliente</b></td>
   </tr></table>
   <p style="border-top:2px solid #1B3A6B;padding-top:6px;font-size:9pt;color:#888;text-align:center;margin-top:20px">
-    www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477</p>
-  </body></html>`;
+    www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477</p></body></html>`;
   const blob=new Blob([h],{type:"text/html;charset=utf-8"});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement("a");
+  const url=URL.createObjectURL(blob);const a=document.createElement("a");
   a.href=url;a.download=c.referencia+"_cotizacion.html";
   document.body.appendChild(a);a.click();
   setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function showErr(id,msg){ const el=document.getElementById(id); if(el){el.textContent=msg;el.style.display="block";} }
-
-// ── Iniciar ───────────────────────────────────────────────────────────────────
+function showErr(id,msg){const el=document.getElementById(id);if(el){el.textContent=msg;el.style.display="block";}}
 render();
 </script>
 </body>
