@@ -247,6 +247,55 @@ app.post("/api/cotizacion", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+// ── Transcripción de voz ────────────────────────────────────────────────────
+// Fallback para Firefox / navegadores sin Web Speech API.
+// Se activa solo cuando el navegador usa MediaRecorder y no puede transcribir solo.
+app.post("/api/transcribir-voz", async (req, res) => {
+  try {
+    const { audio, mimeType } = req.body;
+    if (!audio) return res.status(400).json({ ok: false, error: "Sin audio" });
+
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    // Intentar que Claude procese el audio como documento
+    try {
+      const r = await anthropic.messages.create({
+        model: "claude-sonnet-4-6",
+        max_tokens: 1000,
+        system: "Sos un asistente que transcribe notas de obras de construcción en Costa Rica. Transcribí el audio exactamente, en español. Solo devolvé el texto transcrito, sin explicaciones ni formato.",
+        messages: [{
+          role: "user",
+          content: [
+            {
+              type: "document",
+              source: { type: "base64", media_type: mimeType || "audio/webm", data: audio }
+            },
+            { type: "text", text: "Transcribí este audio de notas de obra de construcción." }
+          ]
+        }]
+      });
+      const texto = (r.content || [])
+        .filter(b => b.type === "text")
+        .map(b => b.text)
+        .join("")
+        .trim();
+      if (texto) {
+        console.log("✅ /api/transcribir-voz OK:", texto.slice(0, 60));
+        return res.json({ ok: true, texto });
+      }
+    } catch (e) {
+      console.warn("⚠ Claude no pudo procesar el audio:", e.message);
+    }
+
+    // Si Claude no puede transcribir, decirle al cliente que descargue localmente
+    res.json({ ok: false, error: "Transcripción no disponible — audio descargado localmente" });
+
+  } catch (err) {
+    console.error("✖ /api/transcribir-voz:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`
