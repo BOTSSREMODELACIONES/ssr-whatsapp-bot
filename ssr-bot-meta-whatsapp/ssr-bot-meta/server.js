@@ -7,7 +7,7 @@ const { sendDailyReminders } = require("./bot/reminders");
 
 const app = express();
 
-// ── CORS — permite llamadas desde el cotizador (Claude artifacts, web) ────────
+// ── CORS ──────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -32,59 +32,35 @@ if (missing.length) {
   process.exit(1);
 }
 
-// ── Cron: recordatorios diarios a las 8:00 AM hora Costa Rica ────────────────
-cron.schedule(
-  "0 8 * * *",
-  async () => {
-    console.log("⏰ Cron activado — enviando recordatorios del día...");
-    await sendDailyReminders();
-  },
-  { timezone: "America/Costa_Rica" }
-);
+// ── Cron: recordatorios 8:00 AM Costa Rica ───────────────────────────────────
+cron.schedule("0 8 * * *", async () => {
+  console.log("⏰ Cron activado — enviando recordatorios del día...");
+  await sendDailyReminders();
+}, { timezone: "America/Costa_Rica" });
 console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BUFFER DE MENSAJES — agrupa fotos múltiples del mismo cliente en un solo lote
-// Si llegan 3 imágenes en 1.5s, se procesan juntas en UNA sola llamada
-// ─────────────────────────────────────────────────────────────────────────────
-const messageBuffer = new Map(); // phone → { items: [], timer }
-const BATCH_WINDOW_MS = 1500;    // ventana de agrupación en milisegundos
+// ── Buffer de mensajes (agrupa fotos múltiples en un lote) ────────────────────
+const messageBuffer = new Map();
+const BATCH_WINDOW_MS = 1500;
 
 function flushBuffer(from) {
   const buffer = messageBuffer.get(from);
-  if (!buffer || !buffer.items.length) {
-    messageBuffer.delete(from);
-    return;
-  }
-
+  if (!buffer || !buffer.items.length) { messageBuffer.delete(from); return; }
   const items = buffer.items;
   messageBuffer.delete(from);
-
-  // Tomar el último messageId, combinar textos, recolectar todos los mediaIds
   const messageId   = items[items.length - 1].messageId;
   const texts       = items.map(i => i.text).filter(Boolean);
   const mediaIds    = items.map(i => i.mediaId).filter(Boolean);
   const combinedText = texts.join(" ") || null;
-
-  console.log(
-    `📦 Lote de +${from}: ${items.length} mensaje(s), ` +
-    `${mediaIds.length} foto(s), texto: "${combinedText || "[ninguno]"}"`
-  );
-
+  console.log(`📦 Lote de +${from}: ${items.length} msg, ${mediaIds.length} foto(s), texto: "${combinedText || "[ninguno]"}"`);
   handleMessage("+" + from, combinedText, messageId, mediaIds.length ? mediaIds : null)
     .catch(err => console.error("❌ Error procesando lote de", from, ":", err));
 }
 
 function addToBuffer(from, messageId, text, mediaId) {
-  if (!messageBuffer.has(from)) {
-    messageBuffer.set(from, { items: [], timer: null });
-  }
-
+  if (!messageBuffer.has(from)) messageBuffer.set(from, { items: [], timer: null });
   const buffer = messageBuffer.get(from);
-
-  // Cancelar timer anterior y crear uno nuevo (reset de ventana)
   if (buffer.timer) clearTimeout(buffer.timer);
-
   buffer.items.push({ messageId, text: text || null, mediaId: mediaId || null });
   buffer.timer = setTimeout(() => flushBuffer(from), BATCH_WINDOW_MS);
 }
@@ -108,67 +84,37 @@ app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
     if (body?.object !== "whatsapp_business_account") return;
-
-    const entry    = body.entry?.[0];
-    const changes  = entry?.changes?.[0];
-    const value    = changes?.value;
-    const messages = value?.messages;
+    const messages = body.entry?.[0]?.changes?.[0]?.value?.messages;
     if (!messages?.length) return;
 
     for (const msg of messages) {
-      const from      = msg.from;
-      const messageId = msg.id;
-
+      const from = msg.from, messageId = msg.id;
       if (msg.type === "text") {
-        // ── Mensaje de texto normal ──────────────────────────────────────
         const text = msg.text?.body;
         if (!text) continue;
         console.log(`📨 Texto de +${from}: "${text.substring(0, 80)}"`);
         addToBuffer(from, messageId, text, null);
-
       } else if (msg.type === "interactive") {
-        // ── Botones o listas ─────────────────────────────────────────────
-        const text =
-          msg.interactive?.button_reply?.id ||
-          msg.interactive?.list_reply?.id ||
-          msg.interactive?.button_reply?.title;
+        const text = msg.interactive?.button_reply?.id || msg.interactive?.list_reply?.id || msg.interactive?.button_reply?.title;
         if (!text) continue;
         addToBuffer(from, messageId, text, null);
-
       } else if (msg.type === "location") {
-        // ── Pin de ubicación desde WhatsApp ──────────────────────────────
         const { latitude, longitude, name, address } = msg.location;
         const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
-        const text = name
-          ? `Mi ubicación: ${name}${address ? ", " + address : ""} — ${mapsLink}`
-          : `Mi ubicación: ${mapsLink}`;
+        const text = name ? `Mi ubicación: ${name}${address ? ", " + address : ""} — ${mapsLink}` : `Mi ubicación: ${mapsLink}`;
         console.log(`📍 Ubicación de +${from}: ${text}`);
         addToBuffer(from, messageId, text, null);
-
       } else if (msg.type === "image") {
-        // ── Foto — se agrega al buffer y se agrupa con otras fotos ───────
-        const mediaId = msg.image?.id;
-        const caption = msg.image?.caption || "";
+        const mediaId = msg.image?.id, caption = msg.image?.caption || "";
         console.log(`🖼️ Imagen de +${from} (mediaId: ${mediaId})`);
         addToBuffer(from, messageId, caption || null, mediaId);
-
       } else if (msg.type === "video") {
-        // ── Video — Sasha lo maneja con contexto, sin mensaje hardcoded ──
-        console.log(`🎥 Video de +${from}`);
         const caption = msg.video?.caption || "";
-        const videoContext = caption
-          ? `[El cliente envió un video con el mensaje: "${caption}"]`
-          : "[El cliente envió un video de su proyecto]";
+        const videoContext = caption ? `[El cliente envió un video con el mensaje: "${caption}"]` : "[El cliente envió un video de su proyecto]";
         addToBuffer(from, messageId, videoContext, null);
-
       } else if (msg.type === "audio") {
-        // ── Audio ────────────────────────────────────────────────────────
-        console.log(`🎙️ Audio de +${from} — tipo no procesable`);
-        const audioContext = "[El cliente envió un mensaje de voz]";
-        addToBuffer(from, messageId, audioContext, null);
-
+        addToBuffer(from, messageId, "[El cliente envió un mensaje de voz]", null);
       } else {
-        // ── Sticker, documento, etc. — ignorar silenciosamente ───────────
         console.log(`⚠️ Tipo ignorado: ${msg.type} de +${from}`);
       }
     }
@@ -178,51 +124,36 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ── Health & status ───────────────────────────────────────────────────────────
-app.get("/", (req, res) =>
-  res.json({
-    bot: "SS Remodelaciones — Sasha",
-    status: "✅ operando",
-    api: "Meta WhatsApp Business API",
-    features: [
-      "visión de fotos (múltiples)",
-      "análisis de videos",
-      "recordatorios automáticos",
-      "detección de idioma",
-      "asesoría de diseño e ingeniería",
-    ],
-    ts: new Date().toISOString(),
-  })
-);
+app.get("/", (req, res) => res.json({
+  bot: "SS Remodelaciones — Sasha",
+  status: "✅ operando",
+  api: "Meta WhatsApp Business API",
+  features: ["visión de fotos (múltiples)", "análisis de videos", "recordatorios automáticos", "detección de idioma"],
+  ts: new Date().toISOString(),
+}));
 
-app.get("/health", (_req, res) =>
-  res.json({ ok: true, uptime: process.uptime() })
-);
+app.get("/health", (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-// ── Cotizador Web App ─────────────────────────────────────────────────────────
+// ── Cotizador Web App — NO caché para que el celular siempre descargue fresco ─
 app.get("/cotizador", (_req, res) => {
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   res.sendFile(path.join(__dirname, "public", "cotizador.html"));
 });
 
-// PWA manifest para instalación en celular
+// PWA manifest
 app.get("/cotizador-manifest.json", (_req, res) => {
   res.json({
-    name: "Cotizador SSR",
-    short_name: "Cotizador",
+    name: "Cotizador SSR", short_name: "Cotizador",
     description: "SS Remodelaciones — Sistema de cotizaciones",
-    start_url: "/cotizador",
-    display: "standalone",
-    background_color: "#F4F6F9",
-    theme_color: "#1B3A6B",
-    icons: [{
-      src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%231B3A6B'/><text y='68' x='50' font-size='55' text-anchor='middle' fill='%23D4541A' font-family='Arial' font-weight='bold'>SS</text></svg>",
-      sizes: "192x192",
-      type: "image/svg+xml"
-    }]
+    start_url: "/cotizador", display: "standalone",
+    background_color: "#F4F6F9", theme_color: "#1B3A6B",
+    icons: [{ src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%231B3A6B'/><text y='68' x='50' font-size='55' text-anchor='middle' fill='%23D4541A' font-family='Arial' font-weight='bold'>SS</text></svg>", sizes: "192x192", type: "image/svg+xml" }]
   });
 });
 
 app.get("/test-reminders", async (_req, res) => {
-  console.log("🧪 Recordatorios disparados manualmente");
   await sendDailyReminders();
   res.json({ ok: true, message: "Recordatorios ejecutados" });
 });
@@ -238,7 +169,8 @@ app.post("/api/procesar-notas", async (req, res) => {
       ? "\n\nDOCUMENTOS/PLANOS:\n" + pdfs.map(p => "--- " + p.name + " ---\n" + p.text).join("\n\n")
       : "";
 
-    const prompt = "Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n" +
+    const prompt =
+      "Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos de una visita y genera un presupuesto.\n\nNOTAS:\n" +
       (notas || "(ver fotos/documentos)") + pdfCtx +
       "\n\nPrecios: Construplaza, EPA, El Lagar CR. MO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%.\nMax 8 actividades. SOLO NUMEROS en precios, sin simbolos de moneda.\n\n" +
       'RESPONDE SOLO JSON VALIDO:\n{"asunto":"texto","items":[{"id":1,"descripcion":"texto","unidad":"Und","cantidad":1,"dias":2,"operarios":1,"ayudantes":1,"materiales":[{"detalle":"texto","und":"Und","cantidad":5,"precio_unitario":3500,"fuente":"Construplaza"}]}]}';
@@ -247,7 +179,7 @@ app.post("/api/procesar-notas", async (req, res) => {
       ? [...fotos.map(f => ({ type: "image", source: { type: "base64", media_type: f.mimeType, data: f.base64 } })), { type: "text", text: prompt }]
       : prompt;
 
-    // ✅ FIX: modelo actualizado de claude-sonnet-4-5 → claude-sonnet-4-6
+    // ✅ Modelo actualizado a claude-sonnet-4-6
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 4000,
@@ -260,7 +192,6 @@ app.post("/api/procesar-notas", async (req, res) => {
     const a = json.indexOf("{"), b = json.lastIndexOf("}");
     if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
     json = json.slice(a, b + 1).replace(/,(\s*[}\]])/g, "$1");
-
     res.json({ ok: true, data: JSON.parse(json) });
   } catch (err) {
     console.error("❌ /api/procesar-notas:", err.message);
@@ -268,13 +199,12 @@ app.post("/api/procesar-notas", async (req, res) => {
   }
 });
 
-// ── Cotizador SSR ─────────────────────────────────────────────────────────────
+// ── Cotizacion → Drive ────────────────────────────────────────────────────────
 app.post("/api/cotizacion", async (req, res) => {
   try {
     const { client, items } = req.body;
-    if (!client?.referencia || !client?.nombre || !items?.length) {
+    if (!client?.referencia || !client?.nombre || !items?.length)
       return res.status(400).json({ ok: false, error: "Faltan datos requeridos" });
-    }
     console.log(`📋 POST /api/cotizacion — ${client.referencia} (${client.nombre})`);
     const { procesarCotizacion } = require("./bot/cotizacion");
     const result = await procesarCotizacion({ client, items });
@@ -292,7 +222,6 @@ app.listen(PORT, () => {
 ║  📡  Meta WhatsApp Business API                      ║
 ║  🤖  IA: Claude Sonnet 4.6 (visión activada)         ║
 ║  ⏰  Recordatorios: 8:00 AM CR diario               ║
-║  🌐  Idiomas: ES / EN automático                     ║
 ║  🚀  Puerto: ${PORT}                                    ║
 ║  📬  Webhook: GET|POST /webhook                      ║
 ╚══════════════════════════════════════════════════════╝
