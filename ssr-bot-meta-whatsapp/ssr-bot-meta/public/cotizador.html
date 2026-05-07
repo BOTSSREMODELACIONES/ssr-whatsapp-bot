@@ -633,7 +633,7 @@ window.doWord=function(){
     www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477</p></body></html>`;
   const blob=new Blob([h],{type:"text/html;charset=utf-8"});
   const url=URL.createObjectURL(blob);const a=document.createElement("a");
-  a.href=url;a.download=c.referencia+"_cotizacion.html";
+  a.href=url;a.download=c.referencia+"_cotizacion.doc";
   document.body.appendChild(a);a.click();
   setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
 };
