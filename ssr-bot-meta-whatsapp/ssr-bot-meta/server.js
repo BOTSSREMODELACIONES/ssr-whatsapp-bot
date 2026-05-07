@@ -191,7 +191,10 @@ app.post("/api/procesar-notas", async (req, res) => {
     let json = text.replace(/```json/gi, "").replace(/```/g, "").trim();
     const a = json.indexOf("{"), b = json.lastIndexOf("}");
     if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
-    json = json.slice(a, b + 1).replace(/,(\s*[}\]])/g, "$1");
+    json = json.slice(a, b + 1)
+      .replace(/\r?\n/g, " ")          // ✅ FIX: saltos de línea literales dentro de strings rompen el JSON
+      .replace(/\t/g, " ")             // tabs también
+      .replace(/,(\s*[}\]])/g, "$1");  // trailing commas
     res.json({ ok: true, data: JSON.parse(json) });
   } catch (err) {
     console.error("❌ /api/procesar-notas:", err.message);
