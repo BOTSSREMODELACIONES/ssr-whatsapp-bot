@@ -61,6 +61,24 @@ input,textarea,select,button{font-family:inherit}
 .preview-tbl th{background:#1B3A6B;color:#fff;padding:6px 8px;font-size:10pt;text-align:right}
 .preview-tbl th:first-child{text-align:left}
 .preview-tbl td{border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt}
+/* ── Grabador de voz ── */
+.voz-wrap{margin-top:8px;display:flex;flex-direction:column;gap:8px}
+.voz-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.btn-voz{display:inline-flex;align-items:center;gap:6px;border:1.5px solid #1B3A6B;border-radius:20px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;transition:.2s;background:#f0f4ff;color:#1B3A6B}
+.btn-voz.grabando{background:#e74c3c;color:#fff;border-color:#e74c3c;animation:pulso 1.2s ease-in-out infinite}
+@keyframes pulso{0%,100%{box-shadow:0 0 0 0 rgba(231,76,60,.5)}60%{box-shadow:0 0 0 8px rgba(231,76,60,0)}}
+.voz-interim{font-size:12px;color:#555;font-style:italic;min-height:18px;padding:5px 10px;background:#f9f9f9;border-radius:4px;border-left:3px solid #D4541A;display:none}
+.voz-interim.visible{display:block}
+.voz-status{font-size:11px;color:#888;margin-top:2px}
+.voz-ondas{display:none;align-items:center;gap:3px;height:20px}
+.voz-ondas.visible{display:flex}
+.voz-ondas span{display:inline-block;width:3px;border-radius:2px;background:#e74c3c;animation:onda 1s ease-in-out infinite}
+.voz-ondas span:nth-child(1){height:6px;animation-delay:0s}
+.voz-ondas span:nth-child(2){height:14px;animation-delay:.15s}
+.voz-ondas span:nth-child(3){height:20px;animation-delay:.3s}
+.voz-ondas span:nth-child(4){height:14px;animation-delay:.45s}
+.voz-ondas span:nth-child(5){height:6px;animation-delay:.6s}
+@keyframes onda{0%,100%{transform:scaleY(.4)}50%{transform:scaleY(1)}}
 </style>
 </head>
 <body>
@@ -233,6 +251,17 @@ function renderInput(){
     <p style="font-size:12px;color:#888;margin-bottom:8px">Escribí lo que anotó Melvin – sin formato, como un WhatsApp</p>
     <textarea class="inp" id="notas" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;line-height:1.6"
       placeholder="Ej: Baño principal, San Francisco de Heredia. Demoler tina existente, cambiar enchape piso y paredes 19m2...">${esc(S.notas)}</textarea>
+
+    <div class="voz-wrap">
+      <div class="voz-bar">
+        <button class="btn-voz" id="btn-voz" onclick="toggleVoz()">🎙 Grabar voz</button>
+        <div class="voz-ondas" id="voz-ondas">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <span class="voz-status" id="voz-status"></span>
+      </div>
+      <div class="voz-interim" id="voz-interim"></div>
+    </div>
 
     <div style="margin-top:16px">
       <span class="sec">📷 Fotos de la visita</span>
@@ -758,6 +787,158 @@ a{color:#1B3A6B;font-size:18pt;font-weight:700;text-decoration:none}</style>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function showErr(id,msg){ const el=document.getElementById(id); if(el){el.textContent=msg;el.style.display="block";} }
+
+// ── 🎙 GRABADOR DE VOZ — Web Speech API + MediaRecorder fallback ──────────────
+// Funciona en: Chrome Android/PC, Safari iOS 14.5+, Edge, Firefox (MediaRecorder)
+let _recognition=null, _mediaRec=null, _audioChunks=[], _vozActiva=false, _vozModo=null;
+
+function _detectarModo(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(SR) return 'speech';
+  if(navigator.mediaDevices&&window.MediaRecorder) return 'media';
+  return null;
+}
+
+function toggleVoz(){
+  if(_vozActiva) _stopVoz();
+  else _startVoz();
+}
+
+async function _startVoz(){
+  _vozModo=_detectarModo();
+  if(!_vozModo){
+    _setStatus('⚠ Usá Chrome o Safari actualizado para grabar voz'); return;
+  }
+  if(_vozModo==='speech') _startSpeech();
+  else await _startMedia();
+}
+
+function _startSpeech(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  _recognition=new SR();
+  _recognition.continuous=true;
+  _recognition.interimResults=true;
+  _recognition.lang='es-CR';
+  _recognition.maxAlternatives=1;
+
+  _recognition.onstart=()=>{ _vozActiva=true; _uiGrabando(true); _setStatus('Escuchando...'); };
+
+  _recognition.onresult=(ev)=>{
+    let interim='', final='';
+    for(let i=ev.resultIndex;i<ev.results.length;i++){
+      if(ev.results[i].isFinal) final+=ev.results[i][0].transcript+' ';
+      else interim+=ev.results[i][0].transcript;
+    }
+    if(final){
+      S.notas+=(S.notas&&!S.notas.endsWith(' ')?' ':'')+final.trim()+' ';
+      const el=document.getElementById('notas'); if(el) el.value=S.notas;
+    }
+    const ip=document.getElementById('voz-interim');
+    if(ip){ ip.textContent=interim; ip.className='voz-interim'+(interim?' visible':''); }
+  };
+
+  _recognition.onerror=(ev)=>{
+    // 'no-speech' es normal — reiniciar silenciosamente
+    if(ev.error==='no-speech'){ try{_recognition.start();}catch(e){} return; }
+    if(ev.error==='not-allowed'){ _setStatus('⚠ Permiso de micrófono denegado'); _stopVoz(); return; }
+    if(ev.error==='aborted') return;
+    _setStatus('Error: '+ev.error);
+    _stopVoz();
+  };
+
+  _recognition.onend=()=>{
+    if(_vozActiva) try{ _recognition.start(); }catch(e){}
+  };
+
+  try{ _recognition.start(); }
+  catch(e){ _setStatus('Error al iniciar: '+e.message); }
+}
+
+async function _startMedia(){
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,sampleRate:16000}});
+    const mime=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus','audio/ogg'].find(t=>{ try{return MediaRecorder.isTypeSupported(t);}catch(e){return false;} })||'';
+    _mediaRec=new MediaRecorder(stream, mime?{mimeType:mime}:{});
+    _audioChunks=[];
+    _mediaRec.ondataavailable=e=>{ if(e.data&&e.data.size>0) _audioChunks.push(e.data); };
+    _mediaRec.onstop=async()=>{
+      stream.getTracks().forEach(t=>t.stop());
+      const blob=new Blob(_audioChunks,{type:_mediaRec.mimeType||'audio/webm'});
+      await _transcribirAudio(blob);
+    };
+    _mediaRec.start(500);
+    _vozActiva=true;
+    _uiGrabando(true);
+    _setStatus('Grabando… (sin transcripción automática en este navegador)');
+  }catch(e){
+    _setStatus('⚠ '+(e.name==='NotAllowedError'?'Permiso de micrófono denegado':e.message));
+  }
+}
+
+function _stopVoz(){
+  _vozActiva=false;
+  if(_recognition){ try{_recognition.stop();}catch(e){} _recognition=null; }
+  if(_mediaRec&&_mediaRec.state!=='inactive'){ _mediaRec.stop(); }
+  _uiGrabando(false);
+  const ip=document.getElementById('voz-interim');
+  if(ip){ ip.textContent=''; ip.className='voz-interim'; }
+}
+
+async function _transcribirAudio(blob){
+  // Intenta transcribir en el servidor vía Claude
+  _setStatus('⏳ Transcribiendo audio…');
+  try{
+    const b64=await new Promise(res=>{
+      const fr=new FileReader();
+      fr.onload=e=>res(e.target.result.split(',')[1]);
+      fr.readAsDataURL(blob);
+    });
+    const r=await fetchConTimeout(BACKEND+'/api/transcribir-voz',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({audio:b64,mimeType:blob.type})
+    },30000);
+    const data=await r.json();
+    if(data.ok&&data.texto){
+      S.notas+=(S.notas?' ':'')+data.texto.trim()+' ';
+      const el=document.getElementById('notas'); if(el) el.value=S.notas;
+      _setStatus('✅ Transcripción lista');
+    } else {
+      // Si el servidor no puede, guardar el audio localmente
+      _ofrecerDescargarAudio(blob);
+      _setStatus('Servidor no disponible — audio descargado');
+    }
+  }catch(e){
+    _ofrecerDescargarAudio(blob);
+    _setStatus('Audio guardado localmente');
+  }
+}
+
+function _ofrecerDescargarAudio(blob){
+  const url=URL.createObjectURL(blob);
+  const ext=blob.type.includes('mp4')?'m4a':blob.type.includes('ogg')?'ogg':'webm';
+  const a=document.createElement('a');
+  a.href=url; a.download='nota_voz_'+Date.now()+'.'+ext;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); },200);
+}
+
+function _uiGrabando(grabando){
+  const btn=document.getElementById('btn-voz');
+  const ondas=document.getElementById('voz-ondas');
+  if(btn){
+    btn.className='btn-voz'+(grabando?' grabando':'');
+    btn.innerHTML=grabando?'⏹ Detener':'🎙 Grabar voz';
+  }
+  if(ondas) ondas.className='voz-ondas'+(grabando?' visible':'');
+}
+
+function _setStatus(msg){
+  const el=document.getElementById('voz-status');
+  if(el) el.textContent=msg;
+}
+
+window.toggleVoz=toggleVoz;
 
 // ── Iniciar ───────────────────────────────────────────────────────────────────
 render();
