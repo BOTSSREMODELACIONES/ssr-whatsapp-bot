@@ -120,31 +120,45 @@ function toggleDictado(){
 
   recognition=new SR();
   recognition.lang="es-CR";
-  recognition.continuous=true;
+  recognition.continuous=false;      // false = más compatible con Android
   recognition.interimResults=true;
 
   recognition.onstart=()=>{isListening=true;_micUI();};
 
   recognition.onresult=e=>{
-    let interim="";
-    for(let i=e.resultIndex;i<e.results.length;i++){
-      if(e.results[i].isFinal){
-        const w=e.results[i][0].transcript.trim();
+    // Procesar SOLO el primer resultado (index 0) para evitar duplicados en Android
+    const result=e.results[0];
+    if(!result) return;
+    if(result.isFinal){
+      const w=result[0].transcript.trim();
+      if(w){
         S.notas+=(S.notas&&!S.notas.endsWith(" ")?" ":"")+w;
         const ta=document.getElementById("notas");
         if(ta){ta.value=S.notas;ta.scrollTop=ta.scrollHeight;}
-      } else interim+=e.results[i][0].transcript;
+      }
     }
     const h=document.getElementById("mic-hint");
-    if(h) h.textContent=interim?"🎙️ "+interim:"🔴 Escuchando...";
+    if(h) h.textContent=result.isFinal?"🔴 Escuchando...":"🎙️ "+result[0].transcript;
   };
 
   recognition.onerror=e=>{
-    isListening=false;_micUI();
-    if(e.error==="not-allowed") alert("Permiso de micrófono denegado.\nHabilitalo en Configuración del celular.");
+    if(e.error==="not-allowed"){
+      isListening=false;_micUI();
+      alert("Permiso de micrófono denegado.\nHabilitalo en Configuración del celular.");
+      return;
+    }
+    // En Android algunos errores son normales (abrupt-end), reiniciar
+    if(isListening) try{ recognition.start(); }catch(_){}
   };
 
-  recognition.onend=()=>{isListening=false;_micUI();};
+  recognition.onend=()=>{
+    // Reinicio automático para simular continuous en todos los dispositivos
+    if(isListening){
+      try{ recognition.start(); }catch(_){ isListening=false;_micUI(); }
+    } else {
+      _micUI();
+    }
+  };
   recognition.start();
 }
 
@@ -550,7 +564,13 @@ window.saveToDrive=async function(){
       body:JSON.stringify({client:S.client,items:S.items})
     },60000);
     const data=await r.json();
-    if(data.ok) S.driveOk=data; else S.driveErr=data.error||"Error del servidor";
+    if(data.ok){
+      S.driveOk=data;
+      // Actualizar REF con el número real asignado por el backend
+      if(data.referencia && data.referencia!==S.client.referencia){
+        S.client.referencia=data.referencia;
+      }
+    } else S.driveErr=data.error||"Error del servidor";
   }catch(e){S.driveErr=e.message;}
   S.saving=false;render();
 };
