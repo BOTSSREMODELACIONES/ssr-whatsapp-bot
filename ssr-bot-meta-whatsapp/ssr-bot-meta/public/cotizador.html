@@ -60,11 +60,9 @@ input,textarea,select,button{font-family:inherit}
 .preview-tbl th{background:#1B3A6B;color:#fff;padding:6px 8px;font-size:10pt;text-align:right}
 .preview-tbl th:first-child{text-align:left}
 .preview-tbl td{border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt}
-/* ── Dictado ── */
-.mic-btn{display:inline-flex;align-items:center;gap:6px;border:1px solid #1B3A6B;border-radius:6px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;background:#fff;color:#1B3A6B;transition:.2s;user-select:none}
-.mic-btn.rec{background:#e74c3c;color:#fff;border-color:#e74c3c;animation:pulse 1.2s ease-in-out infinite}
-@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(231,76,60,.4)}50%{box-shadow:0 0 0 8px rgba(231,76,60,0)}}
-.mic-hint{font-size:12px;color:#aaa;margin-top:4px;min-height:18px;font-style:italic}
+/* ── Retry notice ── */
+.retry-box{background:#fff8e1;border:1px solid #f9a825;border-radius:8px;padding:12px 16px;margin-top:12px;font-size:13px;color:#795548;text-align:center;display:none}
+.retry-countdown{font-size:22px;font-weight:700;color:#D4541A;display:block;margin:4px 0}
 </style>
 </head>
 <body>
@@ -84,6 +82,7 @@ input,textarea,select,button{font-family:inherit}
       <div class="step" id="s3">4</div>
     </div>
   </div>
+
   <div class="body" id="main"></div>
 </div>
 
@@ -93,88 +92,32 @@ input,textarea,select,button{font-family:inherit}
 "use strict";
 
 // ── Estado global ─────────────────────────────────────────────────────────────
-const S={
-  step:0,
-  client:{nombre:"",email:"",telefono:"",asunto:"",referencia:newRef()},
-  notas:"",items:[],fotos:[],pdfs:[],
-  saving:false,driveOk:null,driveErr:null,
+const S = {
+  step: 0,
+  client: { nombre:"", email:"", telefono:"", asunto:"", referencia: newRef() },
+  notas: "",
+  items: [],
+  fotos: [],
+  pdfs: [],
+  saving: false,
+  driveOk: null,
+  driveErr: null,
 };
 
-const COST_OP=27000,COST_AY=20000,IVA=0.13,MAT_OH=0.05,IMP=0.05;
+const COST_OP=27000, COST_AY=20000, IVA=0.13, MAT_OH=0.05, IMP=0.05;
 const BACKEND="https://ssr-whatsapp-bot-production.up.railway.app";
 const MONEDA="\u20A1";
 
-function newRef(){return "REF-"+(Math.floor(Math.random()*900)+100)+"-"+String(new Date().getFullYear()).slice(-2);}
-const fmt=n=>MONEDA+Number(n||0).toLocaleString("es-CR",{minimumFractionDigits:2,maximumFractionDigits:2});
-const esc=s=>String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+// ── Configuración retry ───────────────────────────────────────────────────────
+// MAX_RETRIES: cuántos reintentos hacer si hay rate limit (429)
+// RETRY_BASE_MS: espera inicial en ms (se duplica en cada intento)
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 15000; // 15 segundos en el primer intento
 
-// ── Dictado por voz ───────────────────────────────────────────────────────────
-let recognition=null,isListening=false;
+function newRef(){ return "REF-"+(Math.floor(Math.random()*900)+100)+"-"+String(new Date().getFullYear()).slice(-2); }
+const fmt = n => MONEDA+Number(n||0).toLocaleString("es-CR",{minimumFractionDigits:2,maximumFractionDigits:2});
+const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
-function getSR(){return window.SpeechRecognition||window.webkitSpeechRecognition||null;}
-
-function toggleDictado(){
-  const SR=getSR();
-  if(!SR){alert("Tu navegador no soporta dictado.\nUsá Safari en iPhone (iOS 14.5+) o Chrome.");return;}
-  if(isListening){recognition.stop();return;}
-
-  recognition=new SR();
-  recognition.lang="es-CR";
-  recognition.continuous=false;      // false = más compatible con Android
-  recognition.interimResults=true;
-
-  recognition.onstart=()=>{isListening=true;_micUI();};
-
-  recognition.onresult=e=>{
-    // Procesar SOLO el primer resultado (index 0) para evitar duplicados en Android
-    const result=e.results[0];
-    if(!result) return;
-    if(result.isFinal){
-      const w=result[0].transcript.trim();
-      if(w){
-        S.notas+=(S.notas&&!S.notas.endsWith(" ")?" ":"")+w;
-        const ta=document.getElementById("notas");
-        if(ta){ta.value=S.notas;ta.scrollTop=ta.scrollHeight;}
-      }
-    }
-    const h=document.getElementById("mic-hint");
-    if(h) h.textContent=result.isFinal?"🔴 Escuchando...":"🎙️ "+result[0].transcript;
-  };
-
-  recognition.onerror=e=>{
-    if(e.error==="not-allowed"){
-      isListening=false;_micUI();
-      alert("Permiso de micrófono denegado.\nHabilitalo en Configuración del celular.");
-      return;
-    }
-    // En Android algunos errores son normales (abrupt-end), reiniciar
-    if(isListening) try{ recognition.start(); }catch(_){}
-  };
-
-  recognition.onend=()=>{
-    // Reinicio automático para simular continuous en todos los dispositivos
-    if(isListening){
-      try{ recognition.start(); }catch(_){ isListening=false;_micUI(); }
-    } else {
-      _micUI();
-    }
-  };
-  recognition.start();
-}
-
-function _micUI(){
-  const btn=document.getElementById("mic-btn");
-  const hint=document.getElementById("mic-hint");
-  if(btn){
-    btn.className="mic-btn"+(isListening?" rec":"");
-    btn.innerHTML=isListening
-      ?"<span style='font-size:15px'>⏹</span> Detener"
-      :"<span style='font-size:15px'>🎙️</span> Dictar";
-  }
-  if(hint) hint.textContent=isListening?"🔴 Escuchando...":"";
-}
-
-// ── Cálculos ─────────────────────────────────────────────────────────────────
 function calcItem(item){
   const mats=item.materiales||[];
   const matBase=mats.reduce((s,m)=>s+(+m.cantidad)*(+m.precio_unitario),0);
@@ -182,7 +125,7 @@ function calcItem(item){
   const moBase=(+item.dias||1)*((+item.operarios||1)*COST_OP+(+item.ayudantes||0)*COST_AY);
   const moUtilidad=moBase*0.5;
   const moTotal=moBase+moUtilidad;
-  return{...item,matTotal,moBase,moUtilidad,moTotal,subtotal:matTotal+moTotal};
+  return {...item,matTotal,moBase,moUtilidad,moTotal,subtotal:matTotal+moTotal};
 }
 
 function calcTotals(){
@@ -190,12 +133,19 @@ function calcTotals(){
   const subtotal=items.reduce((s,i)=>s+i.subtotal,0);
   const imp=Math.round(subtotal*IMP);
   const base=subtotal+imp;
-  return{
+  return {
     subtotalMat:items.reduce((s,i)=>s+i.matTotal,0),
     subtotalMO:items.reduce((s,i)=>s+i.moTotal,0),
-    subtotal,imprevistos:imp,baseImponible:base,
-    iva:Math.round(base*IVA),total:Math.round(base*(1+IVA))-25000
+    subtotal, imprevistos:imp, baseImponible:base,
+    iva:Math.round(base*IVA), total:Math.round(base*(1+IVA))-25000
   };
+}
+
+function cleanJSON(raw){
+  let s=raw.replace(/```json/gi,"").replace(/```/g,"").trim();
+  const a=s.indexOf("{"),b=s.lastIndexOf("}");
+  if(a<0||b<0) throw new Error("No JSON en la respuesta");
+  return s.slice(a,b+1).replace(/,(\s*[}\]])/g,"$1");
 }
 
 async function extractPDF(file){
@@ -211,10 +161,34 @@ async function extractPDF(file){
       txt+=ct.items.map(x=>x.str).join(" ")+"\n";
     }
     return txt.trim();
-  }catch(e){return "";}
+  }catch(e){ return ""; }
 }
 
-function readB64(file){
+// ── ✅ NUEVO: Comprimir imagen antes de enviar (reduce tokens ~80%) ─────────
+// Redimensiona a máx 1024px y convierte a JPEG calidad 0.7
+async function compressImage(base64, mimeType){
+  return new Promise(resolve=>{
+    const img = new Image();
+    img.onload = ()=>{
+      const MAX = 1024;
+      let {width:w, height:h} = img;
+      if(w > MAX || h > MAX){
+        if(w >= h){ h = Math.round(h * MAX / w); w = MAX; }
+        else { w = Math.round(w * MAX / h); h = MAX; }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, w, h);
+      const compressed = canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
+      resolve({ base64: compressed, mimeType: "image/jpeg" });
+    };
+    img.onerror = ()=> resolve({ base64, mimeType }); // fallback sin comprimir
+    img.src = `data:${mimeType};base64,${base64}`;
+  });
+}
+
+async function readB64(file){
   return new Promise(res=>{
     const r=new FileReader();
     r.onload=e=>res({base64:e.target.result.split(",")[1],mimeType:file.type,name:file.name,preview:e.target.result});
@@ -222,14 +196,69 @@ function readB64(file){
   });
 }
 
-async function fetchConTimeout(url,opts,ms=120000){
-  const ctrl=new AbortController();
-  const t=setTimeout(()=>ctrl.abort(),ms);
-  try{const r=await fetch(url,{...opts,signal:ctrl.signal});clearTimeout(t);return r;}
-  catch(e){clearTimeout(t);
-    if(e.name==="AbortError") throw new Error("Tiempo agotado. Intentá sin fotos o con menos fotos.");
-    throw new Error("Sin conexión al servidor. Verificá el internet e intentá de nuevo.");
+// ── ✅ NUEVO: Sleep helper ────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ── ✅ NUEVO: Countdown en UI durante el retry ────────────────────────────────
+async function showRetryCountdown(segundos, intento, maxIntentos){
+  const box = document.getElementById("retry-box");
+  if(!box) return;
+  box.style.display = "block";
+  for(let i = segundos; i > 0; i--){
+    const cntEl = box.querySelector(".retry-countdown");
+    if(cntEl) cntEl.textContent = `${i}s`;
+    const msgEl = box.querySelector(".retry-msg");
+    if(msgEl) msgEl.textContent = `⏳ Límite de velocidad alcanzado. Reintentando (${intento}/${maxIntentos})...`;
+    await sleep(1000);
+    if(document.getElementById("retry-box") !== box) return; // salió del paso
   }
+  box.style.display = "none";
+}
+
+// ── Fetch con timeout + retry automático en 429 ───────────────────────────────
+async function fetchConTimeout(url, opts, timeoutMs=120000){
+  const ctrl = new AbortController();
+  const timer = setTimeout(()=>ctrl.abort(), timeoutMs);
+  try{
+    const r = await fetch(url, {...opts, signal: ctrl.signal});
+    clearTimeout(timer);
+    return r;
+  }catch(e){
+    clearTimeout(timer);
+    if(e.name==="AbortError") throw new Error("Tiempo de espera agotado (>2 min). Intentá sin fotos o con menos fotos.");
+    throw new Error("No se pudo conectar al servidor. Verificá tu conexión e intentá de nuevo.");
+  }
+}
+
+// ── ✅ NUEVO: Fetch con retry automático en rate limit (429) ──────────────────
+async function fetchConRetry(url, opts, timeoutMs=120000){
+  let lastError;
+  for(let intento = 1; intento <= MAX_RETRIES + 1; intento++){
+    try{
+      const r = await fetchConTimeout(url, opts, timeoutMs);
+      // Si es 429, leer el body y reintentar con backoff
+      if(r.status === 429){
+        let waitMs = RETRY_BASE_MS * Math.pow(2, intento - 1); // 15s, 30s, 60s
+        // Intentar leer Retry-After del header
+        const retryAfter = r.headers.get("Retry-After");
+        if(retryAfter) waitMs = Math.max(waitMs, parseInt(retryAfter) * 1000);
+        if(intento > MAX_RETRIES) throw new Error(`Límite de velocidad de la IA alcanzado. Intentá de nuevo en 1 minuto, o reducí la cantidad de fotos.`);
+        // Mostrar countdown al usuario
+        await showRetryCountdown(Math.round(waitMs/1000), intento, MAX_RETRIES);
+        // Actualizar mensaje de loading
+        const loadEl = document.getElementById("load-msg");
+        if(loadEl) loadEl.textContent = "Reintentando con la IA...";
+        continue; // reintentar
+      }
+      return r; // 200 u otro status: devolver normalmente
+    }catch(e){
+      lastError = e;
+      // Si el error no es de red/timeout, no reintentar
+      if(!e.message.includes("conectar") && !e.message.includes("agotado")) throw e;
+      if(intento > MAX_RETRIES) throw e;
+    }
+  }
+  throw lastError || new Error("Error desconocido");
 }
 
 // ── Pasos ─────────────────────────────────────────────────────────────────────
@@ -243,6 +272,7 @@ function goStep(n){
   render();
 }
 
+// ── Render ────────────────────────────────────────────────────────────────────
 function render(){
   const m=document.getElementById("main");
   if(S.step===0) m.innerHTML=renderInput();
@@ -255,7 +285,6 @@ function render(){
 // ── STEP 0: INPUT ─────────────────────────────────────────────────────────────
 function renderInput(){
   const c=S.client;
-  const hasSpeech=!!getSR();
   const fotoThumbs=S.fotos.map((f,i)=>`
     <div class="thumb-wrap">
       <img class="thumb" src="${esc(f.preview)}" alt="${esc(f.name)}">
@@ -276,37 +305,25 @@ function renderInput(){
     </div>
 
     <span class="sec">Notas de la visita</span>
-    <p style="font-size:12px;color:#888;margin-bottom:8px">Escribí o dictá lo que observó Melvin en la visita</p>
-
-    ${hasSpeech?`
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;flex-wrap:wrap">
-      <button class="mic-btn${isListening?" rec":""}" id="mic-btn" onclick="toggleDictado()">
-        <span style="font-size:15px">${isListening?"⏹":"🎙️"}</span>
-        ${isListening?"Detener":"Dictar"}
-      </button>
-      <span style="font-size:12px;color:#888">${isListening?"":"Tocá para hablar, el texto aparece abajo"}</span>
-    </div>
-    <div class="mic-hint" id="mic-hint">${isListening?"🔴 Escuchando...":""}</div>`
-    :`<p style="font-size:11px;color:#bbb;margin-bottom:6px">⚠️ Dictado no disponible — usá Safari o Chrome</p>`}
-
-    <textarea class="inp" id="notas" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;line-height:1.6;margin-top:4px"
+    <p style="font-size:12px;color:#888;margin-bottom:8px">Escribí lo que anotó Melvin — sin formato, como un WhatsApp</p>
+    <textarea class="inp" id="notas" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;line-height:1.6"
       placeholder="Ej: Bano principal, San Francisco de Heredia. Demoler tina existente, cambiar enchape piso y paredes 19m2...">${esc(S.notas)}</textarea>
 
     <div style="margin-top:16px">
       <span class="sec">📷 Fotos de la visita</span>
-      <p style="font-size:12px;color:#888;margin-bottom:8px">La IA analiza las fotos para presupuestar con más precisión</p>
+      <p style="font-size:12px;color:#888;margin-bottom:8px">La IA analiza las fotos — se comprimen automáticamente antes de enviar</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:8px">
         ${fotoThumbs}
         <label class="cam-btn" title="Tomar foto con la cámara">
           <span style="font-size:22px">📷</span><span>Cámara</span>
           <input type="file" accept="image/*" capture="environment" multiple id="inp-fotos" style="display:none">
         </label>
-        <label class="cam-btn" title="Elegir de la galería">
+        <label class="cam-btn" title="Seleccionar de la galería">
           <span style="font-size:22px">🖼️</span><span>Galería</span>
           <input type="file" accept="image/*" multiple id="inp-galeria" style="display:none">
         </label>
       </div>
-      ${S.fotos.length>0?`<p style="font-size:11px;color:#1B3A6B">✅ ${S.fotos.length} foto(s) lista(s)</p>`:""}
+      ${S.fotos.length>0?`<p style="font-size:11px;color:#1B3A6B">✅ ${S.fotos.length} foto(s) lista(s) — comprimidas a máx 1024px</p>`:""}
     </div>
 
     <div style="margin-top:16px">
@@ -335,12 +352,19 @@ function renderProcessing(){
     <div style="font-size:16px;font-weight:600;color:#1B3A6B;margin-bottom:8px" id="load-msg">Analizando notas...</div>
     <div style="font-size:13px;color:#aaa">Construplaza · EPA · El Lagar</div>
     <div class="progress"><div class="prog-fill"></div></div>
+    <!-- ✅ Retry countdown box -->
+    <div class="retry-box" id="retry-box" style="max-width:340px;margin:16px auto 0">
+      <span class="retry-msg" style="font-size:13px;color:#795548">⏳ Reintentando...</span>
+      <span class="retry-countdown">--</span>
+      <span style="font-size:11px;color:#aaa">La IA está ocupada — esperando para reintentar automáticamente</span>
+    </div>
   </div>`;
 }
 
 // ── STEP 2: REVIEW ────────────────────────────────────────────────────────────
 function renderReview(){
-  const T=calcTotals();const c=S.client;
+  const T=calcTotals();
+  const c=S.client;
   const itemCards=S.items.map((item,ii)=>{
     const matRows=(item.materiales||[]).map((m,mi)=>`
       <tr>
@@ -373,6 +397,7 @@ function renderReview(){
       </div>
     </div>`;
   }).join("");
+
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
       <span class="sec" style="margin-bottom:0">Revisión del presupuesto</span>
@@ -402,7 +427,8 @@ function renderReview(){
 
 // ── STEP 3: EXPORT ────────────────────────────────────────────────────────────
 function renderExport(){
-  const T=calcTotals();const c=S.client;
+  const T=calcTotals();
+  const c=S.client;
   const irows=S.items.map((i,idx)=>`
     <tr style="background:${idx%2?"#FDF5EF":"#fff"}">
       <td class="preview-tbl" style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt">${esc(i.descripcion)}</td>
@@ -412,9 +438,11 @@ function renderExport(){
       <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right">${fmt(i.moTotal)}</td>
       <td style="border:1px solid #D9CFC7;padding:5px 8px;font-size:10pt;text-align:right;font-weight:600">${fmt(i.subtotal)}</td>
     </tr>`).join("");
-  const trows=[["Sub total",T.subtotal,false],["IVA 13%",T.iva,false],["Reembolso pago de visita",-25000,false]].map(([k,v,b])=>
+  const trows=[["Sub total",T.subtotal,false],
+    ["IVA 13%",T.iva,false],["Reembolso pago de visita",-25000,false]].map(([k,v,b])=>
     `<tr style="${b?"background:#FDF5EF":""}"><td colspan="5" style="padding:4px 8px;font-size:10pt;text-align:right;font-weight:${b?600:400};border:1px solid #D9CFC7">${k}</td>
     <td style="border:1px solid #D9CFC7;padding:4px 8px;font-size:10pt;text-align:right;font-weight:${b?600:400}">${fmt(v)}</td></tr>`).join("");
+
   return `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:8px">
       <span class="sec" style="margin-bottom:0">Exportar documentos</span>
@@ -427,6 +455,7 @@ function renderExport(){
         <button class="btn btn-p" onclick="doWord()">↓ Word</button>
       </div>
     </div>
+
     <div class="ok-box" id="ok-drive" ${S.driveOk?"style='display:block'":""}>
       <div style="font-weight:700;color:#1E8449;margin-bottom:6px">✅ Guardado en Drive — WhatsApp enviado a Darwin</div>
       ${S.driveOk?`<div>📁 <a href="${esc(S.driveOk.carpeta)}" target="_blank" style="color:#1B3A6B">Abrir carpeta en Drive</a></div>
@@ -436,6 +465,8 @@ function renderExport(){
       <div style="font-weight:700;color:#c0392b;margin-bottom:4px">❌ Error Drive:</div>
       <div style="font-family:monospace">${esc(S.driveErr||"")}</div>
     </div>
+
+    <!-- Preview -->
     <div style="background:#fff;padding:28px 36px;border:1px solid #ddd;border-radius:4px;font-family:Arial,sans-serif;color:#000;line-height:1.5">
       <div class="bar" style="margin-bottom:10px"></div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
@@ -470,27 +501,30 @@ function renderExport(){
 function bindEvents(){
   ["nombre","email","telefono","referencia","asunto"].forEach(f=>{
     const el=document.getElementById("c-"+f);
-    if(el) el.addEventListener("input",e=>{S.client[f]=e.target.value;});
+    if(el) el.addEventListener("input",e=>{ S.client[f]=e.target.value; });
   });
   const notasEl=document.getElementById("notas");
-  if(notasEl) notasEl.addEventListener("input",e=>{S.notas=e.target.value;});
+  if(notasEl) notasEl.addEventListener("input",e=>{ S.notas=e.target.value; });
 
   const fEl=document.getElementById("inp-fotos");
   if(fEl) fEl.addEventListener("change",async e=>{
     const imgs=await Promise.all(Array.from(e.target.files||[]).map(readB64));
-    S.fotos=[...S.fotos,...imgs].slice(0,8);render();
+    S.fotos=[...S.fotos,...imgs].slice(0,8);
+    render();
   });
 
   const gEl=document.getElementById("inp-galeria");
   if(gEl) gEl.addEventListener("change",async e=>{
     const imgs=await Promise.all(Array.from(e.target.files||[]).map(readB64));
-    S.fotos=[...S.fotos,...imgs].slice(0,8);render();
+    S.fotos=[...S.fotos,...imgs].slice(0,8);
+    render();
   });
 
   const pEl=document.getElementById("inp-pdfs");
   if(pEl) pEl.addEventListener("change",async e=>{
     const txts=await Promise.all(Array.from(e.target.files||[]).map(async f=>({name:f.name,text:await extractPDF(f)})));
-    S.pdfs=[...S.pdfs,...txts].slice(0,3);render();
+    S.pdfs=[...S.pdfs,...txts].slice(0,3);
+    render();
   });
 
   const bEl=document.getElementById("btn-procesar");
@@ -498,25 +532,33 @@ function bindEvents(){
 }
 
 // ── Acciones globales ─────────────────────────────────────────────────────────
-window.removeFoto=i=>{S.fotos.splice(i,1);render();};
-window.removePdf=i=>{S.pdfs.splice(i,1);render();};
-window.goStep=goStep;
-window.toggleDictado=toggleDictado;
-window.updItem=(ii,f,v)=>{
+window.removeFoto = i=>{ S.fotos.splice(i,1); render(); };
+window.removePdf  = i=>{ S.pdfs.splice(i,1); render(); };
+window.goStep     = goStep;
+
+window.updItem = (ii,f,v)=>{
   const item={...S.items[ii],[f]:isNaN(v)||f==="descripcion"||f==="unidad"?v:parseFloat(v)||0};
-  S.items[ii]=calcItem(item);updateTotalsDisplay();
+  S.items[ii]=calcItem(item);
+  updateTotalsDisplay();
 };
-window.updMat=(ii,mi,f,v)=>{
+
+window.updMat = (ii,mi,f,v)=>{
   const item=S.items[ii];
   item.materiales[mi]={...item.materiales[mi],[f]:isNaN(v)||f==="detalle"||f==="und"||f==="fuente"?v:parseFloat(v)||0};
-  S.items[ii]=calcItem(item);updateTotalsDisplay();
+  S.items[ii]=calcItem(item);
+  updateTotalsDisplay();
 };
-window.addMat=ii=>{
+
+window.addMat = ii=>{
   S.items[ii].materiales.push({detalle:"",und:"Und",cantidad:1,precio_unitario:0,fuente:"Construplaza"});
-  S.items[ii]=calcItem(S.items[ii]);render();
+  S.items[ii]=calcItem(S.items[ii]);
+  render();
 };
-window.delMat=(ii,mi)=>{
-  S.items[ii].materiales.splice(mi,1);S.items[ii]=calcItem(S.items[ii]);render();
+
+window.delMat = (ii,mi)=>{
+  S.items[ii].materiales.splice(mi,1);
+  S.items[ii]=calcItem(S.items[ii]);
+  render();
 };
 
 function updateTotalsDisplay(){
@@ -526,58 +568,70 @@ function updateTotalsDisplay(){
   });
 }
 
-// ── Procesar ──────────────────────────────────────────────────────────────────
+// ── Procesar notas ────────────────────────────────────────────────────────────
 async function procesar(){
-  if(isListening&&recognition) recognition.stop();
   const c=S.client;
-  if(!c.nombre){showErr("err-input","Completá el nombre del cliente.");return;}
-  if(!S.notas.trim()&&S.fotos.length===0&&S.pdfs.length===0){showErr("err-input","Agregá notas, fotos o un PDF.");return;}
+  if(!c.nombre){ showErr("err-input","Completá el nombre del cliente."); return; }
+  if(!S.notas.trim()&&S.fotos.length===0&&S.pdfs.length===0){ showErr("err-input","Agregá notas, fotos o un PDF."); return; }
+
   goStep(1);
   const msgs=["Analizando notas...","Interpretando fotos...","Estimando materiales...","Buscando precios CR...","Armando presupuesto..."];
   let mi=0;
-  const iv=setInterval(()=>{mi=(mi+1)%msgs.length;const el=document.getElementById("load-msg");if(el) el.textContent=msgs[mi];},2000);
+  const iv=setInterval(()=>{ mi=(mi+1)%msgs.length; const el=document.getElementById("load-msg"); if(el) el.textContent=msgs[mi]; },2000);
+
   try{
-    const r=await fetchConTimeout(BACKEND+"/api/procesar-notas",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({notas:S.notas,fotos:S.fotos,pdfs:S.pdfs})
-    },120000);
+    // ✅ Comprimir fotos antes de enviar (reduce tokens ~80%)
+    const fotosComprimidas = await Promise.all(
+      S.fotos.map(async f => {
+        const { base64, mimeType } = await compressImage(f.base64, f.mimeType);
+        return { ...f, base64, mimeType };
+      })
+    );
+
+    // ✅ fetchConRetry: maneja 429 automáticamente con countdown visible
+    const r = await fetchConRetry(BACKEND+"/api/procesar-notas",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({notas:S.notas, fotos:fotosComprimidas, pdfs:S.pdfs})
+    }, 120000);
+
     const data=await r.json();
     clearInterval(iv);
     if(!data.ok) throw new Error(data.error||"Error del servidor");
-    if(data.data.asunto&&!S.client.asunto) S.client.asunto=data.data.asunto;
-    S.items=(data.data.items||[]).map(calcItem);
+    const parsed=data.data;
+    if(parsed.asunto&&!S.client.asunto) S.client.asunto=parsed.asunto;
+    S.items=(parsed.items||[]).map(calcItem);
     goStep(2);
   }catch(e){
-    clearInterval(iv);S.step=0;render();
+    clearInterval(iv);
+    S.step=0;
+    render();
     showErr("err-input","Error procesando: "+e.message);
   }
 }
 
-// ── Drive ─────────────────────────────────────────────────────────────────────
-window.saveToDrive=async function(){
-  S.saving=true;S.driveOk=null;S.driveErr=null;
+// ── Guardar en Drive ──────────────────────────────────────────────────────────
+window.saveToDrive = async function(){
+  S.saving=true; S.driveOk=null; S.driveErr=null;
   const btn=document.getElementById("btn-drive");
-  if(btn){btn.disabled=true;btn.innerHTML='<span class="spin">⟳</span> Guardando...';}
+  if(btn){ btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> Guardando...'; }
   try{
     const r=await fetchConTimeout(BACKEND+"/api/cotizacion",{
-      method:"POST",headers:{"Content-Type":"application/json"},
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
       body:JSON.stringify({client:S.client,items:S.items})
-    },60000);
+    }, 60000);
     const data=await r.json();
-    if(data.ok){
-      S.driveOk=data;
-      // Actualizar REF con el número real asignado por el backend
-      if(data.referencia && data.referencia!==S.client.referencia){
-        S.client.referencia=data.referencia;
-      }
-    } else S.driveErr=data.error||"Error del servidor";
-  }catch(e){S.driveErr=e.message;}
-  S.saving=false;render();
+    if(data.ok){ S.driveOk=data; }
+    else{ S.driveErr=data.error||"Error del servidor"; }
+  }catch(e){ S.driveErr=e.message; }
+  S.saving=false;
+  render();
 };
 
 // ── Excel ─────────────────────────────────────────────────────────────────────
-window.doExcel=function(){
-  const T=calcTotals();const c=S.client;
+window.doExcel = function(){
+  const T=calcTotals(); const c=S.client;
   const fecha=new Date().toLocaleDateString("es-CR");
   const rows=[["SS REMODELACIONES - PRESUPUESTO INTERNO"],["Ref:",c.referencia,"Fecha:",fecha,"Cliente:",c.nombre],["Proyecto:",c.asunto],[],
     ["Item","Descripcion","Und","Cant","Dias","Op","Ay","Mat.Base","Mat+5%","MO","Util","Total MO","TOTAL"]];
@@ -587,9 +641,12 @@ window.doExcel=function(){
     (item.materiales||[]).forEach(m=>rows.push(["","  > "+m.detalle+" ("+m.fuente+")",m.und,m.cantidad,m.precio_unitario,m.cantidad*m.precio_unitario]));
     rows.push(["","Subtotal mat:","","","","","","",item.matTotal]);rows.push([]);
   });
-  rows.push(["","Sub total","","","","","","","",T.subtotal],["","Imprevistos 5%","","","","","","","",T.imprevistos],
-    ["","Base imponible","","","","","","","",T.baseImponible],["","IVA 13%","","","","","","","",T.iva],
-    ["","Reembolso visita","","","","","","","",-25000],["","TOTAL","","","","","","","",T.total]);
+  rows.push(["","Sub total","","","","","","","",T.subtotal]);
+  rows.push(["","Imprevistos 5%","","","","","","","",T.imprevistos]);
+  rows.push(["","Base imponible","","","","","","","",T.baseImponible]);
+  rows.push(["","IVA 13%","","","","","","","",T.iva]);
+  rows.push(["","Reembolso visita","","","","","","","",-25000]);
+  rows.push(["","TOTAL","","","","","","","",T.total]);
   const wb=XLSX.utils.book_new();
   const ws=XLSX.utils.aoa_to_sheet(rows);
   ws["!cols"]=[{wch:5},{wch:38},{wch:8},{wch:7},{wch:6},{wch:5},{wch:5},{wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
@@ -605,33 +662,39 @@ window.doExcel=function(){
   XLSX.writeFile(wb,c.referencia+"_presupuesto_interno.xlsx");
 };
 
-// ── Word ──────────────────────────────────────────────────────────────────────
-window.doWord=function(){
-  const T=calcTotals();const c=S.client;const fecha=new Date().toLocaleDateString("es-CR");
+// ── Word HTML ─────────────────────────────────────────────────────────────────
+window.doWord = function(){
+  const T=calcTotals(); const c=S.client;
+  const fecha=new Date().toLocaleDateString("es-CR");
   const irows=S.items.map((i,idx)=>`<tr style="background:${idx%2?"#FDF5EF":"#fff"}">
     <td>${i.descripcion}</td><td align="center">${i.unidad||"Und"}</td>
     <td align="right">${i.cantidad||1}</td><td align="right">${fmt(i.matTotal)}</td>
     <td align="right">${fmt(i.moTotal)}</td><td align="right"><b>${fmt(i.subtotal)}</b></td></tr>`).join("");
-  const trows=[["Sub total",T.subtotal,""],["IVA 13%",T.iva,""],["Reembolso pago de visita",-25000,""]
+  const trows=[["Sub total",T.subtotal,""],
+    ["IVA 13%",T.iva,""],["Reembolso pago de visita",-25000,""]
   ].map(([k,v,s])=>`<tr><td colspan="5" align="right" style="${s}">${k}</td><td align="right" style="${s}">${fmt(v)}</td></tr>`).join("");
   const lista=S.items.map(i=>`<li>${i.descripcion}</li>`).join("");
   const h=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${c.referencia}</title>
   <style>body{font-family:Arial,sans-serif;font-size:11pt;margin:2cm;color:#1a1a1a}
-  table{width:100%;border-collapse:collapse;margin:8px 0}th{background:#1B3A6B;color:#fff;padding:7px 10px;font-size:10pt}
-  th:first-child{text-align:left}th{text-align:right}td{border:1px solid #D9CFC7;padding:6px 10px;font-size:10pt}
+  table{width:100%;border-collapse:collapse;margin:8px 0}
+  th{background:#1B3A6B;color:#fff;padding:7px 10px;font-size:10pt}
+  th:first-child{text-align:left}th{text-align:right}
+  td{border:1px solid #D9CFC7;padding:6px 10px;font-size:10pt}
   .grand td{background:#1B3A6B;color:#fff;font-weight:700;font-size:12pt;padding:8px;border:none}
   h3{color:#1B3A6B;font-size:12pt;border-bottom:2px solid #D4541A;padding-bottom:4px;margin:16px 0 8px}
-  ul{font-size:10pt;line-height:1.9;padding-left:20px}.bar{height:3px;background:linear-gradient(to right,#D4541A,#1B3A6B)}
+  ul{font-size:10pt;line-height:1.9;padding-left:20px}
+  .bar{height:3px;background:linear-gradient(to right,#D4541A,#1B3A6B)}
   </style></head><body>
   <div class="bar"></div>
   <table style="border:none;margin-bottom:8px"><tr>
-    <td style="border:none;vertical-align:middle;width:55%"><img src="data:image/png;base64,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ygrwYw+hDCFC4aQikya5SpIOza25GValX1tc5cd++6tYpI3eKb7jjpVksywSAHAcsIdOISEiBggdYPGyxhfsZT5xcf3y5xcX7VCaBrh23w70VWPnlWGU0crqZZG1Cb4v4Jc9aMtI2h04BfQP9MPPNVYa61iYmxGS/GhspJd+6AenQFLUsz987u61i/oggM8BWNg4Whs7exX5faHwvSkC/ntPAMDAyIiYSZKKWcm219C+vdYb3nn9VcP1QzdN2on9O7LO0nJ1evqke/rs+ce+MXPpy493+eLD/23f9kvP6h/rr4SjgenAraeZSLuQxgmdO+SZQ24IwiewUpCBBClGWPVZ1nr00hr73zo1Fz78ZFMsNAYf+e2v0gwR8Nn/987aY6fOdI4fh/m2+8rHN5ZS5GQ/xy+sidaKEKdWusFaqdu50XUvX9PfP8S1wXrYsuHV26p1v9LrkHeUybM12VjPKQCDYoFcWHjSRxRGYKXQ6mRYX56j1nquhraM2X17hrpJsqPSXG9P1p5p9u6/afs39+wdfOrf//ZxTD+XmK7GDECtzahfTNksFN6GIuC/tzZm5Bw9aibxAJ/4h4+OC+ifHa6FN990/fb6J2/fi7EdQyZbbcQXL76IF8++eGE4wGcfX+KLH78eP/7UN5JP3nr1jpHhegloLyFrLntenhNrRp47WMtQnkRQChCWY6hIIWUJGcaMyqC5ONPEnzx0AX/04Grp5PwLJWBjzf7xxzrm+NNvmD+7LStITsEBzADaSznony+kOlxtG760ll2z0Gz9g3B3f32wPIiScMnqah4311akZzOUXIRSb4jAC2C7GgSL3jhC0mriwtkZrC6siYmpvdH4zj785bv24fCneLC33vMzT01fTHpigcjHya7GrwDiuY04z8WUzULhbSgC/nuLDgzBe/rzn89/iykFnNsZ021X7YjHb796K265cXejXCmrhblL3bmVtefm5y8+8C+/zBd+4ofD7YMjAz82NVofHRmMIaRpWt2NTZYql1roLqObMEASpWqEqBxAeYAIQo6iXtsVnrp8plt77JkVPP7c6qkX5pPHPED8/X97KMS5w/mxY8c03njB5EqmL6aY1XP8SyYI5NMXtcX/52tPYs01zl+ze8eN1RCHmj08uaUqK35lEE45k6arMm0kVAolSEg4Z6AChZ6ogm6QYy5fQrPTpeX5QO2q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" style="height:70px;max-width:220px;object-fit:contain" alt="SS Remodelaciones"></td>
-    <td style="border:none;text-align:right;font-size:10pt;color:#555;vertical-align:middle"><b style="color:#1a1a1a">Solo Senso Sociedad Anonima</b><br>San Isidro de Heredia | Tel: 7006-8477<br>gerencia@ssremodelaciones.com</td>
+    <td style="border:none"><span style="font-size:22pt;color:#D4541A;font-weight:900">SS</span><span style="font-size:22pt;color:#1B3A6B;font-weight:900"> REMODELACIONES</span></td>
+    <td style="border:none;text-align:right;font-size:10pt;color:#555"><b style="color:#1a1a1a">Solo Senso Sociedad Anonima</b><br>San Isidro de Heredia | Tel: 7006-8477<br>gerencia@ssremodelaciones.com</td>
   </tr></table><div class="bar" style="margin-bottom:12px"></div>
   <table style="border:none;font-size:10pt;margin-bottom:12px"><tr>
     <td style="border:none"><b>Fecha:</b> ${fecha}</td><td style="border:none"><b>Ref.:</b> ${c.referencia}</td>
-  </tr><tr><td colspan="2" style="border:none"><b>Para:</b> ${c.nombre}${c.telefono?" | "+c.telefono:""}${c.email?" | "+c.email:""}</td>
-  </tr><tr><td colspan="2" style="border:none"><b>Asunto:</b> ${c.asunto}</td></tr></table>
+  </tr><tr><td colspan="2" style="border:none">
+    <b>Para:</b> ${c.nombre}${c.telefono?" | "+c.telefono:""}${c.email?" | "+c.email:""}
+  </td></tr><tr><td colspan="2" style="border:none"><b>Asunto:</b> ${c.asunto}</td></tr></table>
   <p>Estimado/a <b>${c.nombre}</b>; presentamos propuesta para: <b>${c.asunto}</b>.</p>
   <h3>TRABAJOS INCLUIDOS</h3><ul>${lista}</ul>
   <h3>PRESUPUESTO</h3>
@@ -650,15 +713,20 @@ window.doWord=function(){
     <td style="border:none;width:45%;text-align:center;border-top:1px solid #333;padding-top:4px;font-size:10pt">${c.nombre}<br><b>Cliente</b></td>
   </tr></table>
   <p style="border-top:2px solid #1B3A6B;padding-top:6px;font-size:9pt;color:#888;text-align:center;margin-top:20px">
-    www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477</p></body></html>`;
+    www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477</p>
+  </body></html>`;
   const blob=new Blob([h],{type:"text/html;charset=utf-8"});
-  const url=URL.createObjectURL(blob);const a=document.createElement("a");
-  a.href=url;a.download=c.referencia+"_cotizacion.doc";
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url;a.download=c.referencia+"_cotizacion.html";
   document.body.appendChild(a);a.click();
   setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
 };
 
-function showErr(id,msg){const el=document.getElementById(id);if(el){el.textContent=msg;el.style.display="block";}}
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function showErr(id,msg){ const el=document.getElementById(id); if(el){el.textContent=msg;el.style.display="block";} }
+
+// ── Iniciar ───────────────────────────────────────────────────────────────────
 render();
 </script>
 </body>
