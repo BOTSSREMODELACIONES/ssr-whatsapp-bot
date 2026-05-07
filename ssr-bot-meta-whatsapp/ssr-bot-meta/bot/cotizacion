@@ -24,6 +24,7 @@ const IVA               = 0.13;
 const MAT_OVERHEAD      = 0.05;
 const IMPREVISTOS_PCT   = 0.05;
 const DARWIN_WHATSAPP   = "+50683091817";
+const MELVIN_WHATSAPP   = "+50671981370";
 
 // ── Google Drive client — JWT Impersonation ──────────────────────────────────
 // La SA actúa como proyectos@ssremodelaciones.com → archivos quedan en su Drive
@@ -374,7 +375,8 @@ async function procesarCotizacion({ client, items }) {
     ].join("\n");
 
     await sendText(DARWIN_WHATSAPP, notif);
-    console.log(`✅ Cotización ${client.referencia} procesada y notificada`);
+    await sendText(MELVIN_WHATSAPP, notif);
+    console.log(`✅ Cotización ${client.referencia} procesada y notificada a Darwin y Melvin`);
 
     return {
       ok: true,
