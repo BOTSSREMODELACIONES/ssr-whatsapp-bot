@@ -18,7 +18,7 @@ const { sendText } = require("./messenger");
 const KNOWLEDGE = require("./knowledge");
 
 // ── Constantes ────────────────────────────────────────────────────────────────
-const DRIVE_FOLDER_2026 = "1GopBegp9ZDHc-qKtLbRAJhEAnqdpnws1"; // Carpeta "2026" en SSR Cotizaciones
+const DRIVE_FOLDER_2026 = "1z3pmO0oMfY24PRSWwN4Kh1-1oqgXzPBG"; // Carpeta "2026" en SSR Cotizaciones
 const DARWIN_EMAIL      = "proyectos@ssremodelaciones.com";       // ← email Google de Darwin (owner destino)
 const IVA               = 0.13;
 const MAT_OVERHEAD      = 0.05;
