@@ -401,14 +401,33 @@ async function procesarCotizacion({ client: clientInput, items }) {
 
     const { total } = calcTotals(items);
 
-    // 4. Notificar a Darwin por WhatsApp
+    // 4. Detectar materiales que requieren revisión de precio
+    const aCotizar = [];
+    for (const item of items) {
+      for (const mat of (item.materiales || [])) {
+        if (!mat.fuente || mat.fuente === "Cotizar") {
+          aCotizar.push(`• ${mat.detalle} (${item.descripcion})`);
+        }
+      }
+    }
+
+    // 5. Armar mensaje WhatsApp
+    const lineasAlerta = aCotizar.length > 0
+      ? [
+          "",
+          "⚠️ *Materiales sin precio de referencia — revisar antes de enviar:*",
+          ...aCotizar,
+        ]
+      : ["", "✔️ Todos los materiales tienen precio de referencia."];
+
     const notif = [
       "✅ *Nueva cotización lista en Drive*",
       "",
       `📋 *${client.referencia}*`,
       `👤 Cliente: ${client.nombre}`,
       `🏗️ Proyecto: ${client.asunto}`,
-      `💰 Total: ${fmtCR(total)}`,
+      `💰 Total estimado: ${fmtCR(total)}`,
+      ...lineasAlerta,
       "",
       `📁 Carpeta: ${carpeta.link}`,
       "",
