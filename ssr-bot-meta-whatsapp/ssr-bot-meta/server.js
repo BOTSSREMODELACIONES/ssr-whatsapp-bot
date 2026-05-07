@@ -156,7 +156,6 @@ app.post("/webhook", async (req, res) => {
         // ── Video — Sasha lo maneja con contexto, sin mensaje hardcoded ──
         console.log(`🎥 Video de +${from}`);
         const caption = msg.video?.caption || "";
-        // Pasamos contexto textual para que Sasha responda naturalmente
         const videoContext = caption
           ? `[El cliente envió un video con el mensaje: "${caption}"]`
           : "[El cliente envió un video de su proyecto]";
@@ -248,8 +247,9 @@ app.post("/api/procesar-notas", async (req, res) => {
       ? [...fotos.map(f => ({ type: "image", source: { type: "base64", media_type: f.mimeType, data: f.base64 } })), { type: "text", text: prompt }]
       : prompt;
 
+    // ✅ FIX: modelo actualizado de claude-sonnet-4-5 → claude-sonnet-4-6
     const response = await client.messages.create({
-      model: "claude-sonnet-4-5",
+      model: "claude-sonnet-4-6",
       max_tokens: 4000,
       system: "Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales.",
       messages: [{ role: "user", content }],
@@ -290,7 +290,7 @@ app.listen(PORT, () => {
 ╔══════════════════════════════════════════════════════╗
 ║  🏗️  SS Remodelaciones — WhatsApp Bot (Sasha)        ║
 ║  📡  Meta WhatsApp Business API                      ║
-║  🤖  IA: Claude Sonnet (visión activada)             ║
+║  🤖  IA: Claude Sonnet 4.6 (visión activada)         ║
 ║  ⏰  Recordatorios: 8:00 AM CR diario               ║
 ║  🌐  Idiomas: ES / EN automático                     ║
 ║  🚀  Puerto: ${PORT}                                    ║
