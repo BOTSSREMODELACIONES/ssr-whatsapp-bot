@@ -50,6 +50,20 @@ async function sendList(to, bodyText, buttonLabel, sections) {
 }
 
 /**
+ * Reenvía una imagen/audio/video usando el Media ID de Meta
+ * (no requiere re-subir el archivo, usa el ID que ya está en Meta)
+ * @param {string} to - número destino
+ * @param {string} mediaId - Media ID recibido en el webhook
+ * @param {string} type - "image" | "audio" | "video" | "document"
+ * @param {string} caption - (opcional) texto debajo de la imagen
+ */
+async function sendMediaById(to, mediaId, type = "image", caption = null) {
+  const mediaPayload = { id: mediaId };
+  if (caption && type === "image") mediaPayload.caption = caption;
+  return _post(to, { type, [type]: mediaPayload });
+}
+
+/**
  * Descarga una imagen/media de Meta y la retorna en base64
  * @param {string} mediaId - ID del media recibido en el webhook
  * @returns {{ base64: string, mimeType: string }}
@@ -106,7 +120,7 @@ async function markRead(messageId) {
   }
 }
 
-// ── Internal ─────────────────────────────────────────────────────────────────
+// ── Internal ──────────────────────────────────────────────────────────────────
 async function _post(to, messageFields) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const token = process.env.WHATSAPP_TOKEN;
@@ -135,4 +149,4 @@ async function _post(to, messageFields) {
   return data;
 }
 
-module.exports = { sendText, sendButtons, sendList, markRead, downloadMedia };
+module.exports = { sendText, sendButtons, sendList, markRead, downloadMedia, sendMediaById };
