@@ -7,7 +7,7 @@ const { sendDailyReminders } = require("./bot/reminders");
 
 const app = express();
 
-// ── CORS ──────────────────────────────────────────────────────────────────────
+// ── CORS ─────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -16,7 +16,9 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: "10mb" }));
+// FIX #6 — Aumentado a 50mb para soportar múltiples fotos en base64 sin error 413
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 const PORT = process.env.PORT || 3000;
 
@@ -34,12 +36,12 @@ if (missing.length) {
 
 // ── Cron: recordatorios 8:00 AM Costa Rica ───────────────────────────────────
 cron.schedule("0 8 * * *", async () => {
-  console.log("⏰ Cron activado — enviando recordatorios del día...");
+  console.log("🕐 Cron activado − enviando recordatorios del día...");
   await sendDailyReminders();
 }, { timezone: "America/Costa_Rica" });
 console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
 
-// ── Buffer de mensajes (agrupa fotos múltiples en un lote) ────────────────────
+// ── Buffer de mensajes (agrupa fotos múltiples en un lote) ───────────────────
 const messageBuffer = new Map();
 const BATCH_WINDOW_MS = 1500;
 
@@ -48,9 +50,9 @@ function flushBuffer(from) {
   if (!buffer || !buffer.items.length) { messageBuffer.delete(from); return; }
   const items = buffer.items;
   messageBuffer.delete(from);
-  const messageId   = items[items.length - 1].messageId;
-  const texts       = items.map(i => i.text).filter(Boolean);
-  const mediaIds    = items.map(i => i.mediaId).filter(Boolean);
+  const messageId    = items[items.length - 1].messageId;
+  const texts        = items.map(i => i.text).filter(Boolean);
+  const mediaIds     = items.map(i => i.mediaId).filter(Boolean);
   const combinedText = texts.join(" ") || null;
   console.log(`📦 Lote de +${from}: ${items.length} msg, ${mediaIds.length} foto(s), texto: "${combinedText || "[ninguno]"}"`);
   handleMessage("+" + from, combinedText, messageId, mediaIds.length ? mediaIds : null)
@@ -74,7 +76,7 @@ app.get("/webhook", (req, res) => {
     console.log("✅ Webhook verificado por Meta");
     return res.status(200).send(challenge);
   }
-  console.warn("⚠️ Verificación de webhook fallida");
+  console.warn("⚠️  Verificación de webhook fallida");
   res.sendStatus(403);
 });
 
@@ -101,12 +103,12 @@ app.post("/webhook", async (req, res) => {
       } else if (msg.type === "location") {
         const { latitude, longitude, name, address } = msg.location;
         const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
-        const text = name ? `Mi ubicación: ${name}${address ? ", " + address : ""} — ${mapsLink}` : `Mi ubicación: ${mapsLink}`;
+        const text = name ? `Mi ubicación: ${name}${address ? ", " + address : ""} − ${mapsLink}` : `Mi ubicación: ${mapsLink}`;
         console.log(`📍 Ubicación de +${from}: ${text}`);
         addToBuffer(from, messageId, text, null);
       } else if (msg.type === "image") {
         const mediaId = msg.image?.id, caption = msg.image?.caption || "";
-        console.log(`🖼️ Imagen de +${from} (mediaId: ${mediaId})`);
+        console.log(`🖼️  Imagen de +${from} (mediaId: ${mediaId})`);
         addToBuffer(from, messageId, caption || null, mediaId);
       } else if (msg.type === "video") {
         const caption = msg.video?.caption || "";
@@ -115,7 +117,7 @@ app.post("/webhook", async (req, res) => {
       } else if (msg.type === "audio") {
         addToBuffer(from, messageId, "[El cliente envió un mensaje de voz]", null);
       } else {
-        console.log(`⚠️ Tipo ignorado: ${msg.type} de +${from}`);
+        console.log(`⚠️  Tipo ignorado: ${msg.type} de +${from}`);
       }
     }
   } catch (err) {
@@ -125,7 +127,7 @@ app.post("/webhook", async (req, res) => {
 
 // ── Health & status ───────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({
-  bot: "SS Remodelaciones — Sasha",
+  bot: "SS Remodelaciones − Sasha",
   status: "✅ operando",
   api: "Meta WhatsApp Business API",
   features: ["visión de fotos (múltiples)", "análisis de videos", "recordatorios automáticos", "detección de idioma"],
@@ -134,7 +136,7 @@ app.get("/", (req, res) => res.json({
 
 app.get("/health", (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-// ── Cotizador Web App — NO caché para que el celular siempre descargue fresco ─
+// ── Cotizador Web App − NO caché para que el celular siempre descargue fresco ─
 app.get("/cotizador", (_req, res) => {
   res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   res.setHeader("Pragma", "no-cache");
@@ -146,7 +148,7 @@ app.get("/cotizador", (_req, res) => {
 app.get("/cotizador-manifest.json", (_req, res) => {
   res.json({
     name: "Cotizador SSR", short_name: "Cotizador",
-    description: "SS Remodelaciones — Sistema de cotizaciones",
+    description: "SS Remodelaciones − Sistema de cotizaciones",
     start_url: "/cotizador", display: "standalone",
     background_color: "#F4F6F9", theme_color: "#1B3A6B",
     icons: [{ src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%231B3A6B'/><text y='68' x='50' font-size='55' text-anchor='middle' fill='%23D4541A' font-family='Arial' font-weight='bold'>SS</text></svg>", sizes: "192x192", type: "image/svg+xml" }]
@@ -187,10 +189,10 @@ app.post("/api/procesar-notas", async (req, res) => {
       const a = s.indexOf("{"), b = s.lastIndexOf("}");
       if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
       s = s.slice(a, b + 1)
-        .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, "") // control chars
-        .replace(/\r?\n/g, " ")  // saltos de línea literales
-        .replace(/\t/g, " ")     // tabs
-        .replace(/,(\s*[}\]])/g, "$1"); // trailing commas
+        .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, "")
+        .replace(/\r?\n/g, " ")
+        .replace(/\t/g, " ")
+        .replace(/,(\s*[}\]])/g, "$1");
       return JSON.parse(s);
     }
 
@@ -210,7 +212,7 @@ app.post("/api/procesar-notas", async (req, res) => {
       data = parsearJSON(text1);
       console.log("✅ /api/procesar-notas OK (con web_search)");
     } catch (e1) {
-      // Fallback sin web_search — evita timeouts y errores del tool
+      // Fallback sin web_search − evita timeouts y errores del tool
       console.warn("⚠️  web_search falló (" + e1.message + "), reintentando sin él...");
       const r2 = await anthropic.messages.create({
         model: "claude-sonnet-4-6",
@@ -238,7 +240,7 @@ app.post("/api/cotizacion", async (req, res) => {
     const { client, items } = req.body;
     if (!client?.referencia || !client?.nombre || !items?.length)
       return res.status(400).json({ ok: false, error: "Faltan datos requeridos" });
-    console.log(`📋 POST /api/cotizacion — ${client.referencia} (${client.nombre})`);
+    console.log(`📋 POST /api/cotizacion − ${client.referencia} (${client.nombre})`);
     const { procesarCotizacion } = require("./bot/cotizacion");
     const result = await procesarCotizacion({ client, items });
     res.json(result);
@@ -249,7 +251,7 @@ app.post("/api/cotizacion", async (req, res) => {
 });
 
 
-// ── Transcripción de voz ────────────────────────────────────────────────────
+// ── Transcripción de voz ──────────────────────────────────────────────────────
 // Fallback para Firefox / navegadores sin Web Speech API.
 // Se activa solo cuando el navegador usa MediaRecorder y no puede transcribir.
 app.post("/api/transcribir-voz", async (req, res) => {
@@ -286,28 +288,28 @@ app.post("/api/transcribir-voz", async (req, res) => {
         return res.json({ ok: true, texto });
       }
     } catch (e) {
-      console.warn("⚠ Claude no pudo procesar el audio:", e.message);
+      console.warn("⚠️  Claude no pudo procesar el audio:", e.message);
     }
 
     // Si Claude no puede transcribir, el cliente descarga el audio localmente
-    res.json({ ok: false, error: "Transcripción no disponible — audio descargado localmente" });
+    res.json({ ok: false, error: "Transcripción no disponible − audio descargado localmente" });
 
   } catch (err) {
-    console.error("✖ /api/transcribir-voz:", err.message);
+    console.error("🔥 /api/transcribir-voz:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
 app.listen(PORT, () => {
   console.log(`
-╔══════════════════════════════════════════════════════╗
-║  🏗️  SS Remodelaciones — WhatsApp Bot (Sasha)        ║
-║  📡  Meta WhatsApp Business API                      ║
-║  🤖  IA: Claude Sonnet 4.6 (visión activada)         ║
-║  ⏰  Recordatorios: 8:00 AM CR diario               ║
-║  🚀  Puerto: ${PORT}                                    ║
-║  📬  Webhook: GET|POST /webhook                      ║
-╚══════════════════════════════════════════════════════╝
+┌─────────────────────────────────────────────────────┐
+│  🏗️  SS Remodelaciones − WhatsApp Bot (Sasha)        │
+│  📡  Meta WhatsApp Business API                      │
+│  🤖  IA: Claude Sonnet 4.6 (visión activada)         │
+│  ⏰  Recordatorios: 8:00 AM CR diario               │
+│  🚀  Puerto: ${PORT}                                          │
+│  📌  Webhook: GET|POST /webhook                      │
+└─────────────────────────────────────────────────────┘
   `);
 });
 
