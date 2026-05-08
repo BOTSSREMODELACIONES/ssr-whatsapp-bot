@@ -164,7 +164,7 @@ function readB64(file){
 }
 
 // FIX #6: Comprimir imagen antes de enviar (reduce tamaño ~80%, evita error 413)
-function compressImage(file, maxWidth=800, quality=0.65){
+function compressImage(file, maxWidth=400, quality=0.40){
   return new Promise(res=>{
     const img=new Image();
     const url=URL.createObjectURL(file);
@@ -256,7 +256,7 @@ function renderInput(){
 
     <div style="margin-top:16px">
       <span class="sec">📷 Fotos de la visita</span>
-      <p style="font-size:12px;color:#888;margin-bottom:8px">La IA analiza las fotos para presupuestar con más precisión (máx. 5 fotos, se comprimen automáticamente)</p>
+      <p style="font-size:12px;color:#888;margin-bottom:8px">La IA analiza las fotos para presupuestar con más precisión (máx. 3 fotos, se comprimen para optimizar tokens)</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start;margin-bottom:8px">
         ${fotoThumbs}
         <label class="cam-btn" title="Tomar foto con la cámara">
@@ -452,7 +452,7 @@ function bindEvents(){
   if(fEl) fEl.addEventListener("change",async e=>{
     const files=Array.from(e.target.files||[]);
     const imgs=await Promise.all(files.map(compressImage));
-    S.fotos=[...S.fotos,...imgs].slice(0,5); // máx 5 fotos
+    S.fotos=[...S.fotos,...imgs].slice(0,3); // máx 3 fotos (más = más tokens, error 429)
     render();
   });
 
@@ -460,7 +460,7 @@ function bindEvents(){
   if(gEl) gEl.addEventListener("change",async e=>{
     const files=Array.from(e.target.files||[]);
     const imgs=await Promise.all(files.map(compressImage));
-    S.fotos=[...S.fotos,...imgs].slice(0,5);
+    S.fotos=[...S.fotos,...imgs].slice(0,3);
     render();
   });
 
