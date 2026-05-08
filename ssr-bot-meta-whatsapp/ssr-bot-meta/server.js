@@ -198,32 +198,51 @@ app.post("/api/procesar-notas", async (req, res) => {
 
     let data;
 
-    // Intento 1: con web_search para materiales especializados
+    // Helper: retry automático en 429 (rate limit de tokens/min de Claude)
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    async function callClaudeWithRetry(opts, label) {
+      for (let intento = 1; intento <= 3; intento++) {
+        try {
+          const r = await anthropic.messages.create(opts);
+          const txt = (r.content || []).filter(b => b.type === "text").map(b => b.text).join("")
+                      || r.content?.[0]?.text || "";
+          if (!txt) throw new Error("Sin texto en respuesta");
+          return parsearJSON(txt);
+        } catch (err) {
+          const is429 = err.status === 429 || String(err.message).includes("rate_limit");
+          if (is429 && intento < 3) {
+            const wait = intento === 1 ? 65000 : 35000; // 65s luego 35s
+            console.warn(`⚠️ Rate limit 429 en ${label} — reintentando en ${wait/1000}s (intento ${intento}/3)...`);
+            await sleep(wait);
+          } else {
+            throw err;
+          }
+        }
+      }
+    }
+
+    // ── ORDEN CORREGIDO: primero SIN web_search (rápido, ~1500 tokens)
+    // Si falla el JSON, reintenta CON web_search (más tokens pero mejores precios)
+    // Esto evita el error 429 "rate_limit" en el caso común de solo texto.
     try {
-      const r1 = await anthropic.messages.create({
+      data = await callClaudeWithRetry({
+        model: "claude-sonnet-4-6",
+        max_tokens: 4000,
+        system: systemPrompt,
+        messages: [{ role: "user", content }],
+      }, "/api/procesar-notas sin web_search");
+      console.log("✅ /api/procesar-notas OK (sin web_search)");
+    } catch (e1) {
+      // Fallback CON web_search — para materiales especializados con precios actualizados
+      console.warn("⚠️  Sin web_search falló (" + e1.message + "), reintentando con web_search...");
+      data = await callClaudeWithRetry({
         model: "claude-sonnet-4-6",
         max_tokens: 4000,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         system: systemPrompt,
         messages: [{ role: "user", content }],
-      });
-      const text1 = (r1.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-      if (!text1) throw new Error("Sin texto en respuesta con web_search");
-      data = parsearJSON(text1);
+      }, "/api/procesar-notas con web_search");
       console.log("✅ /api/procesar-notas OK (con web_search)");
-    } catch (e1) {
-      // Fallback sin web_search − evita timeouts y errores del tool
-      console.warn("⚠️  web_search falló (" + e1.message + "), reintentando sin él...");
-      const r2 = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 4000,
-        system: systemPrompt,
-        messages: [{ role: "user", content }],
-      });
-      const text2 = (r2.content || []).filter(b => b.type === "text").map(b => b.text).join("")
-                    || r2.content?.[0]?.text || "";
-      data = parsearJSON(text2);
-      console.log("✅ /api/procesar-notas OK (fallback sin web_search)");
     }
 
     res.json({ ok: true, data });
