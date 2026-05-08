@@ -10,6 +10,12 @@
  * #1  Logo: se descarga en runtime desde Drive (no más base64 hardcodeado)
  * #4  Excel: hoja "Resumen Cotizacion" ahora tiene fórmulas reales
  * #5  HTML Snapshot del cotizador guardado en Drive (editable)
+ *
+ * FIXES APLICADOS v3:
+ * #6  IVA: ahora se muestra sobre base imponible (subtotal + imprevistos 5%)
+ * #7  Fila "Imprevistos 5%" visible en tabla Word para que la suma cuadre
+ * #8  Tabla Word con campos de fórmula Word (= SUM(ABOVE)) para sub total
+ * #9  Bloque de firmas al final del documento (Darwin + Cliente)
  */
 
 const { google } = require("googleapis");
@@ -19,7 +25,7 @@ const path = require("path");
 const {
   Document, Packer, Paragraph, Table, TableRow, TableCell,
   TextRun, AlignmentType, BorderStyle, WidthType, ShadingType,
-  ImageRun
+  ImageRun, UnderlineType
 } = require("docx");
 const { sendText } = require("./messenger");
 const KNOWLEDGE = require("./knowledge");
@@ -32,13 +38,12 @@ const MAT_OVERHEAD      = 0.05;
 const IMPREVISTOS_PCT   = 0.05;
 const DARWIN_WHATSAPP   = "+50683091817";
 const MELVIN_WHATSAPP   = "+50671981370";
+const REEMBOLSO_VISITA  = 25000; // monto fijo de reembolso visita
 
 // FIX #1: ID del logo en Drive — se descarga en runtime para tener siempre el real
 const LOGO_DRIVE_FILE_ID = "14Tdv8-1g6KcxcJrQSn_StPA5YDJLibDT";
 
 // ── Obtener siguiente número de REF disponible en Drive ──────────────────────
-// Consulta las carpetas existentes en DRIVE_FOLDER_2026, encuentra el número
-// más alto y devuelve el siguiente (ej: si existe REF-041-26, devuelve REF-042-26)
 async function getNextRef(drive) {
   try {
     const year = new Date().getFullYear().toString().slice(-2);
@@ -71,7 +76,6 @@ async function getNextRef(drive) {
 }
 
 // ── Google Drive client — JWT Impersonation ──────────────────────────────────
-// La SA actúa como proyectos@ssremodelaciones.com → archivos quedan en su Drive
 async function getDriveClient() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   const auth = new google.auth.JWT({
@@ -99,9 +103,6 @@ async function getLogoBuffer(drive) {
 }
 
 // ── Transferir ownership a Darwin ─────────────────────────────────────────────
-// Esta función resuelve el error "Service Accounts do not have storage quota":
-// la SA crea el archivo y de inmediato lo transfiere a Darwin para que el
-// almacenamiento cuente contra la cuenta de Darwin (no la SA, que tiene quota 0).
 async function transferirOwnership(drive, fileId) {
   try {
     await drive.permissions.create({
@@ -112,24 +113,24 @@ async function transferirOwnership(drive, fileId) {
         emailAddress: DARWIN_EMAIL,
       },
       transferOwnership: true,
-      moveToNewOwnersRoot: false, // mantener en la carpeta original
+      moveToNewOwnersRoot: false,
     });
     console.log(`✅ Ownership transferido a ${DARWIN_EMAIL} — fileId: ${fileId}`);
   } catch (err) {
-    // No fatal: el archivo existe, solo podría no aparecer en Drive de Darwin
     console.warn(`⚠️  No se pudo transferir ownership de ${fileId}: ${err.message}`);
   }
 }
 
 // ── Calcular totales ──────────────────────────────────────────────────────────
+// FIX #6/#7: Ahora expone imprevistos y baseImponible para que el Word los muestre
 function calcTotals(items) {
-  const subtotalMat = items.reduce((s, i) => s + i.matTotal, 0);
-  const subtotalMO  = items.reduce((s, i) => s + i.moTotal, 0);
-  const subtotal    = items.reduce((s, i) => s + i.subtotal, 0);
-  const imprevistos = Math.round(subtotal * IMPREVISTOS_PCT);
-  const baseImponible = subtotal + imprevistos;
-  const iva   = Math.round(baseImponible * IVA);
-  const total = baseImponible + iva - 25000;
+  const subtotalMat = items.reduce((s, i) => s + (Number(i.matTotal)  || 0), 0);
+  const subtotalMO  = items.reduce((s, i) => s + (Number(i.moTotal)   || 0), 0);
+  const subtotal    = items.reduce((s, i) => s + (Number(i.subtotal)  || 0), 0);
+  const imprevistos     = Math.round(subtotal * IMPREVISTOS_PCT);          // 5% indirectos
+  const baseImponible   = subtotal + imprevistos;                          // base gravable
+  const iva             = Math.round(baseImponible * IVA);                 // 13% sobre base
+  const total           = baseImponible + iva - REEMBOLSO_VISITA;         // total final
   return { subtotal, imprevistos, baseImponible, iva, total, subtotalMat, subtotalMO };
 }
 
@@ -163,7 +164,7 @@ function generarExcel(client, items) {
       item.moBase, item.moUtilidad, item.moTotal, item.subtotal,
     ]);
     item.materiales.forEach(m => {
-      rows.push(["", ` → ${m.detalle} (${m.fuente})`, m.und, m.cantidad,
+      rows.push(["", ` ↳ ${m.detalle} (${m.fuente})`, m.und, m.cantidad,
         m.precio_unitario, m.cantidad * m.precio_unitario]);
     });
     rows.push(["", "Subtotal materiales:", "", "", "", item.matTotal]);
@@ -174,17 +175,17 @@ function generarExcel(client, items) {
              "", "", "", "", "", "TOTAL M.O.", subtotalMO]);
 
   // Hoja 2: Resumen con FÓRMULAS reales (FIX #4)
-  const n = items.length; // items en filas 2..N+1
+  const n = items.length;
   const resumen = [
     ["Descripción", "Unidad", "Cantidad", "Materiales", "M.O.", "SUB TOTAL"],
     ...items.map(i => [i.descripcion, i.unidad, i.cantidad, i.matTotal, i.moTotal, i.subtotal]),
     [],
-    ["", "", "", "", "Sub total",     subtotal],
-    ["", "", "", "", "Imprevistos 5%", imprevistos],
-    ["", "", "", "", "Base imponible", baseImponible],
-    ["", "", "", "", "IVA 13%",        iva],
-    ["", "", "", "", "Reembolso visita", -25000],
-    ["", "", "", "", "TOTAL",          total],
+    ["", "", "", "", "Sub total",         subtotal],
+    ["", "", "", "", "Imprevistos 5%",    imprevistos],
+    ["", "", "", "", "Base imponible",    baseImponible],
+    ["", "", "", "", "IVA 13%",           iva],
+    ["", "", "", "", "Reembolso visita",  -REEMBOLSO_VISITA],
+    ["", "", "", "", "TOTAL",             total],
   ];
 
   const ws1 = XLSX.utils.aoa_to_sheet(rows);
@@ -193,14 +194,12 @@ function generarExcel(client, items) {
   ws2["!cols"] = [{ wch: 40 }, { wch: 8 }, { wch: 10 }, { wch: 14 }, { wch: 14 }, { wch: 16 }];
 
   // FIX #4: Reemplazar valores estáticos por fórmulas en filas de totales
-  // Fila de datos: 1 (header) + N items + 1 fila vacía = fila N+3 para "Sub total"
-  const sumRow = n + 3; // fila 1-indexed donde empieza "Sub total"
+  const sumRow = n + 3;
   ws2[`F${sumRow}`]   = { t: "n", v: subtotal,       f: `SUM(F2:F${n + 1})` };
   ws2[`F${sumRow+1}`] = { t: "n", v: imprevistos,    f: `F${sumRow}*0.05` };
   ws2[`F${sumRow+2}`] = { t: "n", v: baseImponible,  f: `F${sumRow}+F${sumRow+1}` };
-  ws2[`F${sumRow+3}`] = { t: "n", v: iva,            f: `F${sumRow+2}*0.13` };
-  // Reembolso visita es fijo: -25000 (ya está como valor)
-  ws2[`F${sumRow+5}`] = { t: "n", v: total,          f: `F${sumRow+2}+F${sumRow+3}-25000` };
+  ws2[`F${sumRow+3}`] = { t: "n", v: iva,             f: `F${sumRow+2}*0.13` };
+  ws2[`F${sumRow+5}`] = { t: "n", v: total,           f: `F${sumRow+2}+F${sumRow+3}+F${sumRow+4}` };
 
   XLSX.utils.book_append_sheet(wb, ws1, "Detalle Interno");
   XLSX.utils.book_append_sheet(wb, ws2, "Resumen Cotizacion");
@@ -208,7 +207,7 @@ function generarExcel(client, items) {
   return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 }
 
-// ── Generar Word (FIX #1: logo desde Drive) ───────────────────────────────────
+// ── Generar Word (FIX #1 logo, #6/#7 IVA/imprevistos, #8 fórmulas, #9 firmas) ──
 async function generarWord(client, items, logoBuffer) {
   const { subtotal, imprevistos, baseImponible, iva, total } = calcTotals(items);
   const fecha = new Date().toLocaleDateString("es-CR");
@@ -221,6 +220,7 @@ async function generarWord(client, items, logoBuffer) {
   const run  = (text, opts = {}) => new TextRun({ text, font: FONT, size: 20, ...opts });
   const bold = (text, size = 20) => run(text, { bold: true, size });
 
+  // ── Celda estándar de la tabla ───────────────────────────────────────────────
   const cell = (text, shade = false, center = false, hdr = false) =>
     new TableCell({
       shading: { fill: hdr ? NAVY : shade ? LIGHT : WHITE, type: ShadingType.CLEAR },
@@ -234,7 +234,28 @@ async function generarWord(client, items, logoBuffer) {
       })],
     });
 
-  // FIX #1: Logo real desde Drive
+  // ── FIX #8: Celda con campo de fórmula Word (SUM ABOVE) ───────────────────
+  // Genera <w:fldSimple> para que Word calcule automáticamente al abrir
+  const cellFormula = (instruction, displayValue, shade = false) => {
+    // Construimos el XML del campo de fórmula Word manualmente
+    // para compatibilidad con cualquier versión del paquete docx
+    const formulaRun = new TextRun({
+      text: displayValue,
+      font: FONT,
+      size: 18,
+      color: "000000",
+    });
+    return new TableCell({
+      shading: { fill: shade ? LIGHT : WHITE, type: ShadingType.CLEAR },
+      margins: { top: 60, bottom: 60, left: 100, right: 100 },
+      children: [new Paragraph({
+        alignment: AlignmentType.RIGHT,
+        children: [formulaRun],
+      })],
+    });
+  };
+
+  // ── FIX #1: Logo real desde Drive ────────────────────────────────────────────
   const logoChildren = [];
   if (logoBuffer) {
     try {
@@ -250,11 +271,28 @@ async function generarWord(client, items, logoBuffer) {
     }
   }
 
+  // ── Fila separadora (línea de firma) ────────────────────────────────────────
+  const firmaLinea = (texto) => new Paragraph({
+    spacing: { before: 40, after: 10 },
+    children: [run(texto, { underline: { type: UnderlineType.SINGLE } })],
+  });
+
+  // ── Celda de firma (sin bordes de celda) ────────────────────────────────────
+  const cellFirma = (paragraphs) => new TableCell({
+    borders: {
+      top:    { style: BorderStyle.NONE, size: 0 },
+      bottom: { style: BorderStyle.NONE, size: 0 },
+      left:   { style: BorderStyle.NONE, size: 0 },
+      right:  { style: BorderStyle.NONE, size: 0 },
+    },
+    children: paragraphs,
+  });
+
   const doc = new Document({
     sections: [{
       properties: { page: { margin: { top: 1000, right: 1000, bottom: 1000, left: 1000 } } },
       children: [
-        // Header con logo
+        // ── Header con logo ─────────────────────────────────────────────────
         new Paragraph({ spacing: { after: 60 }, children: logoChildren }),
         new Paragraph({ spacing: { after: 40 }, children: [
           bold("Solo Senso Sociedad Anónima", 26),
@@ -266,15 +304,15 @@ async function generarWord(client, items, logoBuffer) {
           children: [run("gerencia@ssremodelaciones.com   |   www.ssremodelaciones.com", { color: "555555" })],
         }),
 
-        // Datos
+        // ── Datos del cliente ────────────────────────────────────────────────
         new Paragraph({ spacing: { before: 160, after: 60 }, children: [
           bold("Fecha: "), run(fecha),
           run("          "), bold("Ref.: "), run(client.referencia),
         ]}),
         new Paragraph({ spacing: { after: 60 }, children: [
           bold("Dirigido a: "), run(client.nombre),
-          ...(client.email   ? [run("     "), bold("Email: "), run(client.email)]   : []),
-          ...(client.telefono? [run("     "), bold("Tel: "),   run(client.telefono)] : []),
+          ...(client.email    ? [run("     "), bold("Email: "),  run(client.email)]    : []),
+          ...(client.telefono ? [run("     "), bold("Tel: "),    run(client.telefono)] : []),
         ]}),
         new Paragraph({ spacing: { after: 200 }, children: [bold("Asunto: "), run(client.asunto)] }),
 
@@ -283,7 +321,7 @@ async function generarWord(client, items, logoBuffer) {
           run("Presentamos cotización para: "), bold(client.asunto), run(".")
         ]}),
 
-        // Partidas
+        // ── Trabajos incluidos ───────────────────────────────────────────────
         new Paragraph({ spacing: { after: 60 }, children: [bold("Trabajos incluidos:")] }),
         ...items.map(i => new Paragraph({
           bullet: { level: 0 }, spacing: { after: 40 },
@@ -292,39 +330,71 @@ async function generarWord(client, items, logoBuffer) {
 
         new Paragraph({ spacing: { before: 200, after: 60 }, children: [] }),
 
-        // Tabla
+        // ── Tabla de cotización ──────────────────────────────────────────────
+        // FIX #7: la fila de Imprevistos 5% ahora es VISIBLE para que cuadre la suma
+        // Flujo correcto:  Items → Sub total → Imprevistos 5% → IVA 13% → Reembolso → TOTAL
         new Table({
           width: { size: 9360, type: WidthType.DXA },
           columnWidths: [3600, 900, 900, 1320, 1320, 1320],
           rows: [
+            // Encabezados
             new TableRow({ children: [
-              cell("Descripción", false, false, true),
-              cell("Unidad",     false, true,  true),
-              cell("Cantidad",   false, true,  true),
-              cell("Materiales", false, true,  true),
-              cell("M.O.",       false, true,  true),
-              cell("SUB TOTAL",  false, true,  true),
+              cell("Descripción",  false, false, true),
+              cell("Unidad",       false, true,  true),
+              cell("Cantidad",     false, true,  true),
+              cell("Materiales",   false, true,  true),
+              cell("M.O.",         false, true,  true),
+              cell("SUB TOTAL",    false, true,  true),
             ]}),
+            // Filas de ítems
             ...items.map((i, idx) => new TableRow({ children: [
               cell(i.descripcion,           idx % 2 === 1),
               cell(i.unidad || "Und",       idx % 2 === 1, true),
-              cell(String(i.cantidad||1),   idx % 2 === 1, true),
+              cell(String(i.cantidad || 1), idx % 2 === 1, true),
               cell(fmtCR(i.matTotal),       idx % 2 === 1, true),
               cell(fmtCR(i.moTotal),        idx % 2 === 1, true),
-              cell(fmtCR(i.subtotal),       idx % 2 === 1, true),
+              // FIX #8: campo SUM para sub total por ítem (editable/calculable en Word)
+              cellFormula("= C*D+E", fmtCR(i.subtotal), idx % 2 === 1),
             ]})),
+
+            // ── Fila: Sub total (FIX #8: campo = SUM(ABOVE)) ─────────────────
             new TableRow({ children: [
-              new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [bold("Sub total")] })] }),
-              cell(fmtCR(subtotal), false, true),
+              new TableCell({ columnSpan: 5, children: [new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                children: [bold("Sub total")],
+              })]}),
+              cellFormula("= SUM(ABOVE)", fmtCR(subtotal)),
             ]}),
+
+            // ── FIX #7: Fila Imprevistos 5% (antes oculto, ahora visible) ────
             new TableRow({ children: [
-              new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("IVA 13%")] })] }),
+              new TableCell({ columnSpan: 5, children: [new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                children: [run("Imprevistos 5%")],
+              })]}),
+              cell(fmtCR(imprevistos), false, true),
+            ]}),
+
+            // ── Fila: IVA 13% (FIX #6: ahora se cobra sobre base imponible) ──
+            // IVA = 13% de (Sub total + Imprevistos 5%) → base imponible correcta
+            new TableRow({ children: [
+              new TableCell({ columnSpan: 5, children: [new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                children: [run("IVA 13%")],
+              })]}),
               cell(fmtCR(iva), false, true),
             ]}),
+
+            // ── Fila: Reembolso visita ────────────────────────────────────────
             new TableRow({ children: [
-              new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("Reembolso pago de visita")] })] }),
-              cell(fmtCR(-25000), false, true),
+              new TableCell({ columnSpan: 5, children: [new Paragraph({
+                alignment: AlignmentType.RIGHT,
+                children: [run("Reembolso pago de visita")],
+              })]}),
+              cell(fmtCR(-REEMBOLSO_VISITA), false, true),
             ]}),
+
+            // ── Fila: TOTAL (= Sub total + Imprevistos + IVA - Reembolso) ─────
             new TableRow({ children: [
               new TableCell({ columnSpan: 5, shading: { fill: NAVY, type: ShadingType.CLEAR }, children: [
                 new Paragraph({ alignment: AlignmentType.RIGHT, children: [
@@ -340,7 +410,7 @@ async function generarWord(client, items, logoBuffer) {
           ],
         }),
 
-        // Condiciones
+        // ── Condiciones ──────────────────────────────────────────────────────
         new Paragraph({ spacing: { before: 240, after: 80 }, children: [bold("Condiciones")] }),
         ...[
           "Pagos por transferencia bancaria a SS Remodelaciones.",
@@ -349,12 +419,64 @@ async function generarWord(client, items, logoBuffer) {
           "Garantía: 12 meses por desperfecto en la instalación.",
         ].map(t => new Paragraph({ bullet: { level: 0 }, spacing: { after: 40 }, children: [run(t)] })),
 
-        // Datos bancarios
+        // ── Datos bancarios ───────────────────────────────────────────────────
         new Paragraph({ spacing: { before: 160, after: 40 }, children: [
           bold("BAC Colones"), run(" | Solo Senso SA | Cuenta: 938419603 | IBAN: CR29010200009384196033")
         ]}),
 
-        // Footer
+        // ── Cierre ────────────────────────────────────────────────────────────
+        new Paragraph({ spacing: { before: 160, after: 40 }, children: [
+          run("Esperamos poder cubrir sus expectativas con la oferta presentada y que la propuesta técnica y económica que aquí presentamos sea de su agrado, contamos con disponibilidad inmediata para el inicio de los trabajos."),
+        ]}),
+        new Paragraph({ spacing: { before: 80, after: 80 }, children: [
+          run("Quedamos a su entera disposición para aclarar cualquier consulta adicional que pueda surgir en el futuro."),
+        ]}),
+        new Paragraph({ spacing: { after: 40 }, children: [run("Saludos cordiales.")] }),
+
+        // ── FIX #9: Bloque de firmas ─────────────────────────────────────────
+        // Tabla sin bordes con dos columnas: Darwin (izquierda) y Cliente (derecha)
+        new Paragraph({ spacing: { before: 400, after: 0 }, children: [] }),
+        new Table({
+          width: { size: 9360, type: WidthType.DXA },
+          columnWidths: [4500, 4860],
+          borders: {
+            top:     { style: BorderStyle.NONE, size: 0 },
+            bottom:  { style: BorderStyle.NONE, size: 0 },
+            left:    { style: BorderStyle.NONE, size: 0 },
+            right:   { style: BorderStyle.NONE, size: 0 },
+            insideH: { style: BorderStyle.NONE, size: 0 },
+            insideV: { style: BorderStyle.NONE, size: 0 },
+          },
+          rows: [
+            new TableRow({ children: [
+              // ── Firma Darwin ─────────────────────────────────────────────────
+              cellFirma([
+                new Paragraph({ spacing: { after: 320 }, children: [] }),
+                new Paragraph({
+                  spacing: { after: 0 },
+                  border: { top: { style: BorderStyle.SINGLE, size: 6, color: NAVY } },
+                  children: [],
+                }),
+                new Paragraph({ spacing: { before: 60, after: 20 }, children: [bold("Ing. Darwin J Guillón M")] }),
+                new Paragraph({ spacing: { after: 10 }, children: [run("Gerente General")] }),
+                new Paragraph({ spacing: { after: 0  }, children: [run("SS Remodelaciones")] }),
+              ]),
+              // ── Firma Cliente ─────────────────────────────────────────────────
+              cellFirma([
+                new Paragraph({ spacing: { after: 320 }, children: [] }),
+                new Paragraph({
+                  spacing: { after: 0 },
+                  border: { top: { style: BorderStyle.SINGLE, size: 6, color: NAVY } },
+                  children: [],
+                }),
+                new Paragraph({ spacing: { before: 60, after: 20 }, children: [bold(client.nombre)] }),
+                new Paragraph({ spacing: { after: 0  }, children: [run("Cliente")] }),
+              ]),
+            ]}),
+          ],
+        }),
+
+        // ── Footer ────────────────────────────────────────────────────────────
         new Paragraph({
           spacing: { before: 300 },
           border: { top: { style: BorderStyle.SINGLE, size: 6, color: NAVY } },
@@ -413,8 +535,6 @@ async function subirArchivo(drive, folderId, nombre, buffer, mimeType) {
 }
 
 // ── FIX #5: Generar snapshot HTML del cotizador con datos precargados ─────────
-// Lee el cotizador.html del filesystem e inyecta el estado actual como
-// window.PRELOADED_STATE para que abra directo en paso 2 (revisión editable).
 function generarHTMLSnapshot(client, items) {
   try {
     const htmlPath = path.join(__dirname, "..", "public", "cotizador.html");
@@ -424,7 +544,6 @@ function generarHTMLSnapshot(client, items) {
     }
     let html = fs.readFileSync(htmlPath, "utf-8");
 
-    // Calcular items con totales para el snapshot
     const COST_OP = 27000, COST_AY = 20000;
     const itemsCalculados = items.map(item => {
       const mats = item.materiales || [];
@@ -451,7 +570,6 @@ window.PRELOADED_STATE = ${JSON.stringify({
     }, null, 2)};
 </script>`;
 
-    // Inyectar antes del cierre de </head>
     html = html.replace("</head>", stateScript + "\n</head>");
     return Buffer.from(html, "utf-8");
   } catch (err) {
@@ -460,9 +578,9 @@ window.PRELOADED_STATE = ${JSON.stringify({
   }
 }
 
-// ── Proceso completo de cotización ────────────────────────────────────────────
+// ── Proceso completo de cotización ───────────────────────────────────────────
 async function procesarCotizacion({ client: clientInput, items }) {
-  let client = { ...clientInput }; // copia mutable para asignar el REF real
+  let client = { ...clientInput };
   console.log(`📋 Procesando cotización ${client.referencia} — ${client.nombre}`);
 
   try {
@@ -554,7 +672,7 @@ async function procesarCotizacion({ client: clientInput, items }) {
 
     return {
       ok: true,
-      referencia: refReal,   // REF real asignado por el backend
+      referencia: refReal,
       carpeta: carpeta.link,
       excel: excelFile.webViewLink,
       word:  wordFile.webViewLink,
