@@ -232,7 +232,7 @@ function detectDay(text) {
 }
 
 function parseFlags(response) {
-  const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]*))\]\s*$/;
+  const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*))\]\s*$/;
   const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
   const match = response.match(flagRegex);
 
