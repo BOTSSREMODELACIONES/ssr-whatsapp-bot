@@ -115,7 +115,21 @@ app.post("/webhook", async (req, res) => {
         const videoContext = caption ? `[El cliente envió un video con el mensaje: "${caption}"]` : "[El cliente envió un video de su proyecto]";
         addToBuffer(from, messageId, videoContext, null);
       } else if (msg.type === "audio") {
+        const audioId = msg.audio?.id;
         addToBuffer(from, messageId, "[El cliente envió un mensaje de voz]", null);
+        // FIX: Reenviar audio real a supervisores
+        if (audioId) {
+          const { sendMediaById } = require("./bot/messenger");
+          const SUPS = ["+50683091817", "+50671981370"];
+          for (const sup of SUPS) {
+            sendMediaById(sup, audioId, "audio").catch(e => console.warn(`⚠️ No se pudo reenviar audio a ${sup}:`, e.message));
+          }
+          // Aviso de contexto
+          const { sendText: st } = require("./bot/messenger");
+          for (const sup of SUPS) {
+            st(sup, `🎙️ *Audio de cliente +${from}*`).catch(() => {});
+          }
+        }
       } else {
         console.log(`⚠️  Tipo ignorado: ${msg.type} de +${from}`);
       }
