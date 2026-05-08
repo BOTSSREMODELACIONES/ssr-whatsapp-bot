@@ -1,6 +1,6 @@
 const { get, update, addMsg, reset } = require("./state");
 const { ask } = require("./claude");
-const { sendText, markRead, downloadMedia } = require("./messenger");
+const { sendText, markRead, downloadMedia, sendMediaById } = require("./messenger");
 const { createVisitEvent, getAvailableSlots } = require("./calendar");
 const { sendVisitConfirmation } = require("./email");
 const { upsertLead, registerVisit } = require("./crm");
@@ -29,7 +29,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   if (session.escalated) return;
 
   try {
-    // ── Descargar todas las imágenes en paralelo ───────────────────────────
+    // ── Descargar todas las imágenes en paralelo ──────────────────────────────
     let imageDataArray = [];
 
     if (mediaIds) {
@@ -66,7 +66,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
     addMsg(from, "user", historyText);
 
-    // ── Detectar día para disponibilidad ──────────────────────────────────
+    // ── Detectar día para disponibilidad ──────────────────────────────────────
     const dayMentioned = detectDay(normalized);
     let availabilityContext = "";
 
@@ -75,7 +75,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       update(from, { slots_shown: dayMentioned });
 
       if (slots.length === 0) {
-        availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explicale amablemente y ofrecele los otros días disponibles: lunes, martes o viernes.]`;
+        availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele los otros días disponibles: lunes, martes o viernes.]`;
       } else {
         const slotsText = slots.map(s => {
           const [h, m] = s.split(":");
@@ -88,7 +88,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
-    // ── Llamar a Claude ────────────────────────────────────────────────────
+    // ── Llamar a Claude ───────────────────────────────────────────────────────
     const rawResponse = await ask(
       session.history.slice(0, -1),
       normalized + availabilityContext,
@@ -99,12 +99,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
 
-    // ── Monitor supervisores ───────────────────────────────────────────────
+    // ── Monitor supervisores — texto ──────────────────────────────────────────
     const clientName = session.name ? `${session.name} (${from})` : from;
-    const clientMsg = imageDataArray.length > 0
+    const clientMsgLabel = imageDataArray.length > 0
       ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
       : normalized;
-    const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${clientMsg}\n🤖 *Sasha:* ${cleanMessage}`;
+    const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientName}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${cleanMessage}`;
+
     for (const supervisor of SUPERVISORES) {
       sendText(supervisor, monitorMsg).catch((err) => {
         console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
@@ -114,11 +115,23 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       });
     }
 
-    // ── Procesar flags ─────────────────────────────────────────────────────
+    // FIX: Reenviar imágenes del cliente a supervisores como media real
+    if (mediaIds) {
+      const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
+      for (const mediaId of ids) {
+        for (const supervisor of SUPERVISORES) {
+          sendMediaById(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientName}`).catch(err => {
+            console.warn(`⚠️ No se pudo reenviar foto a ${supervisor}: ${err.message}`);
+          });
+        }
+      }
+    }
+
+    // ── Procesar flags ────────────────────────────────────────────────────────
     if (flag === "ESCALAR") {
       update(from, { escalated: true });
       await sendText(from, `📲 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
-      await notifyMelvin(from, session, normalized, "escalacion");
+      await notifyAllSupervisors(from, session, normalized, "escalacion");
 
     } else if (flag === "LEAD") {
       const [name, project, zone] = (flagData || "").split("|");
@@ -194,10 +207,12 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
 
       registerVisit({ ...updated, phone: from }).catch(() => {});
-      await notifyMelvin(from, updated, normalized, "visita_solicitada");
+
+      // FIX: notificar a TODOS los supervisores (antes solo iba a Melvin)
+      await notifyAllSupervisors(from, updated, normalized, "visita_solicitada");
       logLead(from, updated, "visita_solicitada");
 
-      await sendText(from, `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo y un recordatorio el día anterior 📧`);
+      await sendText(from, `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo y un recordatorio el día anterior 📅`);
     }
 
   } catch (err) {
@@ -217,7 +232,7 @@ function detectDay(text) {
 }
 
 function parseFlags(response) {
-  const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*))]\s*$/;
+  const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]*))\]\s*$/;
   const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
   const match = response.match(flagRegex);
 
@@ -233,32 +248,46 @@ function parseFlags(response) {
   return { cleanMessage, flag: null, flagData: null };
 }
 
-async function notifyMelvin(from, session, lastMsg, tipo) {
+// FIX: Notificar a TODOS los supervisores (Darwin + Melvin)
+// Antes: solo enviaba al número de Melvin en KNOWLEDGE
+// Ahora: envía a todos los SUPERVISORES del array
+async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   const header = {
     visita_solicitada: "🗓️ NUEVA VISITA AGENDADA",
-    escalacion: "🔔 CLIENTE NECESITA ATENCIÓN",
+    escalacion: "📢 CLIENTE NECESITA ATENCIÓN",
   }[tipo] || "📋 NOTIFICACIÓN SSR Bot";
 
   const lines = [
     header, "",
     `📱 ${from}`,
-    session.name         && `👤 ${session.name}`,
-    session.project_desc && `🏗️ ${session.project_desc}`,
-    session.zone         && `📍 ${session.zone}`,
-    session.visit_day    && `📅 Día: ${session.visit_day}`,
-    session.visit_hour   && `🕐 Hora: ${session.visit_hour}`,
-    session.waze_link    && `🗺️ Ubicación: ${session.waze_link}`,
-    session.client_email && `📧 Email: ${session.client_email}`,
+    session.name          && `👤 ${session.name}`,
+    session.project_desc  && `🏗️ ${session.project_desc}`,
+    session.zone          && `📍 ${session.zone}`,
+    session.visit_day     && `📅 Día: ${session.visit_day}`,
+    session.visit_hour    && `🕐 Hora: ${session.visit_hour}`,
+    session.waze_link     && `🗺️ Ubicación: ${session.waze_link}`,
+    session.client_email  && `📧 Email: ${session.client_email}`,
     "", `💬 "${lastMsg}"`, "",
     "_Sasha — Bot SSR_",
   ].filter(Boolean).join("\n");
 
-  try {
-    await sendText(KNOWLEDGE.empresa.whatsapp_melvin, lines);
-    console.log(`✅ Melvin notificado [${tipo}]`);
-  } catch (err) {
-    console.error("❌ Error notificando a Melvin:", err.message);
-  }
+  // Enviar a TODOS los supervisores en paralelo
+  const resultados = await Promise.allSettled(
+    SUPERVISORES.map(num => sendText(num, lines))
+  );
+
+  resultados.forEach((r, i) => {
+    if (r.status === "fulfilled") {
+      console.log(`✅ Supervisor [${SUPERVISORES[i]}] notificado [${tipo}]`);
+    } else {
+      console.error(`❌ Error notificando a ${SUPERVISORES[i]}: ${r.reason?.message}`);
+    }
+  });
+}
+
+// Mantener compatibilidad con código que llame notifyMelvin directamente
+async function notifyMelvin(from, session, lastMsg, tipo) {
+  return notifyAllSupervisors(from, session, lastMsg, tipo);
 }
 
 function logLead(from, session, tipo = "lead") {
