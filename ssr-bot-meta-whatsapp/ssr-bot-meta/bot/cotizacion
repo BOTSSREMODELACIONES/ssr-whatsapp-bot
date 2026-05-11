@@ -1,13 +1,11 @@
 /**
- * cotizacion.js — Motor de cotizaciones SSR  v4
+ * cotizacion.js — Motor de cotizaciones SSR  v5
  *
- * FIXES v4 (sobre v3):
- * #10 Imprevistos absorbidos en M.O. por ítem → cliente NO ve línea separada
- * #11 Ítems obligatorios auto-inyectados al final:
- *       - "Transporte de materiales, limpieza final y bote de escombros"
- *       - "Alquiler de andamios para ejecución de obra"
- * #12 Fórmulas Excel en hoja Resumen (ya las tenía v3, se mantienen)
- * #13 Bloque de firmas al final del Word (ya en v3, se mantiene)
+ * FIXES v5 (sobre v4):
+ * #14 Logo: FILE_ID corregido a PNG horizontal sin fondo + type: "png" en ambos ImageRun
+ * #15 Acentos: función fixSpanish() normaliza texto dinámico (asunto, descripciones)
+ * #16 Fórmulas Excel Hoja Detalle Interno: tracking de filas → fórmulas en I,K,L,M main items
+ *     y F de sub-ítems y subtotales mat
  */
 
 const { google } = require("googleapis");
@@ -26,13 +24,14 @@ const DRIVE_FOLDER_2026 = "1z3pmO0oMfY24PRSWwN4Kh1-1oqgXzPBG";
 const DARWIN_EMAIL      = "proyectos@ssremodelaciones.com";
 const IVA               = 0.13;
 const MAT_OVERHEAD      = 0.05;
-const IMPREVISTOS_PCT   = 0.05;   // absorbido en MO del Word/cliente, visible en Excel interno
+const IMPREVISTOS_PCT   = 0.05;
 const REEMBOLSO_VISITA  = 25000;
 const DARWIN_WHATSAPP   = "+50683091817";
 const MELVIN_WHATSAPP   = "+50671981370";
-const LOGO_DRIVE_FILE_ID = "14Tdv8-1g6KcxcJrQSn_StPA5YDJLibDT";
+// FIX #14: ID correcto del logo PNG horizontal sin fondo
+const LOGO_DRIVE_FILE_ID = "1YMFJYQNOi5mx_vHLsYydFNZA7ejjOr1f";
 
-// ── FIX #11: Ítems obligatorios siempre al final de cada cotización ───────────
+// ── FIX #11: Ítems obligatorios siempre al final ──────────────────────────────
 const ITEMS_OBLIGATORIOS = [
   {
     id: "OBL-1",
@@ -84,14 +83,12 @@ function calcTotals(items) {
   const iva            = Math.round(baseImponible * IVA);
   const total          = baseImponible + iva - REEMBOLSO_VISITA;
 
-  // FIX #10: Por ítem, distribuir imprevistos proporcional al subtotal → suma al moTotal
   const itemsDisplay = items.map(item => {
     const share      = subtotal > 0 ? Math.round((item.subtotal / subtotal) * imprevistos) : 0;
     const moDisplay  = (Number(item.moTotal) || 0) + share;
     return { ...item, moDisplay, subtotalDisplay: (Number(item.matTotal) || 0) + moDisplay };
   });
 
-  // Suma de subtotalsDisplay (puede diferir ±₡1 de baseImponible por redondeo)
   const subtotalDisplay = itemsDisplay.reduce((s, i) => s + i.subtotalDisplay, 0);
 
   return { subtotal, imprevistos, baseImponible, iva, total, subtotalMat, subtotalMO, itemsDisplay, subtotalDisplay };
@@ -100,6 +97,25 @@ function calcTotals(items) {
 // ── Formato moneda CR ─────────────────────────────────────────────────────────
 function fmtCR(n) {
   return "₡" + Number(n || 0).toLocaleString("es-CR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// ── FIX #15: Normalizar acentos en texto dinámico ────────────────────────────
+const ACCENT_MAP = {
+  remodelacion: 'remodelación', Remodelacion: 'Remodelación',
+  ceramica:     'cerámica',     Ceramica:     'Cerámica',
+  demolicion:   'demolición',   Demolicion:   'Demolición',
+  instalacion:  'instalación',  Instalacion:  'Instalación',
+  colocacion:   'colocación',   Colocacion:   'Colocación',
+  fabricacion:  'fabricación',  Fabricacion:  'Fabricación',
+  descripcion:  'descripción',  condicion:    'condición',
+  garantia:     'garantía',     numero:       'número',
+  tuberia:      'tubería',      cotizacion:   'cotización',
+  reparacion:   'reparación',   instalacion:  'instalación',
+};
+function fixSpanish(text = '') {
+  return Object.entries(ACCENT_MAP).reduce(
+    (s, [bad, good]) => s.replace(new RegExp(`\\b${bad}\\b`, 'g'), good), text
+  );
 }
 
 // ── Auth Google Drive ─────────────────────────────────────────────────────────
@@ -152,41 +168,87 @@ async function getNextRef(drive) {
 }
 
 // ── Generar Excel ─────────────────────────────────────────────────────────────
+// FIX #16: Hoja Detalle Interno con fórmulas (tracking de filas durante la construcción)
 function generarExcel(client, items) {
   const wb    = XLSX.utils.book_new();
   const T     = calcTotals(items);
   const fecha = new Date().toLocaleDateString("es-CR");
   const n     = items.length;
 
-  // Hoja 1: Detalle interno completo (imprevistos visible para Darwin)
+  // ── Hoja 1: Detalle interno completo ──
   const rows = [
     ["SS REMODELACIONES — PRESUPUESTO INTERNO (CONFIDENCIAL)"],
     ["Ref:", client.referencia, "Fecha:", fecha, "Cliente:", client.nombre],
     ["Proyecto:", client.asunto],
     [],
-    ["Ítem","Detalle","Und","Cantidad","P.Unit.","Subtotal Mat.",
-     "Días","Operarios","Ayudantes","MO Base","Utilidad MO","Total MO","TOTAL ACTIVIDAD"],
+    ["Ítem","Detalle","Und","Cant","Días","Op","Ay","Mat.Base","Mat+5%","MO","Utilidad","Total MO","TOTAL"],
   ];
-  items.forEach(item => {
-    rows.push([item.id, item.descripcion, "", "", "", "",
-               item.dias, item.operarios, item.ayudantes,
-               item.moBase, item.moUtilidad, item.moTotal, item.subtotal]);
-    (item.materiales || []).forEach(m =>
-      rows.push(["", ` ↳ ${m.detalle} (${m.fuente})`, m.und, m.cantidad, m.precio_unitario, (m.cantidad||0)*(m.precio_unitario||0)])
-    );
-    rows.push(["", "Subtotal materiales:", "", "", "", item.matTotal]);
-    rows.push([]);
-  });
-  rows.push(["", "TOTAL MATERIALES", "", "", "", T.subtotalMat, "", "", "", "", "", "TOTAL M.O.", T.subtotalMO]);
-  rows.push([]);
-  rows.push(["", "Sub total (ítems)",     "", "", "", T.subtotal]);
-  rows.push(["", "Imprevistos 5% (int.)", "", "", "", T.imprevistos]);
-  rows.push(["", "Base imponible",        "", "", "", T.baseImponible]);
-  rows.push(["", "IVA 13%",               "", "", "", T.iva]);
-  rows.push(["", "Reembolso visita",      "", "", "", -REEMBOLSO_VISITA]);
-  rows.push(["", "TOTAL",                 "", "", "", T.total]);
 
-  // Hoja 2: Resumen cliente (imprevistos absorbido en MO, con fórmulas)
+  // FIX #16: acumular info de filas para asignar fórmulas después
+  const ws1Tracks = []; // { mainRow, subStart, subEnd, subtotalRow, item }
+
+  items.forEach(item => {
+    const mainRow = rows.length + 1;                    // Excel 1-indexed
+    const matBase = Math.round(item.matTotal / (1 + MAT_OVERHEAD));
+    rows.push([
+      item.id, item.descripcion, item.unidad || "", item.cantidad || 1,
+      item.dias, item.operarios, item.ayudantes,
+      matBase, item.matTotal,
+      item.moBase, item.moUtilidad, item.moTotal, item.subtotal,
+    ]);
+
+    const subStart = rows.length + 1;
+    (item.materiales || []).forEach(m =>
+      rows.push(["", ` ➳ ${m.detalle} (${m.fuente})`, m.und, m.cantidad, m.precio_unitario,
+                 (m.cantidad||0)*(m.precio_unitario||0)])
+    );
+    const subEnd = rows.length;
+
+    const subtotalRow = rows.length + 1;
+    rows.push(["", "Subtotal mat:", "", "", "", "", "", "", item.matTotal]);
+    rows.push([]);
+
+    ws1Tracks.push({ mainRow, subStart, subEnd, subtotalRow, item });
+  });
+
+  rows.push(["", "TOTAL MATERIALES", "", "", "", "", "", "", T.subtotalMat, "", "", "TOTAL M.O.", T.subtotalMO]);
+  rows.push([]);
+  const s = {};
+  s.subtotal    = rows.length + 1; rows.push(["", "Sub total",             "", "", "", "", "", "", "", T.subtotal]);
+  s.imprevistos = rows.length + 1; rows.push(["", "Imprevistos 5% (INT.)", "", "", "", "", "", "", "", T.imprevistos]);
+  s.base        = rows.length + 1; rows.push(["", "Base imponible",        "", "", "", "", "", "", "", T.baseImponible]);
+  s.iva         = rows.length + 1; rows.push(["", "IVA 13%",               "", "", "", "", "", "", "", T.iva]);
+  s.reembolso   = rows.length + 1; rows.push(["", "Reembolso visita",      "", "", "", "", "", "", "", -REEMBOLSO_VISITA]);
+  s.total       = rows.length + 1; rows.push(["", "TOTAL",                 "", "", "", "", "", "", "", T.total]);
+
+  const ws1 = XLSX.utils.aoa_to_sheet(rows);
+  ws1["!cols"] = [{wch:6},{wch:45},{wch:8},{wch:6},{wch:6},{wch:4},{wch:4},{wch:12},{wch:12},{wch:12},{wch:12},{wch:12},{wch:14}];
+
+  // FIX #16: asignar fórmulas en ws1 (Detalle Interno)
+  ws1Tracks.forEach(({ mainRow, subStart, subEnd, subtotalRow, item }) => {
+    // Sub-ítems: F = D*E
+    for (let r = subStart; r <= subEnd; r++) {
+      ws1[`F${r}`] = { t: "n", v: (ws1[`D${r}`]?.v||0) * (ws1[`E${r}`]?.v||0), f: `D${r}*E${r}` };
+    }
+    // Main item: I = H*1.05 | K = J*0.5 | L = J+K | M = I+L
+    ws1[`I${mainRow}`] = { t: "n", v: item.matTotal,   f: `H${mainRow}*1.05` };
+    ws1[`K${mainRow}`] = { t: "n", v: item.moUtilidad, f: `J${mainRow}*0.5` };
+    ws1[`L${mainRow}`] = { t: "n", v: item.moTotal,    f: `J${mainRow}+K${mainRow}` };
+    ws1[`M${mainRow}`] = { t: "n", v: item.subtotal,   f: `I${mainRow}+L${mainRow}` };
+    // Subtotal mat: I = SUM(F_subs)
+    if (subStart <= subEnd) {
+      ws1[`I${subtotalRow}`] = { t: "n", v: item.matTotal, f: `SUM(F${subStart}:F${subEnd})*1.05` };
+    }
+  });
+  // Fórmulas en resumen de hoja 1
+  const mainRows = ws1Tracks.map(t => `M${t.mainRow}`).join('+');
+  ws1[`J${s.subtotal}`]    = { t: "n", v: T.subtotal,       f: mainRows };
+  ws1[`J${s.imprevistos}`] = { t: "n", v: T.imprevistos,    f: `ROUND(J${s.subtotal}*0.05,0)` };
+  ws1[`J${s.base}`]        = { t: "n", v: T.baseImponible,  f: `J${s.subtotal}+J${s.imprevistos}` };
+  ws1[`J${s.iva}`]         = { t: "n", v: T.iva,            f: `ROUND(J${s.base}*0.13,0)` };
+  ws1[`J${s.total}`]       = { t: "n", v: T.total,          f: `J${s.base}+J${s.iva}+J${s.reembolso}` };
+
+  // ── Hoja 2: Resumen cliente (imprevistos absorbido en MO, con fórmulas) ──
   const resumen = [
     ["Descripción", "Unidad", "Cantidad", "Materiales", "M.O.", "SUB TOTAL"],
     ...T.itemsDisplay.map(i => [i.descripcion, i.unidad||"Und", i.cantidad||1, i.matTotal, i.moDisplay, i.subtotalDisplay]),
@@ -197,13 +259,10 @@ function generarExcel(client, items) {
     ["", "", "", "", "TOTAL",          T.total],
   ];
 
-  const ws1 = XLSX.utils.aoa_to_sheet(rows);
   const ws2 = XLSX.utils.aoa_to_sheet(resumen);
-  ws1["!cols"] = [{wch:6},{wch:40},{wch:8},{wch:10},{wch:12},{wch:14}];
-  ws2["!cols"] = [{wch:40},{wch:8},{wch:10},{wch:14},{wch:14},{wch:16}];
+  ws2["!cols"] = [{wch:45},{wch:8},{wch:10},{wch:14},{wch:14},{wch:16}];
 
-  // Fórmulas por ítem en hoja 2: SUB TOTAL (col F) = Materiales (col D) + M.O. (col E)
-  // Esto permite editar materiales o MO y el subtotal se recalcula automáticamente
+  // Fórmulas por ítem en hoja 2: SUB TOTAL (col F) = Mat (col D) + M.O. (col E)
   for (let fi = 0; fi < n; fi++) {
     const frow = fi + 2;
     ws2[`F${frow}`] = { t:"n", v: T.itemsDisplay[fi].subtotalDisplay, f: `D${frow}+E${frow}` };
@@ -212,7 +271,7 @@ function generarExcel(client, items) {
   // Fórmulas en totales (Resumen cliente)
   const sumRow = n + 3;
   ws2[`F${sumRow}`]   = { t:"n", v: T.subtotalDisplay, f: `SUM(F2:F${n+1})` };
-  ws2[`F${sumRow+1}`] = { t:"n", v: T.iva,             f: `F${sumRow}*0.13` };
+  ws2[`F${sumRow+1}`] = { t:"n", v: T.iva,             f: `ROUND(F${sumRow}*0.13,0)` };
   ws2[`F${sumRow+3}`] = { t:"n", v: T.total,           f: `F${sumRow}+F${sumRow+1}+F${sumRow+2}` };
 
   XLSX.utils.book_append_sheet(wb, ws1, "Detalle Interno");
@@ -224,6 +283,8 @@ function generarExcel(client, items) {
 // FIX #10: moDisplay por ítem (imprevistos absorbido), sin fila Imprevistos
 // FIX #11: incluye ítems obligatorios
 // FIX #13: bloque de firmas al final
+// FIX #14: type: "png" en ambos ImageRun
+// FIX #15: fixSpanish en asunto y descripciones
 async function generarWord(client, items, logoBuffer) {
   const T     = calcTotals(items);
   const fecha = new Date().toLocaleDateString("es-CR");
@@ -257,14 +318,15 @@ async function generarWord(client, items, logoBuffer) {
     });
 
   const cellFirma = (paragraphs) => new TableCell({
-    borders: { top: {style:BorderStyle.NONE,size:0}, bottom:{style:BorderStyle.NONE,size:0}, left:{style:BorderStyle.NONE,size:0}, right:{style:BorderStyle.NONE,size:0} },
+    borders: { top:{style:BorderStyle.NONE,size:0}, bottom:{style:BorderStyle.NONE,size:0}, left:{style:BorderStyle.NONE,size:0}, right:{style:BorderStyle.NONE,size:0} },
     children: paragraphs,
   });
 
+  // FIX #14: type "png" (no "jpg")
   const logoChildren = [];
   if (logoBuffer) {
     try {
-      logoChildren.push(new ImageRun({ data: logoBuffer, transformation: { width: 180, height: 60 }, type: "jpg" }));
+      logoChildren.push(new ImageRun({ data: logoBuffer, transformation: { width: 180, height: 60 }, type: "png" }));
     } catch (e) { console.warn("⚠️ Logo Word:", e.message); }
   }
 
@@ -293,25 +355,25 @@ async function generarWord(client, items, logoBuffer) {
           ...(client.email    ? [run("     "), bold("Email: "),  run(client.email)]    : []),
           ...(client.telefono ? [run("     "), bold("Tel: "),    run(client.telefono)] : []),
         ]}),
-        new Paragraph({ spacing: { after: 200 }, children: [bold("Asunto: "), run(client.asunto)] }),
+        // FIX #15: fixSpanish en asunto
+        new Paragraph({ spacing: { after: 200 }, children: [bold("Asunto: "), run(fixSpanish(client.asunto))] }),
 
         new Paragraph({ spacing: { after: 80 },  children: [run("Estimado/a "), bold(client.nombre), run(",")] }),
-        new Paragraph({ spacing: { after: 200 }, children: [run("Presentamos cotización para: "), bold(client.asunto), run(".")] }),
+        new Paragraph({ spacing: { after: 200 }, children: [run("Presentamos cotización para: "), bold(fixSpanish(client.asunto)), run(".")] }),
 
         // Trabajos incluidos
-        new Paragraph({ spacing: { after: 60 }, children: [bold("Trabajos incluidos:")] }),
-        ...items.map(i => new Paragraph({ bullet: { level: 0 }, spacing: { after: 40 }, children: [run(i.descripcion)] })),
+        new Paragraph({ spacing: { after: 60 }, children: [bold("TRABAJOS INCLUIDOS")] }),
+        // FIX #15: fixSpanish en descripciones de ítems
+        ...items.map(i => new Paragraph({ bullet: { level: 0 }, spacing: { after: 40 }, children: [run(fixSpanish(i.descripcion))] })),
 
         new Paragraph({ spacing: { before: 200, after: 60 }, children: [] }),
 
-        // ── Tabla de cotización ──────────────────────────────────────────────
-        // FIX #10: moDisplay por ítem (sin fila de Imprevistos)
-        // FIX #11: itemsDisplay incluye los OBL-1 y OBL-2
+        // Tabla de cotización
+        new Paragraph({ spacing: { after: 60 }, children: [bold("PRESUPUESTO")] }),
         new Table({
           width: { size: 9360, type: WidthType.DXA },
           columnWidths: [3600, 900, 900, 1320, 1320, 1320],
           rows: [
-            // Encabezados
             new TableRow({ children: [
               cell("Descripción", false, false, true),
               cell("Unidad",      false, true,  true),
@@ -320,35 +382,26 @@ async function generarWord(client, items, logoBuffer) {
               cell("M.O.",        false, true,  true),
               cell("SUB TOTAL",   false, true,  true),
             ]}),
-            // Ítems (con imprevistos en moDisplay)
             ...T.itemsDisplay.map((i, idx) => new TableRow({ children: [
-              cell(i.descripcion,            idx % 2 === 1),
-              cell(i.unidad || "Und",        idx % 2 === 1, true),
-              cell(String(i.cantidad || 1),  idx % 2 === 1, true),
-              cellR(fmtCR(i.matTotal),       idx % 2 === 1),
-              cellR(fmtCR(i.moDisplay),      idx % 2 === 1),  // ← MO con imp
-              cellR(fmtCR(i.subtotalDisplay),idx % 2 === 1, true),  // ← sub con imp
+              cell(fixSpanish(i.descripcion),             idx % 2 === 1),
+              cell(i.unidad || "Und",                     idx % 2 === 1, true),
+              cell(String(i.cantidad || 1),               idx % 2 === 1, true),
+              cellR(fmtCR(i.matTotal),                    idx % 2 === 1),
+              cellR(fmtCR(i.moDisplay),                   idx % 2 === 1),
+              cellR(fmtCR(i.subtotalDisplay),             idx % 2 === 1, true),
             ]})),
-
-            // Sub total (= suma de subtotalsDisplay = baseImponible)
             new TableRow({ children: [
               new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [bold("Sub total")] })] }),
               cellR(fmtCR(T.subtotalDisplay)),
             ]}),
-
-            // IVA 13%
             new TableRow({ children: [
               new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("IVA 13%")] })] }),
               cellR(fmtCR(T.iva)),
             ]}),
-
-            // Reembolso visita
             new TableRow({ children: [
               new TableCell({ columnSpan: 5, children: [new Paragraph({ alignment: AlignmentType.RIGHT, children: [run("Reembolso pago de visita")] })] }),
               cellR(fmtCR(-REEMBOLSO_VISITA)),
             ]}),
-
-            // TOTAL
             new TableRow({ children: [
               new TableCell({ columnSpan: 5, shading: { fill: NAVY, type: ShadingType.CLEAR }, children: [
                 new Paragraph({ alignment: AlignmentType.RIGHT, children: [new TextRun({ text: "TOTAL", font: FONT, bold: true, size: 22, color: WHITE })] }),
@@ -361,7 +414,7 @@ async function generarWord(client, items, logoBuffer) {
         }),
 
         // Condiciones
-        new Paragraph({ spacing: { before: 240, after: 80 }, children: [bold("Condiciones")] }),
+        new Paragraph({ spacing: { before: 240, after: 80 }, children: [bold("CONDICIONES")] }),
         ...[
           "Pagos por transferencia bancaria a SS Remodelaciones.",
           "Forma de pago: 60% para iniciar, 10% semanal (viernes), saldo al terminar.",
@@ -383,13 +436,13 @@ async function generarWord(client, items, logoBuffer) {
         ]}),
         new Paragraph({ spacing: { after: 40 }, children: [run("Saludos cordiales.")] }),
 
-        // ── FIX #13: Bloque de firmas ────────────────────────────────────────
+        // ── FIX #13 + #14: Bloque de firmas con logo PNG sobre Darwin ──────────
         new Paragraph({ spacing: { before: 400, after: 0 }, children: [] }),
-        // Logo centrado sobre las firmas (si está disponible)
+        // FIX #14: type "png" (no "jpg")
         ...(logoBuffer ? [new Paragraph({
-          alignment: AlignmentType.CENTER,
-          spacing: { before: 0, after: 200 },
-          children: [new ImageRun({ data: logoBuffer, transformation: { width: 160, height: 55 }, type: "jpg" })],
+          alignment: AlignmentType.LEFT,
+          spacing: { before: 0, after: 120 },
+          children: [new ImageRun({ data: logoBuffer, transformation: { width: 160, height: 55 }, type: "png" })],
         })] : []),
         new Table({
           width: { size: 9360, type: WidthType.DXA },
