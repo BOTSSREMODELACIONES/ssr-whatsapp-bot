@@ -1,13 +1,13 @@
 require("dotenv").config();
 const express = require("express");
-const cron = require("node-cron");
-const path = require("path");
-const { handleMessage } = require("./bot/index");
-const { sendDailyReminders } = require("./bot/reminders");
+const cron    = require("node-cron");
+const path    = require("path");
+const { handleMessage }       = require("./bot/index");
+const { sendDailyReminders }  = require("./bot/reminders");
 
 const app = express();
 
-// ── CORS ─────────────────────────────────────────────────────────────────────
+// ── CORS ──────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -16,39 +16,30 @@ app.use((req, res, next) => {
   next();
 });
 
-// FIX #6 — Aumentado a 50mb para soportar múltiples fotos en base64 sin error 413
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 const PORT = process.env.PORT || 3000;
 
-const REQUIRED = [
-  "WHATSAPP_TOKEN",
-  "WHATSAPP_PHONE_NUMBER_ID",
-  "WEBHOOK_VERIFY_TOKEN",
-  "ANTHROPIC_API_KEY",
-];
-const missing = REQUIRED.filter((k) => !process.env[k]);
-if (missing.length) {
-  console.error("❌ Variables faltantes:", missing.join(", "));
-  process.exit(1);
-}
+const REQUIRED = ["WHATSAPP_TOKEN","WHATSAPP_PHONE_NUMBER_ID","WEBHOOK_VERIFY_TOKEN","ANTHROPIC_API_KEY"];
+const missing  = REQUIRED.filter(k => !process.env[k]);
+if (missing.length) { console.error("❌ Variables faltantes:", missing.join(", ")); process.exit(1); }
 
-// ── Cron: recordatorios 8:00 AM Costa Rica ───────────────────────────────────
+// ── Cron: recordatorios 8:00 AM Costa Rica ────────────────────────────────────
 cron.schedule("0 8 * * *", async () => {
-  console.log("🕐 Cron activado − enviando recordatorios del día...");
+  console.log("🕐 Cron activado → enviando recordatorios del día...");
   await sendDailyReminders();
 }, { timezone: "America/Costa_Rica" });
 console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
 
-// ── Buffer de mensajes (agrupa fotos múltiples en un lote) ───────────────────
-const messageBuffer = new Map();
+// ── Buffer de mensajes (agrupa fotos múltiples en un lote) ────────────────────
+const messageBuffer  = new Map();
 const BATCH_WINDOW_MS = 1500;
 
 function flushBuffer(from) {
   const buffer = messageBuffer.get(from);
   if (!buffer || !buffer.items.length) { messageBuffer.delete(from); return; }
-  const items = buffer.items;
+  const items        = buffer.items;
   messageBuffer.delete(from);
   const messageId    = items[items.length - 1].messageId;
   const texts        = items.map(i => i.text).filter(Boolean);
@@ -67,7 +58,7 @@ function addToBuffer(from, messageId, text, mediaId) {
   buffer.timer = setTimeout(() => flushBuffer(from), BATCH_WINDOW_MS);
 }
 
-// ── Webhook verification ──────────────────────────────────────────────────────
+// ── Webhook verification ───────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
   const mode      = req.query["hub.mode"];
   const token     = req.query["hub.verify_token"];
@@ -80,7 +71,7 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-// ── Webhook messages ──────────────────────────────────────────────────────────
+// ── Webhook messages ───────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
   try {
@@ -103,7 +94,7 @@ app.post("/webhook", async (req, res) => {
       } else if (msg.type === "location") {
         const { latitude, longitude, name, address } = msg.location;
         const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
-        const text = name ? `Mi ubicación: ${name}${address ? ", " + address : ""} − ${mapsLink}` : `Mi ubicación: ${mapsLink}`;
+        const text = name ? `Mi ubicación: ${name}${address ? ", " + address : ""} ⇒ ${mapsLink}` : `Mi ubicación: ${mapsLink}`;
         console.log(`📍 Ubicación de +${from}: ${text}`);
         addToBuffer(from, messageId, text, null);
       } else if (msg.type === "image") {
@@ -117,14 +108,12 @@ app.post("/webhook", async (req, res) => {
       } else if (msg.type === "audio") {
         const audioId = msg.audio?.id;
         addToBuffer(from, messageId, "[El cliente envió un mensaje de voz]", null);
-        // FIX: Reenviar audio real a supervisores
         if (audioId) {
           const { sendMediaById } = require("./bot/messenger");
           const SUPS = ["+50683091817", "+50671981370"];
           for (const sup of SUPS) {
             sendMediaById(sup, audioId, "audio").catch(e => console.warn(`⚠️ No se pudo reenviar audio a ${sup}:`, e.message));
           }
-          // Aviso de contexto
           const { sendText: st } = require("./bot/messenger");
           for (const sup of SUPS) {
             st(sup, `🎙️ *Audio de cliente +${from}*`).catch(() => {});
@@ -139,9 +128,9 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ── Health & status ───────────────────────────────────────────────────────────
+// ── Health & status ────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({
-  bot: "SS Remodelaciones − Sasha",
+  bot: "SS Remodelaciones ∙ Sasha",
   status: "✅ operando",
   api: "Meta WhatsApp Business API",
   features: ["visión de fotos (múltiples)", "análisis de videos", "recordatorios automáticos", "detección de idioma"],
@@ -150,7 +139,7 @@ app.get("/", (req, res) => res.json({
 
 app.get("/health", (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-// ── Cotizador Web App − NO caché para que el celular siempre descargue fresco ─
+// ── Cotizador Web App ──────────────────────────────────────────────────────────
 app.get("/cotizador", (_req, res) => {
   res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   res.setHeader("Pragma", "no-cache");
@@ -162,7 +151,7 @@ app.get("/cotizador", (_req, res) => {
 app.get("/cotizador-manifest.json", (_req, res) => {
   res.json({
     name: "Cotizador SSR", short_name: "Cotizador",
-    description: "SS Remodelaciones − Sistema de cotizaciones",
+    description: "SS Remodelaciones ∙ Sistema de cotizaciones",
     start_url: "/cotizador", display: "standalone",
     background_color: "#F4F6F9", theme_color: "#1B3A6B",
     icons: [{ src: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%231B3A6B'/><text y='68' x='50' font-size='55' text-anchor='middle' fill='%23D4541A' font-family='Arial' font-weight='bold'>SS</text></svg>", sizes: "192x192", type: "image/svg+xml" }]
@@ -175,29 +164,58 @@ app.get("/test-reminders", async (_req, res) => {
 });
 
 // ── Cotizador: procesar notas con IA ─────────────────────────────────────────
+// ACTUALIZADO v4: materiales exhaustivos + herramientas + consumibles
 app.post("/api/procesar-notas", async (req, res) => {
   try {
     const { notas, fotos, pdfs } = req.body;
-    const Anthropic = require("@anthropic-ai/sdk");
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const Anthropic  = require("@anthropic-ai/sdk");
+    const anthropic  = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const pdfCtx = (pdfs||[]).length > 0
       ? "\n\nDOCUMENTOS/PLANOS:\n" + pdfs.map(p => "--- " + p.name + " ---\n" + p.text).join("\n\n")
       : "";
 
-    const prompt =
-      "Sos presupuestista experto en remodelaciones en Costa Rica. Analiza notas, fotos y documentos y genera un presupuesto.\n\nNOTAS:\n" +
-      (notas || "(ver fotos/documentos)") + pdfCtx +
-      "\n\nMO: Operario 27000/dia, Ayudante 20000/dia, Utilidad MO 50%. Max 8 actividades. SOLO NUMEROS en precios.\n\n" +
-      'RESPONDE SOLO JSON: {"asunto":"texto","items":[{"id":1,"descripcion":"texto","unidad":"Und","cantidad":1,"dias":2,"operarios":1,"ayudantes":1,"materiales":[{"detalle":"texto","und":"Und","cantidad":5,"precio_unitario":3500,"fuente":"Construplaza"}]}]}';
+    // ── SISTEMA: Reglas de presupuestación exhaustiva ─────────────────────────
+    const systemPrompt = `Sos experto en presupuestos de construccion y remodelacion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni backticks ni simbolos especiales fuera del JSON.
 
-    const systemPrompt = "Sos experto en presupuestos de construccion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni simbolos especiales. REGLAS: 1) Corrige ortografia y acentos en todas las descripciones. 2) Precios de referencia CR: Construplaza, EPA, El Lagar, Mundo Iluminacion, Ferreteria El Colono, Maderas MM. 3) Si el material es especializado y no esta en esas tiendas, BUSCALO en internet y pone en fuente el sitio donde lo encontraste. 4) Si no encontras precio confiable, fuente: Cotizar.";
+REGLAS:
+1. Corrige ortografia y acentos en todas las descripciones.
+2. Precios de referencia en Costa Rica: Construplaza, EPA, El Lagar, Mundo Iluminacion, Ferreteria El Colono, Maderas MM, PriceSmart.
+3. Si el material es especializado y no esta en esas tiendas, BUSCALO en internet y pon en fuente el sitio donde lo encontraste.
+4. Si no encontras precio confiable, pon fuente: "Cotizar".
+
+REGLA CRITICA — MATERIALES EXHAUSTIVOS:
+Para CADA actividad incluye ABSOLUTAMENTE TODOS los materiales, herramientas y consumibles necesarios para ejecutarla de principio a fin. No solo materiales principales — tambien fijaciones, consumibles, herramientas y equipos.
+
+Ejemplos obligatorios por tipo de obra:
+- Techo tubo acero/policarbonato: tubos HN, laminas policarbonato, tornillos autoperforantes techo, disco de corte metal, thinner, mecha para metal, brocha, rodillo, pintura anticorrosiva, sellador de techo, nivel.
+- Pintura paredes: pintura latex/aceite, rodillos, brochas anguladas, bandeja para pintura, cinta de enmascarar, plastico protector de piso, lija No.80 y No.120, masilla, espatula, diluyente.
+- Ceramica/enchape: ceramicas, pegamento tipo A, fragua color, crucetas 2mm, nivel, cortadora ceramica o disco de corte, esponja, cubo, silicone para esquinas.
+- Plomeria: tuberias, codos 90 y 45, tees, union, teflón, pegamento PVC, lija para PVC, llave de paso, soporte de tubo.
+- Cielo raso gypsum: laminas gypsum, perfileria metalica (canal y liston), tornillos fosfatados, taco fisher, cinta de papel, masilla lista uso, lija, pintura base.
+- Madera/carpinteria: madera, tornillos, pegamento PVC/madera, lija, barniz, sellador, brocha.
+- Electricidad: cable TTU, tubo conduit, conectores, cinta aislante, breaker, cajas conduit, tornillos.
+- Pintura exterior/fachada: pintura exterior, impermeabilizante, rodillo de esponja, brocha, cinta, plastico, lija, sellador de grietas.
+
+NUNCA omitas consumibles aunque parezcan obvios. Si el trabajo necesita una herramienta especifica, incluyela.
+NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automaticamente aparte.`;
+
+    // ── PROMPT DE USUARIO ─────────────────────────────────────────────────────
+    const prompt =
+      "Analiza las notas, fotos y documentos adjuntos y genera un presupuesto COMPLETO de remodelacion.\n\n" +
+      "NOTAS:\n" + (notas || "(ver fotos/documentos)") + pdfCtx +
+      "\n\nCOSTOS MO: Operario ₡27.000/dia, Ayudante ₡20.000/dia, Utilidad MO 50%. Maximo 8 actividades." +
+      " NO incluyas transporte ni andamios (se agregan automaticamente). SOLO NUMEROS en precios, sin simbolos.\n\n" +
+      "CRITICO: Lista TODOS los materiales + herramientas + consumibles para cada actividad." +
+      " Si es un techo metalico incluye discos de corte, thinner, mechas, brochas, pintura anticorrosiva, etc." +
+      " No omitas NADA necesario para ejecutar el trabajo desde cero hasta terminado.\n\n" +
+      'RESPONDER SOLO JSON: {"asunto":"texto","items":[{"id":1,"descripcion":"texto","unidad":"Und","cantidad":1,"dias":2,"operarios":1,"ayudantes":1,"materiales":[{"detalle":"texto","und":"Und","cantidad":5,"precio_unitario":3500,"fuente":"Construplaza"}]}]}';
 
     const content = (fotos||[]).length > 0
       ? [...fotos.map(f => ({ type: "image", source: { type: "base64", media_type: f.mimeType, data: f.base64 } })), { type: "text", text: prompt }]
       : prompt;
 
-    // Limpieza robusta del JSON que devuelve Claude
+    // ── Limpieza robusta del JSON ─────────────────────────────────────────────
     function parsearJSON(raw) {
       let s = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
       const a = s.indexOf("{"), b = s.lastIndexOf("}");
@@ -212,12 +230,11 @@ app.post("/api/procesar-notas", async (req, res) => {
 
     let data;
 
-    // Helper: retry automático en 429 (rate limit de tokens/min de Claude)
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     async function callClaudeWithRetry(opts, label) {
       for (let intento = 1; intento <= 3; intento++) {
         try {
-          const r = await anthropic.messages.create(opts);
+          const r   = await anthropic.messages.create(opts);
           const txt = (r.content || []).filter(b => b.type === "text").map(b => b.text).join("")
                       || r.content?.[0]?.text || "";
           if (!txt) throw new Error("Sin texto en respuesta");
@@ -225,7 +242,7 @@ app.post("/api/procesar-notas", async (req, res) => {
         } catch (err) {
           const is429 = err.status === 429 || String(err.message).includes("rate_limit");
           if (is429 && intento < 3) {
-            const wait = intento === 1 ? 65000 : 35000; // 65s luego 35s
+            const wait = intento === 1 ? 65000 : 35000;
             console.warn(`⚠️ Rate limit 429 en ${label} — reintentando en ${wait/1000}s (intento ${intento}/3)...`);
             await sleep(wait);
           } else {
@@ -235,23 +252,20 @@ app.post("/api/procesar-notas", async (req, res) => {
       }
     }
 
-    // ── ORDEN CORREGIDO: primero SIN web_search (rápido, ~1500 tokens)
-    // Si falla el JSON, reintenta CON web_search (más tokens pero mejores precios)
-    // Esto evita el error 429 "rate_limit" en el caso común de solo texto.
+    // ORDEN: primero sin web_search (rápido), fallback con web_search (mejores precios)
     try {
       data = await callClaudeWithRetry({
         model: "claude-sonnet-4-6",
-        max_tokens: 4000,
+        max_tokens: 6000,
         system: systemPrompt,
         messages: [{ role: "user", content }],
       }, "/api/procesar-notas sin web_search");
       console.log("✅ /api/procesar-notas OK (sin web_search)");
     } catch (e1) {
-      // Fallback CON web_search — para materiales especializados con precios actualizados
       console.warn("⚠️  Sin web_search falló (" + e1.message + "), reintentando con web_search...");
       data = await callClaudeWithRetry({
         model: "claude-sonnet-4-6",
-        max_tokens: 4000,
+        max_tokens: 6000,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         system: systemPrompt,
         messages: [{ role: "user", content }],
@@ -267,13 +281,13 @@ app.post("/api/procesar-notas", async (req, res) => {
 });
 
 
-// ── Cotizacion → Drive ────────────────────────────────────────────────────────
+// ── Cotizacion → Drive ─────────────────────────────────────────────────────────
 app.post("/api/cotizacion", async (req, res) => {
   try {
     const { client, items } = req.body;
     if (!client?.referencia || !client?.nombre || !items?.length)
       return res.status(400).json({ ok: false, error: "Faltan datos requeridos" });
-    console.log(`📋 POST /api/cotizacion − ${client.referencia} (${client.nombre})`);
+    console.log(`📋 POST /api/cotizacion → ${client.referencia} (${client.nombre})`);
     const { procesarCotizacion } = require("./bot/cotizacion");
     const result = await procesarCotizacion({ client, items });
     res.json(result);
@@ -284,9 +298,7 @@ app.post("/api/cotizacion", async (req, res) => {
 });
 
 
-// ── Transcripción de voz ──────────────────────────────────────────────────────
-// Fallback para Firefox / navegadores sin Web Speech API.
-// Se activa solo cuando el navegador usa MediaRecorder y no puede transcribir.
+// ── Transcripción de voz ───────────────────────────────────────────────────────
 app.post("/api/transcribir-voz", async (req, res) => {
   try {
     const { audio, mimeType } = req.body;
@@ -299,23 +311,16 @@ app.post("/api/transcribir-voz", async (req, res) => {
       const r = await anthropic.messages.create({
         model: "claude-sonnet-4-6",
         max_tokens: 1000,
-        system: "Sos un asistente que transcribe notas de obras de construcción en Costa Rica. Transcribí el audio exactamente como fue dicho, en español. Solo devolvé el texto transcrito, sin explicaciones ni formato extra.",
+        system: "Sos un asistente que transcribe notas de obras de construccion en Costa Rica. Transcribí el audio exactamente como fue dicho, en español. Solo devolvé el texto transcrito, sin explicaciones ni formato extra.",
         messages: [{
           role: "user",
           content: [
-            {
-              type: "document",
-              source: { type: "base64", media_type: mimeType || "audio/webm", data: audio }
-            },
-            { type: "text", text: "Transcribí este audio de notas de obra de construcción en Costa Rica." }
+            { type: "document", source: { type: "base64", media_type: mimeType || "audio/webm", data: audio } },
+            { type: "text", text: "Transcribí este audio de notas de obra de construccion en Costa Rica." }
           ]
         }]
       });
-      const texto = (r.content || [])
-        .filter(b => b.type === "text")
-        .map(b => b.text)
-        .join("")
-        .trim();
+      const texto = (r.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
       if (texto) {
         console.log("✅ /api/transcribir-voz OK:", texto.slice(0, 60));
         return res.json({ ok: true, texto });
@@ -324,8 +329,7 @@ app.post("/api/transcribir-voz", async (req, res) => {
       console.warn("⚠️  Claude no pudo procesar el audio:", e.message);
     }
 
-    // Si Claude no puede transcribir, el cliente descarga el audio localmente
-    res.json({ ok: false, error: "Transcripción no disponible − audio descargado localmente" });
+    res.json({ ok: false, error: "Transcripción no disponible — audio descargado localmente" });
 
   } catch (err) {
     console.error("🔥 /api/transcribir-voz:", err.message);
@@ -335,14 +339,13 @@ app.post("/api/transcribir-voz", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`
-┌─────────────────────────────────────────────────────┐
-│  🏗️  SS Remodelaciones − WhatsApp Bot (Sasha)        │
-│  📡  Meta WhatsApp Business API                      │
-│  🤖  IA: Claude Sonnet 4.6 (visión activada)         │
-│  ⏰  Recordatorios: 8:00 AM CR diario               │
-│  🚀  Puerto: ${PORT}                                          │
-│  📌  Webhook: GET|POST /webhook                      │
-└─────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  🏗️  SS Remodelaciones ∙ WhatsApp Bot (Sasha)              │
+│  🤖  IA: Claude Sonnet 4.6 (visión activada)               │
+│  ⏰  Recordatorios: 8:00 AM CR diario                      │
+│  🚀  Puerto: ${PORT}                                           │
+│  📌  Webhook: GET|POST /webhook                            │
+└────────────────────────────────────────────────────────────┘
   `);
 });
 
