@@ -1,10 +1,11 @@
 const { get, update, addMsg, reset } = require("./state");
-const { ask } = require("./claude");
+const { ask }                        = require("./claude");
 const { sendText, markRead, downloadMedia, sendMediaById } = require("./messenger");
 const { createVisitEvent, getAvailableSlots } = require("./calendar");
-const { sendVisitConfirmation } = require("./email");
-const { upsertLead, registerVisit } = require("./crm");
-const KNOWLEDGE = require("./knowledge");
+const { sendVisitConfirmation }      = require("./email");
+const { upsertLead, registerVisit }  = require("./crm");
+const KNOWLEDGE                      = require("./knowledge");
+const memoria                        = require("./memoria"); // ← NUEVO: sistema de memoria
 
 // Números que reciben copia de cada conversación en tiempo real
 const SUPERVISORES = ["+50683091817", "+50671981370"];
@@ -17,7 +18,8 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   if (messageId) markRead(messageId).catch(() => {});
 
   const normalized = (text || "").trim();
-  const session = get(from);
+  const session    = get(from);
+  const fromE164   = from.startsWith("+") ? from : `+${from}`;
 
   if (normalized === "/reset") {
     reset(from);
@@ -25,11 +27,27 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     return;
   }
 
-  if (IGNORAR.includes(`+${from}`) || IGNORAR.includes(from)) return;
+  if (IGNORAR.includes(fromE164) || IGNORAR.includes(from)) return;
+
+  // ── MODO SUPERVISOR: Darwin o Melvin consultando memoria ─────────────────
+  // Si el mensaje viene de un supervisor Y parece una consulta de memoria,
+  // respondemos con la información sin pasar por el flujo normal de cliente.
+  const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
+
+  if (esSupervisor && normalized) {
+    const respuestaMemoria = await memoria.procesarConsultaMemoria(normalized);
+    if (respuestaMemoria) {
+      await sendText(from, respuestaMemoria);
+      return; // No procesar como cliente normal
+    }
+    // Si no es consulta de memoria, el supervisor puede chatear con el bot normalmente
+    // (útil para que Darwin pruebe el bot)
+  }
+
   if (session.escalated) return;
 
   try {
-    // ── Descargar todas las imágenes en paralelo ──────────────────────────────
+    // ── Descargar todas las imágenes en paralelo ───────────────────────────
     let imageDataArray = [];
 
     if (mediaIds) {
@@ -66,7 +84,52 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
     addMsg(from, "user", historyText);
 
-    // ── Detectar día para disponibilidad ──────────────────────────────────────
+    // ── MEMORIA: Guardar mensaje entrante del cliente ──────────────────────
+    // Solo guardar mensajes de clientes reales (no supervisores)
+    if (!esSupervisor) {
+      const clientName = session.name || null;
+
+      // Mensaje de texto
+      if (normalized) {
+        memoria.guardarMensaje({
+          phone: fromE164, clientName,
+          direction: "in", type: "text",
+          content: normalized,
+          session,
+        }).catch(() => {});
+      }
+
+      // Mensajes con imágenes → guardar cada foto en Drive
+      if (imageDataArray.length > 0) {
+        const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
+        imageDataArray.forEach((imgData, i) => {
+          const mediaId = ids[i] || "";
+          // Guardar en Drive y registrar en Sheets
+          memoria.guardarMedia(imgData.data, imgData.mimeType, fromE164, clientName)
+            .then(driveUrl => {
+              memoria.guardarMensaje({
+                phone: fromE164, clientName,
+                direction: "in", type: "image",
+                content: `[Foto enviada por el cliente]`,
+                mediaId, driveUrl: driveUrl || "",
+                session,
+              }).catch(() => {});
+            })
+            .catch(() => {
+              // Si falla el Drive, igual registrar en Sheets sin URL
+              memoria.guardarMensaje({
+                phone: fromE164, clientName,
+                direction: "in", type: "image",
+                content: `[Foto enviada por el cliente]`,
+                mediaId, driveUrl: "",
+                session,
+              }).catch(() => {});
+            });
+        });
+      }
+    }
+
+    // ── Detectar día para disponibilidad ──────────────────────────────────
     const dayMentioned = detectDay(normalized);
     let availabilityContext = "";
 
@@ -81,14 +144,14 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           const [h, m] = s.split(":");
           const hNum = parseInt(h);
           const ampm = hNum >= 12 ? "p.m." : "a.m.";
-          const h12 = hNum > 12 ? hNum - 12 : hNum;
+          const h12  = hNum > 12 ? hNum - 12 : hNum;
           return `${h12}:${m} ${ampm}`;
         }).join(", ");
-        availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrecé SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a confirmar disponibilidad ni que necesitás verificarla. Si el cliente ya eligió uno de estos horarios, procedé INMEDIATAMENTE al siguiente paso: pedirle la ubicación.]`;
+        availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a confirmar disponibilidad ni que necesitas verificarla. Si el cliente ya eligió uno de estos horarios, procede INMEDIATAMENTE al siguiente paso: pedirle la ubicación.]`;
       }
     }
 
-    // ── Llamar a Claude ───────────────────────────────────────────────────────
+    // ── Llamar a Claude ────────────────────────────────────────────────────
     const rawResponse = await ask(
       session.history.slice(0, -1),
       normalized + availabilityContext,
@@ -99,7 +162,17 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
 
-    // ── Monitor supervisores — texto ──────────────────────────────────────────
+    // ── MEMORIA: Guardar respuesta de Sasha ───────────────────────────────
+    if (!esSupervisor) {
+      memoria.guardarMensaje({
+        phone: fromE164, clientName: session.name || null,
+        direction: "out", type: "text",
+        content: cleanMessage,
+        session,
+      }).catch(() => {});
+    }
+
+    // ── Monitor supervisores — texto ──────────────────────────────────────
     const clientName = session.name ? `${session.name} (${from})` : from;
     const clientMsgLabel = imageDataArray.length > 0
       ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
@@ -127,7 +200,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
-    // ── Procesar flags ────────────────────────────────────────────────────────
+    // ── Procesar flags ─────────────────────────────────────────────────────
     if (flag === "ESCALAR") {
       update(from, { escalated: true });
       await sendText(from, `📲 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
@@ -136,9 +209,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     } else if (flag === "LEAD") {
       const [name, project, zone] = (flagData || "").split("|");
       const updated = update(from, {
-        name: name?.trim() || session.name,
+        name:         name?.trim()    || session.name,
         project_desc: project?.trim() || session.project_desc,
-        zone: zone?.trim() || session.zone,
+        zone:         zone?.trim()    || session.zone,
       });
       if (!session.lead_saved) {
         update(from, { lead_saved: true });
@@ -149,34 +222,34 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     } else if (flag === "VISITA") {
       const [name, project, zone, day, hour, ubicacion, email] = (flagData || "").split("|");
       const updated = update(from, {
-        name: name?.trim() || session.name,
-        project_desc: project?.trim() || session.project_desc,
-        zone: zone?.trim() || session.zone,
-        visit_day: day?.trim() || "a coordinar",
-        visit_hour: hour?.trim() || "09:00",
-        waze_link: ubicacion?.trim() || "",
-        client_email: email?.trim() || "",
-        visit_confirmed: true,
-        lead_saved: true,
+        name:             name?.trim()      || session.name,
+        project_desc:     project?.trim()   || session.project_desc,
+        zone:             zone?.trim()      || session.zone,
+        visit_day:        day?.trim()       || "a coordinar",
+        visit_hour:       hour?.trim()      || "09:00",
+        waze_link:        ubicacion?.trim() || "",
+        client_email:     email?.trim()     || "",
+        visit_confirmed:  true,
+        lead_saved:       true,
       });
 
       const visitHour = updated.visit_hour || "09:00";
-      const [hh, mm] = visitHour.split(":");
-      const hourNum = parseInt(hh);
-      const ampm = hourNum >= 12 ? "p.m." : "a.m.";
-      const hour12 = hourNum > 12 ? hourNum - 12 : hourNum === 0 ? 12 : hourNum;
-      let timeStr = `${hour12}:${mm} ${ampm}`;
-      let dateStr = updated.visit_day;
+      const [hh, mm]  = visitHour.split(":");
+      const hourNum   = parseInt(hh);
+      const ampm      = hourNum >= 12 ? "p.m." : "a.m.";
+      const hour12    = hourNum > 12 ? hourNum - 12 : hourNum === 0 ? 12 : hourNum;
+      let timeStr     = `${hour12}:${mm} ${ampm}`;
+      let dateStr     = updated.visit_day;
 
       try {
         const eventData = await createVisitEvent({
-          name: updated.name,
-          phone: from,
-          project: updated.project_desc,
-          zone: updated.zone,
-          day: updated.visit_day,
-          hour: updated.visit_hour,
-          wazeLink: updated.waze_link,
+          name:        updated.name,
+          phone:       from,
+          project:     updated.project_desc,
+          zone:        updated.zone,
+          day:         updated.visit_day,
+          hour:        updated.visit_hour,
+          wazeLink:    updated.waze_link,
           clientEmail: updated.client_email,
         });
 
@@ -191,13 +264,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
       try {
         await sendVisitConfirmation({
-          name: updated.name,
-          phone: from,
-          project: updated.project_desc,
-          zone: updated.zone,
-          day: updated.visit_day,
-          hour: updated.visit_hour,
-          wazeLink: updated.waze_link,
+          name:        updated.name,
+          phone:       from,
+          project:     updated.project_desc,
+          zone:        updated.zone,
+          day:         updated.visit_day,
+          hour:        updated.visit_hour,
+          wazeLink:    updated.waze_link,
           clientEmail: updated.client_email,
           dateStr,
           timeStr,
@@ -225,36 +298,34 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
 function detectDay(text) {
   const normalized = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  if (normalized.includes("lunes")) return "lunes";
-  if (normalized.includes("martes")) return "martes";
+  if (normalized.includes("lunes"))   return "lunes";
+  if (normalized.includes("martes"))  return "martes";
   if (normalized.includes("viernes")) return "viernes";
   return null;
 }
 
 function parseFlags(response) {
-  const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*))\]\s*$/;
+  const flagRegex   = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*))]\s*$/;
   const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
   const match = response.match(flagRegex);
 
   if (!match) return { cleanMessage: response.replace(sistemaRegex, "").trim(), flag: null, flagData: null };
 
   const cleanMessage = response.replace(flagRegex, "").replace(sistemaRegex, "").trim();
-  const fullFlag = match[1];
+  const fullFlag     = match[1];
 
-  if (fullFlag === "ESCALAR") return { cleanMessage, flag: "ESCALAR", flagData: null };
-  if (fullFlag.startsWith("LEAD:")) return { cleanMessage, flag: "LEAD", flagData: fullFlag.slice(5) };
-  if (fullFlag.startsWith("VISITA:")) return { cleanMessage, flag: "VISITA", flagData: fullFlag.slice(7) };
+  if (fullFlag === "ESCALAR")               return { cleanMessage, flag: "ESCALAR",  flagData: null };
+  if (fullFlag.startsWith("LEAD:"))         return { cleanMessage, flag: "LEAD",     flagData: fullFlag.slice(5) };
+  if (fullFlag.startsWith("VISITA:"))       return { cleanMessage, flag: "VISITA",   flagData: fullFlag.slice(7) };
 
   return { cleanMessage, flag: null, flagData: null };
 }
 
 // FIX: Notificar a TODOS los supervisores (Darwin + Melvin)
-// Antes: solo enviaba al número de Melvin en KNOWLEDGE
-// Ahora: envía a todos los SUPERVISORES del array
 async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   const header = {
     visita_solicitada: "🗓️ NUEVA VISITA AGENDADA",
-    escalacion: "📢 CLIENTE NECESITA ATENCIÓN",
+    escalacion:        "🚨 CLIENTE NECESITA ATENCIÓN",
   }[tipo] || "📋 NOTIFICACIÓN SSR Bot";
 
   const lines = [
@@ -271,7 +342,6 @@ async function notifyAllSupervisors(from, session, lastMsg, tipo) {
     "_Sasha — Bot SSR_",
   ].filter(Boolean).join("\n");
 
-  // Enviar a TODOS los supervisores en paralelo
   const resultados = await Promise.allSettled(
     SUPERVISORES.map(num => sendText(num, lines))
   );
@@ -293,15 +363,15 @@ async function notifyMelvin(from, session, lastMsg, tipo) {
 function logLead(from, session, tipo = "lead") {
   console.log("📋 LEAD:", JSON.stringify({
     tipo, ts: new Date().toISOString(),
-    phone: from,
-    name: session.name || "—",
-    project: session.project_desc || "—",
-    zone: session.zone || "—",
-    visit_day: session.visit_day || "—",
+    phone:    from,
+    name:     session.name         || "—",
+    project:  session.project_desc || "—",
+    zone:     session.zone         || "—",
+    visit_day:  session.visit_day  || "—",
     visit_hour: session.visit_hour || "—",
-    location: session.waze_link || "—",
-    email: session.client_email || "—",
-    visit: session.visit_confirmed || false,
+    location:   session.waze_link  || "—",
+    email:      session.client_email || "—",
+    visit:      session.visit_confirmed || false,
   }));
 }
 
