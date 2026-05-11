@@ -200,15 +200,22 @@ Ejemplos obligatorios por tipo de obra:
 NUNCA omitas consumibles aunque parezcan obvios. Si el trabajo necesita una herramienta especifica, incluyela.
 NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automaticamente aparte.`;
 
+    // ── Detectar tamaño del proyecto para ajustar nivel de detalle ───────────
+    const notasParaContar = notas || "";
+    const contadorActividades = (notasParaContar.match(/\b(instalar|cambiar|pintar|demoler|construir|colocar|hacer|reparar|ampliar|enchap|cielorraso|cielo raso|gypsum|techo|piso|puerta|ventana|baño|cocina|pared|fachada|piscina)\b/gi) || []).length;
+    const proyectoGrande = contadorActividades > 5 || notasParaContar.length > 800;
+
+    const instruccionMateriales = proyectoGrande
+      ? `MATERIALES: Lista los materiales PRINCIPALES de cada actividad (entre 4-8 por actividad). Incluye los más costosos e importantes. Para consumibles menores (cinta, lija, etc.) agrúpalos en un ítem "Consumibles y herramientas menores" por actividad con precio estimado global. Sé conciso pero preciso.`
+      : `CRITICO: Lista TODOS los materiales + herramientas + consumibles para cada actividad. Si es un techo metalico incluye discos de corte, thinner, mechas, brochas, pintura anticorrosiva, etc. No omitas NADA necesario para ejecutar el trabajo desde cero hasta terminado.`;
+
     // ── PROMPT DE USUARIO ─────────────────────────────────────────────────────
     const prompt =
       "Analiza las notas, fotos y documentos adjuntos y genera un presupuesto COMPLETO de remodelacion.\n\n" +
       "NOTAS:\n" + (notas || "(ver fotos/documentos)") + pdfCtx +
-      "\n\nCOSTOS MO: Operario ₡27.000/dia, Ayudante ₡20.000/dia, Utilidad MO 50%. Maximo 8 actividades." +
+      "\n\nCOSTOS MO: Operario ₡27.000/dia, Ayudante ₡20.000/dia, Utilidad MO 50%. Maximo 10 actividades." +
       " NO incluyas transporte ni andamios (se agregan automaticamente). SOLO NUMEROS en precios, sin simbolos.\n\n" +
-      "CRITICO: Lista TODOS los materiales + herramientas + consumibles para cada actividad." +
-      " Si es un techo metalico incluye discos de corte, thinner, mechas, brochas, pintura anticorrosiva, etc." +
-      " No omitas NADA necesario para ejecutar el trabajo desde cero hasta terminado.\n\n" +
+      instruccionMateriales + "\n\n" +
       'RESPONDER SOLO JSON: {"asunto":"texto","items":[{"id":1,"descripcion":"texto","unidad":"Und","cantidad":1,"dias":2,"operarios":1,"ayudantes":1,"materiales":[{"detalle":"texto","und":"Und","cantidad":5,"precio_unitario":3500,"fuente":"Construplaza"}]}]}';
 
     const content = (fotos||[]).length > 0
@@ -253,24 +260,25 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
     }
 
     // ORDEN: primero sin web_search (rápido), fallback con web_search (mejores precios)
+    const maxTok = proyectoGrande ? 8192 : 6000;
     try {
       data = await callClaudeWithRetry({
         model: "claude-sonnet-4-6",
-        max_tokens: 6000,
+        max_tokens: maxTok,
         system: systemPrompt,
         messages: [{ role: "user", content }],
       }, "/api/procesar-notas sin web_search");
-      console.log("✅ /api/procesar-notas OK (sin web_search)");
+      console.log(`✅ /api/procesar-notas OK (sin web_search, max_tokens=${maxTok}, grande=${proyectoGrande})`);
     } catch (e1) {
       console.warn("⚠️  Sin web_search falló (" + e1.message + "), reintentando con web_search...");
       data = await callClaudeWithRetry({
         model: "claude-sonnet-4-6",
-        max_tokens: 6000,
+        max_tokens: maxTok,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
         system: systemPrompt,
         messages: [{ role: "user", content }],
       }, "/api/procesar-notas con web_search");
-      console.log("✅ /api/procesar-notas OK (con web_search)");
+      console.log(`✅ /api/procesar-notas OK (con web_search, max_tokens=${maxTok})`);
     }
 
     res.json({ ok: true, data });
