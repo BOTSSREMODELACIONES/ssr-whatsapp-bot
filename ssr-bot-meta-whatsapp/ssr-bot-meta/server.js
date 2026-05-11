@@ -197,7 +197,7 @@ Ejemplos obligatorios por tipo de obra:
 - Electricidad: cable TTU, tubo conduit, conectores, cinta aislante, breaker, cajas conduit, tornillos.
 - Pintura exterior/fachada: pintura exterior, impermeabilizante, rodillo de esponja, brocha, cinta, plastico, lija, sellador de grietas.
 
-NUNCA omitas consumibles aunque parezcan obvios. Si el trabajo necesita una herramienta especifica, incluyela.
+NUNCA agrega texto, comentarios, notas ni nada fuera del JSON. La respuesta es EXCLUSIVAMENTE el objeto JSON, sin nada antes ni despues.
 NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automaticamente aparte.`;
 
     // ── Detectar tamaño del proyecto para ajustar nivel de detalle ───────────
@@ -223,15 +223,38 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
       : prompt;
 
     // ── Limpieza robusta del JSON ─────────────────────────────────────────────
+    // NOTA: usa conteo de llaves en vez de lastIndexOf para evitar que texto
+    // generado por Claude despues del JSON (con sus propias {}) rompa el parser
     function parsearJSON(raw) {
       let s = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
-      const a = s.indexOf("{"), b = s.lastIndexOf("}");
-      if (a < 0 || b < 0) throw new Error("No JSON en respuesta");
+
+      const a = s.indexOf("{");
+      if (a < 0) throw new Error("No JSON en respuesta");
+
+      // Contar llaves para encontrar el cierre real del JSON raíz
+      let depth = 0, b = -1, inStr = false, esc = false;
+      for (let i = a; i < s.length; i++) {
+        const c = s[i];
+        if (esc)           { esc = false; continue; }
+        if (c === "\\" && inStr) { esc = true;  continue; }
+        if (c === '"')     { inStr = !inStr; continue; }
+        if (inStr)         continue;
+        if (c === "{")     depth++;
+        else if (c === "}") { depth--; if (depth === 0) { b = i; break; } }
+      }
+      // Fallback si el conteo no encontró cierre (JSON truncado)
+      if (b < 0) b = s.lastIndexOf("}");
+      if (b < 0) throw new Error("No JSON en respuesta");
+
       s = s.slice(a, b + 1)
         .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, "")
         .replace(/\r?\n/g, " ")
         .replace(/\t/g, " ")
+        // Corrige precios con separador de miles: 16,000 → 16000
+        .replace(/"precio_unitario"\s*:\s*(\d+),(\d{3})\b/g, '"precio_unitario": $1$2')
+        .replace(/"cantidad"\s*:\s*(\d+),(\d{3})\b/g, '"cantidad": $1$2')
         .replace(/,(\s*[}\]])/g, "$1");
+
       return JSON.parse(s);
     }
 
@@ -259,8 +282,8 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
       }
     }
 
-    // ORDEN: primero sin web_search (rápido), fallback con web_search (mejores precios)
-    const maxTok = proyectoGrande ? 8192 : 6000;
+    // max_tokens siempre al máximo — proyectos con materiales exhaustivos generan JSONs grandes
+    const maxTok = 8192;
     try {
       data = await callClaudeWithRetry({
         model: "claude-sonnet-4-6",
