@@ -730,11 +730,16 @@ window.doWord = function(){
   h3{color:#1B3A6B;font-size:12pt;border-bottom:2px solid #D4541A;padding-bottom:4px;margin:16px 0 8px}
   ul{font-size:10pt;line-height:1.9;padding-left:20px}
   .bar{height:3px;background:linear-gradient(to right,#D4541A,#1B3A6B)}
+  img.logo{height:52px;max-width:210px;object-fit:contain}
   </style></head><body>
   <div class="bar"></div>
   <table style="border:none;margin-bottom:8px"><tr>
-    <td style="border:none"><span style="font-size:22pt;color:#D4541A;font-weight:900">SS</span><span style="font-size:22pt;color:#1B3A6B;font-weight:900"> REMODELACIONES</span></td>
-    <td style="border:none;text-align:right;font-size:10pt;color:#555"><b style="color:#1a1a1a">Solo Senso Sociedad Anonima</b><br>San Isidro de Heredia | Tel: 7006-8477<br>gerencia@ssremodelaciones.com</td>
+    <td style="border:none">
+      <img class="logo" src="https://drive.google.com/uc?export=view&id=14Tdv8-1g6KcxcJrQSn_StPA5YDJLibDT"
+           onerror="this.style.display='none';this.nextSibling.style.display='inline'">
+      <span style="display:none"><span style="font-size:22pt;color:#D4541A;font-weight:900">SS</span><span style="font-size:22pt;color:#1B3A6B;font-weight:900"> REMODELACIONES</span></span>
+    </td>
+    <td style="border:none;text-align:right;font-size:10pt;color:#555"><b style="color:#1a1a1a">Solo Senso Sociedad Anónima</b><br>San Isidro de Heredia | Tel: 7006-8477<br>gerencia@ssremodelaciones.com</td>
   </tr></table><div class="bar" style="margin-bottom:12px"></div>
   <table style="border:none;font-size:10pt;margin-bottom:12px"><tr>
     <td style="border:none"><b>Fecha:</b> ${fecha}</td><td style="border:none"><b>Ref.:</b> ${c.referencia}</td>
@@ -744,19 +749,23 @@ window.doWord = function(){
   <p>Estimado/a <b>${c.nombre}</b>; presentamos propuesta para: <b>${c.asunto}</b>.</p>
   <h3>TRABAJOS INCLUIDOS</h3><ul>${lista}</ul>
   <h3>PRESUPUESTO</h3>
-  <table><thead><tr><th style="text-align:left">Descripcion</th><th>Und</th><th>Cant</th><th>Materiales</th><th>M.O.</th><th>SUB TOTAL</th></tr></thead>
+  <table><thead><tr><th style="text-align:left">Descripción</th><th>Und</th><th>Cant</th><th>Materiales</th><th>M.O.</th><th>SUB TOTAL</th></tr></thead>
   <tbody>${irows}${trows}<tr class="grand"><td colspan="5" align="right">TOTAL</td><td align="right">${fmt(T.total)}</td></tr></tbody></table>
   <h3>CONDICIONES</h3><ul>
     <li>Pagos por transferencia bancaria a SS Remodelaciones.</li>
     <li><b>Forma de pago:</b> 60% para iniciar, 10% semanal viernes, saldo al terminar.</li>
-    <li>Vigencia: 15 dias habiles.</li></ul>
-  <p style="font-size:10pt;margin-top:10px"><b>Garantia:</b> 12 meses por desperfecto en la instalacion.</p>
+    <li>Vigencia: 15 días hábiles.</li></ul>
+  <p style="font-size:10pt;margin-top:10px"><b>Garantía:</b> 12 meses por desperfecto en la instalación.</p>
   <p style="font-size:10pt;margin-top:8px"><b>BAC Colones</b> | Solo Senso SA | Cuenta: 938419603 | IBAN: CR29010200009384196033</p>
   <br><br>
+  <p style="text-align:center;margin-bottom:12px">
+    <img class="logo" src="https://drive.google.com/uc?export=view&id=14Tdv8-1g6KcxcJrQSn_StPA5YDJLibDT"
+         onerror="this.style.display='none'">
+  </p>
   <table style="border:none;width:100%"><tr>
-    <td style="border:none;width:45%;text-align:center;border-top:1px solid #333;padding-top:4px;font-size:10pt">Ing. Darwin J. Guilon M.<br><b>Gerente General</b></td>
+    <td style="border:none;width:45%;text-align:center;border-top:1.5px solid #1B3A6B;padding-top:6px;font-size:10pt">Ing. Darwin J. Guillón M.<br><b>Gerente General</b><br><span style="color:#555">SS Remodelaciones</span></td>
     <td style="border:none;width:10%"></td>
-    <td style="border:none;width:45%;text-align:center;border-top:1px solid #333;padding-top:4px;font-size:10pt">${c.nombre}<br><b>Cliente</b></td>
+    <td style="border:none;width:45%;text-align:center;border-top:1.5px solid #1B3A6B;padding-top:6px;font-size:10pt">${c.nombre}<br><b>Cliente</b></td>
   </tr></table>
   <p style="border-top:2px solid #1B3A6B;padding-top:6px;font-size:9pt;color:#888;text-align:center;margin-top:20px">
     www.ssremodelaciones.com | @ssremodelaciones | Tel: 7006-8477</p>
