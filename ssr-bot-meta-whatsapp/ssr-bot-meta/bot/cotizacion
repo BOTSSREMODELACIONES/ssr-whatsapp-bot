@@ -202,7 +202,14 @@ function generarExcel(client, items) {
   ws1["!cols"] = [{wch:6},{wch:40},{wch:8},{wch:10},{wch:12},{wch:14}];
   ws2["!cols"] = [{wch:40},{wch:8},{wch:10},{wch:14},{wch:14},{wch:16}];
 
-  // Fórmulas en hoja 2 (Resumen cliente)
+  // Fórmulas por ítem en hoja 2: SUB TOTAL (col F) = Materiales (col D) + M.O. (col E)
+  // Esto permite editar materiales o MO y el subtotal se recalcula automáticamente
+  for (let fi = 0; fi < n; fi++) {
+    const frow = fi + 2;
+    ws2[`F${frow}`] = { t:"n", v: T.itemsDisplay[fi].subtotalDisplay, f: `D${frow}+E${frow}` };
+  }
+
+  // Fórmulas en totales (Resumen cliente)
   const sumRow = n + 3;
   ws2[`F${sumRow}`]   = { t:"n", v: T.subtotalDisplay, f: `SUM(F2:F${n+1})` };
   ws2[`F${sumRow+1}`] = { t:"n", v: T.iva,             f: `F${sumRow}*0.13` };
@@ -378,6 +385,12 @@ async function generarWord(client, items, logoBuffer) {
 
         // ── FIX #13: Bloque de firmas ────────────────────────────────────────
         new Paragraph({ spacing: { before: 400, after: 0 }, children: [] }),
+        // Logo centrado sobre las firmas (si está disponible)
+        ...(logoBuffer ? [new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 0, after: 200 },
+          children: [new ImageRun({ data: logoBuffer, transformation: { width: 160, height: 55 }, type: "jpg" })],
+        })] : []),
         new Table({
           width: { size: 9360, type: WidthType.DXA },
           columnWidths: [4500, 4860],
@@ -390,7 +403,7 @@ async function generarWord(client, items, logoBuffer) {
             cellFirma([
               new Paragraph({ spacing: { after: 320 }, children: [] }),
               new Paragraph({ spacing: { after: 0 }, border: { top: { style: BorderStyle.SINGLE, size: 6, color: NAVY } }, children: [] }),
-              new Paragraph({ spacing: { before: 60, after: 20 }, children: [bold("Ing. Darwin J Guillón M")] }),
+              new Paragraph({ spacing: { before: 60, after: 20 }, children: [bold("Ing. Darwin J. Guillón M.")] }),
               new Paragraph({ spacing: { after: 10 }, children: [run("Gerente General")] }),
               new Paragraph({ spacing: { after: 0  }, children: [run("SS Remodelaciones")] }),
             ]),
