@@ -9,7 +9,13 @@ const memoria                        = require("./memoria");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
 const SUPERVISORES = ["+50683091817", "+50671981370"];
+
+// Números exactos a ignorar completamente
 const IGNORAR = [];
+
+// Prefijos de país a bloquear por seguridad
+// +57 Colombia: números que buscan agendar visitas para extorsionar empleados
+const IGNORAR_PREFIJOS = ["+57"];
 
 async function handleMessage(from, text, messageId, mediaIds = null) {
   if (messageId) markRead(messageId).catch(() => {});
@@ -25,6 +31,12 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   }
 
   if (IGNORAR.includes(fromE164) || IGNORAR.includes(from)) return;
+
+  // Bloquear prefijos de países peligrosos (+57 Colombia - extorsión)
+  if (IGNORAR_PREFIJOS.some(p => fromE164.startsWith(p) || from.startsWith(p))) {
+    console.log(`🚫 Mensaje bloqueado de país restringido: ${from}`);
+    return;
+  }
 
   // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
