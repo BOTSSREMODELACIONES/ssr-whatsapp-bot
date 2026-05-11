@@ -221,7 +221,7 @@ function compressImage(file,maxWidth=400,quality=0.40){
   });
 }
 
-async function fetchConTimeout(url,opts,timeoutMs=150000){
+async function fetchConTimeout(url,opts,timeoutMs=360000){
   const ctrl=new AbortController();
   const timer=setTimeout(()=>ctrl.abort(),timeoutMs);
   try{
@@ -230,7 +230,7 @@ async function fetchConTimeout(url,opts,timeoutMs=150000){
     return r;
   }catch(e){
     clearTimeout(timer);
-    if(e.name==="AbortError") throw new Error("Tiempo de espera agotado (>2.5 min). Intentá sin fotos o con menos fotos.");
+    if(e.name==="AbortError") throw new Error("Tiempo de espera agotado (>6 min). Para proyectos muy grandes, dividí las notas en partes y procesalas por separado (ej: primero las actividades de techo, luego paredes, etc.).");
     throw new Error("No se pudo conectar al servidor. Verificá tu conexión e intentá de nuevo.");
   }
 }
@@ -324,6 +324,7 @@ function renderProcessing(){
     <div style="font-size:36px;margin-bottom:16px">⚙️</div>
     <div style="font-size:16px;font-weight:600;color:#1B3A6B;margin-bottom:8px" id="load-msg">Analizando notas...</div>
     <div style="font-size:13px;color:#aaa">Construplaza · EPA · El Lagar</div>
+    <div style="font-size:11px;color:#bbb;margin-top:6px">Proyectos con varias actividades pueden tardar 3-5 min</div>
     <div class="progress"><div class="prog-fill"></div></div>
   </div>`;
 }
@@ -586,7 +587,7 @@ async function procesar(){
   if(!S.notas.trim()&&S.fotos.length===0&&S.pdfs.length===0){ showErr("err-input","Agregá notas, fotos o un PDF."); return; }
 
   goStep(1);
-  const msgs=["Analizando notas...","Interpretando fotos...","Estimando materiales...","Buscando precios CR...","Armando presupuesto..."];
+  const msgs=["Analizando notas...","Calculando materiales por actividad...","Buscando precios en CR...","Verificando costos de M.O...","Armando presupuesto detallado...","Cotizando materiales adicionales...","Proyectos grandes pueden tardar 3-5 min...","Revisando precios de Construplaza y EPA...","Casi listo, siendo exhaustivo con los materiales...","Finalizando el presupuesto..."];
   let mi=0;
   const iv=setInterval(()=>{ mi=(mi+1)%msgs.length; const el=document.getElementById("load-msg"); if(el) el.textContent=msgs[mi]; },2000);
 
@@ -595,7 +596,7 @@ async function procesar(){
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({notas:S.notas,fotos:S.fotos,pdfs:S.pdfs})
-    },150000);
+    },360000);
 
     const data=await r.json();
     clearInterval(iv);
