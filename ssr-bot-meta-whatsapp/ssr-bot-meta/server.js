@@ -198,6 +198,7 @@ Ejemplos obligatorios por tipo de obra:
 - Pintura exterior/fachada: pintura exterior, impermeabilizante, rodillo de esponja, brocha, cinta, plastico, lija, sellador de grietas.
 
 NUNCA agrega texto, comentarios, notas ni nada fuera del JSON. La respuesta es EXCLUSIVAMENTE el objeto JSON, sin nada antes ni despues.
+CRITICO — COMILLAS EN TEXTO: NUNCA uses el simbolo " dentro de valores de texto. Para medidas en pulgadas escribe "plg" o "pulgadas" (ej: "Track 3.5 plg" NO "Track 3.5\""). Para citar marcas o calidades usa parentesis (ej: "ceramica (rectificada) 60x60" NO "ceramica \"rectificada\" 60x60"). Cualquier comilla interna en un string rompe el JSON.
 NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automaticamente aparte.`;
 
     // ── Detectar tamaño del proyecto para ajustar nivel de detalle ───────────
@@ -223,15 +224,52 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
       : prompt;
 
     // ── Limpieza robusta del JSON ─────────────────────────────────────────────
-    // NOTA: usa conteo de llaves en vez de lastIndexOf para evitar que texto
-    // generado por Claude despues del JSON (con sus propias {}) rompa el parser
+    // FIX DEFINITIVO v5:
+    //  1. Brace-counting para ignorar cualquier texto de Claude despues del JSON
+    //  2. Escape de comillas internas en strings (ej: Track 3.5" o Tornillo 1/2")
+    //     → causa del error "Expected ':'" cuando Claude usa pulgadas en descripciones
+    //  3. Fix de precios con separador de miles (16,000 → 16000)
+
+    // Paso A: escapa comillas internas mal puestas dentro de strings JSON
+    // Lógica: si después de una " viene algo distinto a : , } ] entonces es comilla interna
+    function escaparComillasInternas(s) {
+      let result = "";
+      let inStr = false;
+      let esc = false;
+      for (let i = 0; i < s.length; i++) {
+        const c = s[i];
+        if (esc)              { result += c; esc = false; continue; }
+        if (c === "\\" && inStr) { result += c; esc = true;  continue; }
+        if (c === '"') {
+          if (!inStr) { inStr = true;  result += c; continue; }
+          // ¿Es comilla de cierre legítima?
+          // Miramos el siguiente caracter no-espacio
+          let j = i + 1;
+          while (j < s.length && s[j] === " ") j++;
+          const next = j < s.length ? s[j] : "";
+          if ([":", ",", "}", "]", ""].includes(next)) {
+            inStr = false; result += c; // cierre legítimo
+          } else {
+            result += '\\"'; // comilla interna → escaparla
+          }
+        } else {
+          result += c;
+        }
+      }
+      return result;
+    }
+
     function parsearJSON(raw) {
-      let s = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
+      // Reemplazar comillas tipográficas por rectas
+      let s = raw
+        .replace(/```json/gi, "").replace(/```/g, "").trim()
+        .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+        .replace(/[\u2018\u2019\u201A\u201B]/g, "'");
 
       const a = s.indexOf("{");
       if (a < 0) throw new Error("No JSON en respuesta");
 
-      // Contar llaves para encontrar el cierre real del JSON raíz
+      // Brace-counting: encontrar el cierre REAL del objeto JSON raíz
       let depth = 0, b = -1, inStr = false, esc = false;
       for (let i = a; i < s.length; i++) {
         const c = s[i];
@@ -242,8 +280,7 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
         if (c === "{")     depth++;
         else if (c === "}") { depth--; if (depth === 0) { b = i; break; } }
       }
-      // Fallback si el conteo no encontró cierre (JSON truncado)
-      if (b < 0) b = s.lastIndexOf("}");
+      if (b < 0) b = s.lastIndexOf("}"); // fallback si JSON truncado
       if (b < 0) throw new Error("No JSON en respuesta");
 
       s = s.slice(a, b + 1)
@@ -255,7 +292,24 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
         .replace(/"cantidad"\s*:\s*(\d+),(\d{3})\b/g, '"cantidad": $1$2')
         .replace(/,(\s*[}\]])/g, "$1");
 
-      return JSON.parse(s);
+      // Intento 1: parseo directo
+      try {
+        return JSON.parse(s);
+      } catch (e1) {
+        // Intento 2: escapar comillas internas (ej: 3.5" de pulgadas en descripciones)
+        try {
+          const sFixed = escaparComillasInternas(s);
+          return JSON.parse(sFixed);
+        } catch (e2) {
+          // Intento 3: eliminar todo lo que no sea ASCII básico y reintentar
+          try {
+            const sAscii = s.replace(/[^\x20-\x7E\u00C0-\u024F\u20A1]/g, " ");
+            return JSON.parse(escaparComillasInternas(sAscii));
+          } catch (e3) {
+            throw new Error(e1.message); // lanzar el error original
+          }
+        }
+      }
     }
 
     let data;
