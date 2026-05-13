@@ -128,12 +128,126 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
+// ── Meta Lead Ads Webhook ─────────────────────────────────────────────────────
+// Verificación del webhook de leads de Meta
+app.get("/meta-lead", (req, res) => {
+  const mode      = req.query["hub.mode"];
+  const token     = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (mode === "subscribe" && token === process.env.WEBHOOK_VERIFY_TOKEN) {
+    console.log("✅ Webhook Meta Lead verificado");
+    return res.status(200).send(challenge);
+  }
+  res.sendStatus(403);
+});
+
+// Recepción de leads de Meta Lead Ads
+app.post("/meta-lead", async (req, res) => {
+  try {
+    console.log("🔥 Nuevo lead Meta recibido:", JSON.stringify(req.body, null, 2));
+
+    // Meta envía los datos en una estructura anidada
+    // Soportamos tanto el formato directo como el formato de Meta Lead Ads
+    let nombre, telefono, interes, zona;
+
+    const body = req.body;
+
+    // Formato Meta Lead Ads (formulario nativo de Meta)
+    if (body?.entry?.[0]?.changes?.[0]?.value?.leads) {
+      const lead      = body.entry[0].changes[0].value.leads[0];
+      const campos    = lead.field_data || [];
+      nombre   = campos.find(c => c.name === "full_name")?.values?.[0] || "Cliente";
+      telefono = campos.find(c => c.name === "phone_number")?.values?.[0] || "";
+      interes  = campos.find(c => c.name === "what_service_are_you_interested_in" || c.name === "interes")?.values?.[0] || "remodelación";
+      zona     = campos.find(c => c.name === "zone" || c.name === "zona")?.values?.[0] || "Costa Rica";
+    } else {
+      // Formato directo (desde Make u otro intermediario)
+      nombre   = body.nombre   || body.full_name    || "Cliente";
+      telefono = body.telefono || body.phone_number || "";
+      interes  = body.interes  || body.servicio     || "remodelación";
+      zona     = body.zona     || body.zone         || "Costa Rica";
+    }
+
+    if (!telefono) {
+      console.warn("⚠️ Lead recibido sin teléfono");
+      return res.status(400).json({ ok: false, error: "Sin teléfono" });
+    }
+
+    // Normalizar teléfono (agregar código de país si no lo tiene)
+    let telefonoNorm = telefono.replace(/\D/g, "");
+    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
+      telefonoNorm = "506" + telefonoNorm;
+    }
+
+    console.log(`📲 Procesando lead: ${nombre} | +${telefonoNorm} | ${interes} | ${zona}`);
+
+    const { sendText } = require("./bot/messenger");
+
+    // Mensaje inicial de Sasha al cliente
+    const mensaje =
+      `Hola ${nombre} 👋\n\n` +
+      `Soy *Sasha*, asistente de *SS Remodelaciones*.\n\n` +
+      `Recibimos su solicitud sobre *${interes}* y será un gusto ayudarle 😊\n\n` +
+      `¿Podría contarme un poco más sobre el proyecto que tiene en mente? ` +
+      `Por ejemplo: ¿en qué zona está ubicado y cuál sería el alcance del trabajo?`;
+
+    await sendText("+" + telefonoNorm, mensaje);
+    console.log(`✅ WhatsApp enviado a +${telefonoNorm}`);
+
+    // Notificar a supervisores
+    const SUPS = ["+50683091817", "+50671981370", "+50670068477"];
+    const notifSup =
+      `🔥 *Nuevo lead Meta Ads*\n\n` +
+      `👤 Nombre: ${nombre}\n` +
+      `📱 Teléfono: +${telefonoNorm}\n` +
+      `🔨 Interés: ${interes}\n` +
+      `📍 Zona: ${zona}\n\n` +
+      `✅ Sasha ya le escribió automáticamente.`;
+
+    for (const sup of SUPS) {
+      sendText(sup, notifSup).catch(e => console.warn(`⚠️ No se pudo notificar a ${sup}:`, e.message));
+    }
+
+    // Registrar en CRM via Make webhook
+    // IMPORTANTE: reemplazá MAKE_WEBHOOK_META_LEADS en tus variables de entorno
+    if (process.env.MAKE_WEBHOOK_META_LEADS) {
+      try {
+        await fetch(process.env.MAKE_WEBHOOK_META_LEADS, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            nombre,
+            telefono: "+" + telefonoNorm,
+            interes,
+            zona,
+            fuente:    "Meta Ads",
+            fecha:     new Date().toLocaleString("es-CR", { timeZone: "America/Costa_Rica" }),
+            estado:    "Nuevo lead"
+          })
+        });
+        console.log("✅ Lead registrado en CRM via Make");
+      } catch (errMake) {
+        console.warn("⚠️ No se pudo registrar en CRM:", errMake.message);
+        // No falla el flujo principal si el CRM falla
+      }
+    } else {
+      console.warn("⚠️ MAKE_WEBHOOK_META_LEADS no configurado — lead no registrado en CRM");
+    }
+
+    res.json({ ok: true, mensaje: "Lead procesado correctamente" });
+
+  } catch (err) {
+    console.error("❌ Error META LEAD:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Health & status ────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.json({
   bot: "SS Remodelaciones ∙ Sasha",
   status: "✅ operando",
   api: "Meta WhatsApp Business API",
-  features: ["visión de fotos (múltiples)", "análisis de videos", "recordatorios automáticos", "detección de idioma"],
+  features: ["visión de fotos (múltiples)", "análisis de videos", "recordatorios automáticos", "detección de idioma", "Meta Lead Ads"],
   ts: new Date().toISOString(),
 }));
 
@@ -163,8 +277,29 @@ app.get("/test-reminders", async (_req, res) => {
   res.json({ ok: true, message: "Recordatorios ejecutados" });
 });
 
+// ── Test de Meta Lead (para pruebas manuales sin Meta) ────────────────────────
+app.get("/test-meta-lead", async (req, res) => {
+  try {
+    const payload = {
+      nombre:   req.query.nombre   || "Cliente Prueba",
+      telefono: req.query.telefono || "50671951695",
+      interes:  req.query.interes  || "Remodelación de cocina",
+      zona:     req.query.zona     || "Heredia"
+    };
+    console.log("🧪 Test Meta Lead:", payload);
+    const r = await fetch(`http://localhost:${PORT}/meta-lead`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify(payload)
+    });
+    const data = await r.json();
+    res.json({ ok: true, test: payload, resultado: data });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Cotizador: procesar notas con IA ─────────────────────────────────────────
-// ACTUALIZADO v4: materiales exhaustivos + herramientas + consumibles
 app.post("/api/procesar-notas", async (req, res) => {
   try {
     const { notas, fotos, pdfs } = req.body;
@@ -175,7 +310,6 @@ app.post("/api/procesar-notas", async (req, res) => {
       ? "\n\nDOCUMENTOS/PLANOS:\n" + pdfs.map(p => "--- " + p.name + " ---\n" + p.text).join("\n\n")
       : "";
 
-    // ── SISTEMA: Reglas de presupuestación exhaustiva ─────────────────────────
     const systemPrompt = `Sos experto en presupuestos de construccion y remodelacion en Costa Rica. Responde SOLO JSON puro valido sin markdown ni backticks ni simbolos especiales fuera del JSON.
 
 REGLAS:
@@ -201,7 +335,6 @@ NUNCA agrega texto, comentarios, notas ni nada fuera del JSON. La respuesta es E
 CRITICO — COMILLAS EN TEXTO: NUNCA uses el simbolo " dentro de valores de texto. Para medidas en pulgadas escribe "plg" o "pulgadas" (ej: "Track 3.5 plg" NO "Track 3.5\""). Para citar marcas o calidades usa parentesis (ej: "ceramica (rectificada) 60x60" NO "ceramica \"rectificada\" 60x60"). Cualquier comilla interna en un string rompe el JSON.
 NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automaticamente aparte.`;
 
-    // ── Detectar tamaño del proyecto para ajustar nivel de detalle ───────────
     const notasParaContar = notas || "";
     const contadorActividades = (notasParaContar.match(/\b(instalar|cambiar|pintar|demoler|construir|colocar|hacer|reparar|ampliar|enchap|cielorraso|cielo raso|gypsum|techo|piso|puerta|ventana|baño|cocina|pared|fachada|piscina)\b/gi) || []).length;
     const proyectoGrande = contadorActividades > 5 || notasParaContar.length > 800;
@@ -210,7 +343,6 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
       ? `MATERIALES: Lista los materiales PRINCIPALES de cada actividad (entre 4-8 por actividad). Incluye los más costosos e importantes. Para consumibles menores (cinta, lija, etc.) agrúpalos en un ítem "Consumibles y herramientas menores" por actividad con precio estimado global. Sé conciso pero preciso.`
       : `CRITICO: Lista TODOS los materiales + herramientas + consumibles para cada actividad. Si es un techo metalico incluye discos de corte, thinner, mechas, brochas, pintura anticorrosiva, etc. No omitas NADA necesario para ejecutar el trabajo desde cero hasta terminado.`;
 
-    // ── PROMPT DE USUARIO ─────────────────────────────────────────────────────
     const prompt =
       "Analiza las notas, fotos y documentos adjuntos y genera un presupuesto COMPLETO de remodelacion.\n\n" +
       "NOTAS:\n" + (notas || "(ver fotos/documentos)") + pdfCtx +
@@ -223,15 +355,6 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
       ? [...fotos.map(f => ({ type: "image", source: { type: "base64", media_type: f.mimeType, data: f.base64 } })), { type: "text", text: prompt }]
       : prompt;
 
-    // ── Limpieza robusta del JSON ─────────────────────────────────────────────
-    // FIX DEFINITIVO v5:
-    //  1. Brace-counting para ignorar cualquier texto de Claude despues del JSON
-    //  2. Escape de comillas internas en strings (ej: Track 3.5" o Tornillo 1/2")
-    //     → causa del error "Expected ':'" cuando Claude usa pulgadas en descripciones
-    //  3. Fix de precios con separador de miles (16,000 → 16000)
-
-    // Paso A: escapa comillas internas mal puestas dentro de strings JSON
-    // Lógica: si después de una " viene algo distinto a : , } ] entonces es comilla interna
     function escaparComillasInternas(s) {
       let result = "";
       let inStr = false;
@@ -242,15 +365,13 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
         if (c === "\\" && inStr) { result += c; esc = true;  continue; }
         if (c === '"') {
           if (!inStr) { inStr = true;  result += c; continue; }
-          // ¿Es comilla de cierre legítima?
-          // Miramos el siguiente caracter no-espacio
           let j = i + 1;
           while (j < s.length && s[j] === " ") j++;
           const next = j < s.length ? s[j] : "";
           if ([":", ",", "}", "]", ""].includes(next)) {
-            inStr = false; result += c; // cierre legítimo
+            inStr = false; result += c;
           } else {
-            result += '\\"'; // comilla interna → escaparla
+            result += '\\"';
           }
         } else {
           result += c;
@@ -260,7 +381,6 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
     }
 
     function parsearJSON(raw) {
-      // Reemplazar comillas tipográficas por rectas
       let s = raw
         .replace(/```json/gi, "").replace(/```/g, "").trim()
         .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
@@ -269,7 +389,6 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
       const a = s.indexOf("{");
       if (a < 0) throw new Error("No JSON en respuesta");
 
-      // Brace-counting: encontrar el cierre REAL del objeto JSON raíz
       let depth = 0, b = -1, inStr = false, esc = false;
       for (let i = a; i < s.length; i++) {
         const c = s[i];
@@ -280,33 +399,29 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
         if (c === "{")     depth++;
         else if (c === "}") { depth--; if (depth === 0) { b = i; break; } }
       }
-      if (b < 0) b = s.lastIndexOf("}"); // fallback si JSON truncado
+      if (b < 0) b = s.lastIndexOf("}");
       if (b < 0) throw new Error("No JSON en respuesta");
 
       s = s.slice(a, b + 1)
         .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, "")
         .replace(/\r?\n/g, " ")
         .replace(/\t/g, " ")
-        // Corrige precios con separador de miles: 16,000 → 16000
         .replace(/"precio_unitario"\s*:\s*(\d+),(\d{3})\b/g, '"precio_unitario": $1$2')
         .replace(/"cantidad"\s*:\s*(\d+),(\d{3})\b/g, '"cantidad": $1$2')
         .replace(/,(\s*[}\]])/g, "$1");
 
-      // Intento 1: parseo directo
       try {
         return JSON.parse(s);
       } catch (e1) {
-        // Intento 2: escapar comillas internas (ej: 3.5" de pulgadas en descripciones)
         try {
           const sFixed = escaparComillasInternas(s);
           return JSON.parse(sFixed);
         } catch (e2) {
-          // Intento 3: eliminar todo lo que no sea ASCII básico y reintentar
           try {
             const sAscii = s.replace(/[^\x20-\x7E\u00C0-\u024F\u20A1]/g, " ");
             return JSON.parse(escaparComillasInternas(sAscii));
           } catch (e3) {
-            throw new Error(e1.message); // lanzar el error original
+            throw new Error(e1.message);
           }
         }
       }
@@ -336,7 +451,6 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
       }
     }
 
-    // max_tokens siempre al máximo — proyectos con materiales exhaustivos generan JSONs grandes
     const maxTok = 8192;
     try {
       data = await callClaudeWithRetry({
@@ -365,7 +479,6 @@ NO incluyas "transporte", "limpieza" ni "andamios" — esos se agregan automatic
   }
 });
 
-
 // ── Cotizacion → Drive ─────────────────────────────────────────────────────────
 app.post("/api/cotizacion", async (req, res) => {
   try {
@@ -381,7 +494,6 @@ app.post("/api/cotizacion", async (req, res) => {
     res.status(500).json({ ok: false, error: err.message });
   }
 });
-
 
 // ── Transcripción de voz ───────────────────────────────────────────────────────
 app.post("/api/transcribir-voz", async (req, res) => {
@@ -429,7 +541,9 @@ app.listen(PORT, () => {
 │  🤖  IA: Claude Sonnet 4.6 (visión activada)               │
 │  ⏰  Recordatorios: 8:00 AM CR diario                      │
 │  🚀  Puerto: ${PORT}                                           │
-│  📌  Webhook: GET|POST /webhook                            │
+│  📌  Webhook WhatsApp: GET|POST /webhook                   │
+│  🔥  Webhook Meta Leads: GET|POST /meta-lead               │
+│  🧪  Test leads: GET /test-meta-lead                       │
 └────────────────────────────────────────────────────────────┘
   `);
 });
