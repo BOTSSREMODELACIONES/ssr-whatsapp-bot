@@ -111,7 +111,7 @@ async function crearFormulario() {
       {
         type:       "CUSTOM",
         label:      "¿Qué necesitás?",
-        field_type: "SELECT",
+        field_type: "DROP_DOWN",
         options:    [
           { value: "Cocina a medida" },
           { value: "Remodelación completa de cocina" },
@@ -122,7 +122,7 @@ async function crearFormulario() {
       {
         type:       "CUSTOM",
         label:      "Zona",
-        field_type: "SELECT",
+        field_type: "DROP_DOWN",
         options:    [
           { value: "San José" },
           { value: "Heredia" },
