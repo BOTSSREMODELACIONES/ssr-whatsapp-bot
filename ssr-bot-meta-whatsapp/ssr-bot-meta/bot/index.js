@@ -18,10 +18,15 @@ const SUPERVISORES = [
 ];
 
 // Números exactos a ignorar completamente
-const IGNORAR = [];
+const IGNORAR = [
+  "+5215571965946",  // Estafador México
+];
 
 // Prefijos de país a bloquear por seguridad
-const IGNORAR_PREFIJOS = ["+57"];
+const IGNORAR_PREFIJOS = [
+  "+57",  // Colombia
+  "+52",  // México
+];
 
 // ── Interpretar comando de supervisor con Claude ──────────────────────────────
 /**
