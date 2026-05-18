@@ -26,7 +26,6 @@ const SHEET_TITLE    = "SSR_Memoria_Chats";
 const TZ             = "America/Costa_Rica";
 
 // Carpeta raíz para fotos de clientes en Drive (configurable vía env)
-// Si no se define, se crea en el root del Drive de Darwin
 const MEDIA_PARENT_ID = process.env.MEDIA_FOLDER_ID || null;
 
 // Cache de IDs para evitar llamadas repetidas a la API
@@ -34,6 +33,9 @@ let _sheetId     = process.env.MEMORY_SHEET_ID || null;
 const _folderCache = {};
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
+// FIX: Se eliminó "subject: DARWIN_EMAIL" que causaba error unauthorized_client.
+// El service account ahora se autentica como sí mismo (no intenta impersonar).
+// El sheet SSR_Memoria_Chats debe estar compartido con el email del service account.
 async function getAuth() {
   const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   return new google.auth.JWT({
@@ -43,7 +45,6 @@ async function getAuth() {
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
     ],
-    subject: DARWIN_EMAIL,
   });
 }
 
@@ -113,17 +114,15 @@ async function getOrCreateSheetId() {
   _sheetId = created.data.spreadsheetId;
   console.log(`✅ Memoria: sheet creado (${_sheetId})`);
 
-  // Transferir ownership a Darwin
+  // Compartir con Darwin para que pueda verlo
   try {
     await drive.permissions.create({
       fileId: _sheetId,
-      requestBody: { role: "owner", type: "user", emailAddress: DARWIN_EMAIL },
-      transferOwnership: true,
-      moveToNewOwnersRoot: false,
+      requestBody: { role: "writer", type: "user", emailAddress: DARWIN_EMAIL },
     });
-    console.log(`✅ Memoria: ownership transferido a ${DARWIN_EMAIL}`);
+    console.log(`✅ Memoria: sheet compartido con ${DARWIN_EMAIL}`);
   } catch (e) {
-    console.warn("⚠️ Memoria: no se pudo transferir ownership del sheet:", e.message);
+    console.warn("⚠️ Memoria: no se pudo compartir el sheet:", e.message);
   }
 
   return _sheetId;
@@ -366,9 +365,9 @@ function formatearMensajes(rows, titulo = "Historial") {
   for (const [fecha, msgs] of Object.entries(groups)) {
     lines.push(`\n📅 *${fecha}*`);
     for (const r of msgs) {
-      const hora     = new Date(r[0]).toLocaleTimeString("es-CR", { timeZone: TZ, timeStyle: "short" });
-      const quien    = r[3] === "in" ? "🧑 *Cliente*" : "🤖 *Sasha*";
-      const isMedia  = r[4] === "image";
+      const hora      = new Date(r[0]).toLocaleTimeString("es-CR", { timeZone: TZ, timeStyle: "short" });
+      const quien     = r[3] === "in" ? "🧑 *Cliente*" : "🤖 *Sasha*";
+      const isMedia   = r[4] === "image";
       const contenido = isMedia
         ? `[📷 Foto${r[7] ? `: ${r[7]}` : ""}]`
         : (r[5] || "").slice(0, 200);
@@ -415,53 +414,48 @@ async function procesarConsultaMemoria(text) {
       const lines = clientes.slice(-30).map(r => {
         const nombre = r[1] || r[0];
         const ult    = r[5] ? new Date(r[5]).toLocaleDateString("es-CR", { timeZone: TZ }) : "—";
-        const visita = r[7] === "Sí" ? " ✅ visita" : "";
-        return `• ${nombre} (${r[0]}) — últ: ${ult}${visita}`;
+        const visita = r[7] === "Sí" ? " ✅" : "";
+        return `📱 ${r[0]} — ${nombre}${visita} (últ: ${ult})`;
       });
 
-      return `📋 *Clientes en memoria* (${clientes.length} total)\n\n${lines.join("\n")}`;
+      return `👥 *Clientes registrados (${clientes.length}):*\n\n${lines.join("\n")}`;
     }
 
     // ── Fotos de cliente ─────────────────────────────────────────────────────
     const fotosMatch = text.match(/fotos?\s+de\s+(.+)/i);
     if (fotosMatch) {
-      const query = fotosMatch[1].trim();
+      const query = fotosMatch[1].replace(/[?.!].*$/, "").trim();
       const fotos = await obtenerFotos(query);
-      if (!fotos.length) return `📷 No encontré fotos de "${query}".`;
-
-      const links = fotos.slice(-10).map((r, i) => {
-        const fecha = new Date(r[0]).toLocaleDateString("es-CR", { timeZone: TZ });
-        return `${i + 1}. [${fecha}] ${r[7]}`;
-      }).join("\n");
-
-      return `📷 *Fotos de ${query}* (${fotos.length} en total)\n\n${links}`;
+      if (!fotos.length) return `📭 No encontré fotos de "${query}".`;
+      const lines = fotos.slice(-20).map(r => {
+        const hora = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ });
+        return `📷 ${hora}: ${r[7]}`;
+      });
+      return `📷 *Fotos de ${query}* (${fotos.length}):\n\n${lines.join("\n")}`;
     }
 
     // ── Buscar por contenido ─────────────────────────────────────────────────
     const buscarMatch = text.match(/buscar?\s+(.+)/i);
     if (buscarMatch) {
-      const kw   = buscarMatch[1].trim();
-      const rows = await buscarPorContenido(kw);
-      if (!rows.length) return `🔍 No encontré mensajes que contengan "${kw}".`;
-
-      const hist = formatearMensajes(rows, `Búsqueda: "${kw}"`);
-      return hist || `🔍 No encontré resultados para "${kw}".`;
+      const keyword = buscarMatch[1].replace(/[?.!].*$/, "").trim();
+      const rows = await buscarPorContenido(keyword);
+      if (!rows.length) return `📭 No encontré mensajes con "${keyword}".`;
+      const hist = formatearMensajes(rows, `Resultados: "${keyword}"`);
+      return hist || `📭 Sin resultados para "${keyword}".`;
     }
 
-    // ── Historial por número ─────────────────────────────────────────────────
-    const phoneMatch = text.match(/[+]?506[\s]?[\d\s\-]{7,}/);
+    // ── Historial por teléfono ───────────────────────────────────────────────
+    const phoneMatch = text.match(/[+]?506\s*(\d{4}[\s-]?\d{4})/);
     if (phoneMatch) {
-      const phone = "+" + phoneMatch[0].replace(/\D/g, "");
-      const rows  = await buscarPorTelefono(phone);
-      if (!rows.length) return `📭 No encontré conversaciones del número ${phone}.`;
-
+      const phone = "506" + phoneMatch[1].replace(/\D/g, "");
+      const rows = await buscarPorTelefono(phone);
+      if (!rows.length) return `📭 No encontré conversaciones de +${phone}.`;
       const clientName = rows[0][2] || phone;
-      const hist = formatearMensajes(rows, `Historial de ${clientName}`);
-      return hist || `📭 Sin mensajes de ${phone}.`;
+      const hist = formatearMensajes(rows, `Historial de ${clientName} (+${phone})`);
+      return hist || `📭 Sin mensajes de +${phone}.`;
     }
 
     // ── Historial por nombre ─────────────────────────────────────────────────
-    // Extraer nombre del texto
     const nombrePatterns = [
       /historial\s+(?:de\s+)?(.+)/i,
       /qu[eé]\s+(?:hab[ló]|dij[oi]|mand[oó])\s+(.+)/i,
