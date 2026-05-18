@@ -696,7 +696,7 @@ app.get("/api/crear-campana", async (req, res) => {
     const { execFile } = require("child_process");
     execFile(
       "node",
-      ["scripts/crear_campana_cocinas.js"],
+      ["crear_campana_cocinas.js"],
       { env: process.env, cwd: "/app" },
       (error, stdout, stderr) => {
         if (error) {
