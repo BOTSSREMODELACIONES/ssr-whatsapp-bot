@@ -21,8 +21,52 @@ const SUPERVISORES = [
 const IGNORAR = [];
 
 // Prefijos de país a bloquear por seguridad
-// +57 Colombia: números que buscan agendar visitas para extorsionar empleados
 const IGNORAR_PREFIJOS = ["+57"];
+
+// ── Interpretar comando de supervisor con Claude ──────────────────────────────
+/**
+ * Cuando ningún patrón rígido reconoce el comando del supervisor,
+ * se usa Claude para interpretar la intención en lenguaje natural.
+ */
+async function interpretarComandoAdmin(text) {
+  try {
+    const Anthropic = require("@anthropic-ai/sdk");
+    const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    const response = await client.messages.create({
+      model:      "claude-sonnet-4-5",
+      max_tokens: 300,
+      system: `Sos el sistema de interpretación de comandos de Sasha para los administradores de SS Remodelaciones.
+Tu trabajo es clasificar el mensaje del administrador y extraer los parámetros.
+
+Respondé SOLO con un JSON válido (sin markdown, sin explicaciones):
+{
+  "accion": "outbound" | "historial" | "info_cliente" | "listar" | "buscar" | "desconocido",
+  "destino": "nombre o número del cliente (solo para outbound)",
+  "mensaje": "mensaje a enviar al cliente (solo para outbound)",
+  "busqueda": "término de búsqueda (para historial, info, buscar)"
+}
+
+Ejemplos de clasificación:
+- "envíale a María que mañana es la visita" → outbound, destino=María, mensaje=mañana es la visita
+- "manda a 88887777: hola" → outbound
+- "qué conversaste/hablaste con Juan" → historial, busqueda=Juan
+- "qué pasó con Gustavo" → historial, busqueda=Gustavo
+- "pasame los datos de Ana" → info_cliente, busqueda=Ana
+- "cómo va el cliente Pérez" → info_cliente, busqueda=Pérez
+- "listar clientes" → listar
+- "buscar remodelación cocina" → buscar, busqueda=remodelación cocina`,
+      messages: [{ role: "user", content: text }],
+    });
+
+    const rawText = response.content[0]?.text || "{}";
+    const clean   = rawText.replace(/```json|```/g, "").trim();
+    return JSON.parse(clean);
+  } catch (err) {
+    console.warn("⚠️ interpretarComandoAdmin error:", err.message);
+    return { accion: "desconocido" };
+  }
+}
 
 async function handleMessage(from, text, messageId, mediaIds = null) {
   if (messageId) markRead(messageId).catch(() => {});
@@ -39,7 +83,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   if (IGNORAR.includes(fromE164) || IGNORAR.includes(from)) return;
 
-  // Bloquear prefijos de países peligrosos (+57 Colombia - extorsión)
   if (IGNORAR_PREFIJOS.some(p => fromE164.startsWith(p) || from.startsWith(p))) {
     console.log(`🚫 Mensaje bloqueado de país restringido: ${from}`);
     return;
@@ -49,62 +92,98 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
 
   if (esSupervisor && normalized) {
-    // 1. Registrar timestamp para ventana de 24h de outbound (no aplica a supervisores como destino)
-    //    — no se registra aquí, solo clientes
 
-    // 2. Menú de ayuda
+    // 1. Menú de ayuda
     if (/^(ayuda|help|\?|menu|comandos)$/i.test(normalized.trim())) {
       await sendText(from, [
-        "🤖 *Comandos Sasha — Panel Admin*",
+        "🤖 *Sasha — Panel Admin*",
         "",
-        "📋 *HISTORIAL DE CLIENTES:*",
-        "  • `historial [nombre]`",
-        "  • `historial +50688887777`",
-        "  • `qué habló María González`",
-        "  • `fotos de Juan Pérez`",
-        "  • `listar clientes`",
-        "  • `buscar remodelación cocina`",
+        "Podés escribirme en lenguaje natural, por ejemplo:",
         "",
-        "📤 *ENVIAR MENSAJES PROACTIVOS:*",
-        "  • `enviar a [nombre]: [mensaje]`",
-        "  • `enviar a +506XXXXXXXX: [mensaje]`",
-        "  • `mensaje para [nombre]: [mensaje]`",
-        "  • `contactar [nombre]: [mensaje]`",
-        "  • `avisar a [nombre]: [mensaje]`",
+        "📤 *Enviar mensajes:*",
+        "  _envíale a María González que mañana es la visita_",
+        "  _manda a +50688887777: confirmamos cita_",
+        "  _escríbele a Juan Pérez, dile que la cotización está lista_",
         "",
-        "💡 *Ejemplos:*",
-        "  _enviar a María González: Confirmamos su visita del jueves a las 10am_",
-        "  _contactar +50688884444: Buenos días, su cotización está lista_",
-        "  _historial +50688887777_",
+        "📋 *Consultar clientes:*",
         "  _listar clientes_",
+        "  _pasame los datos de Gustavo_",
+        "  _info de +50688887777_",
+        "",
+        "💬 *Historial WhatsApp:*",
+        "  _qué habló María González_",
+        "  _historial de Juan Pérez_",
+        "  _buscar remodelación cocina_",
+        "  _fotos de Carlos_",
       ].join("\n"));
       return;
     }
 
-    // 3. Comando outbound (enviar a cliente X: mensaje)
+    // 2. Intentar outbound (patrones directos)
     const respuestaOutbound = await outbound.procesarComandoOutbound(normalized);
     if (respuestaOutbound) {
       await sendText(from, respuestaOutbound);
       return;
     }
 
-    // 4. Consulta de memoria (historial, listar, buscar...)
+    // 3. Intentar memoria/CRM (patrones directos)
     const respuestaMemoria = await memoria.procesarConsultaMemoria(normalized);
     if (respuestaMemoria) {
       await sendText(from, respuestaMemoria);
       return;
     }
 
-    // 5. Si no es ningún comando reconocido, informar al admin
-    await sendText(from, [
-      "⚙️ No reconocí ese comando.",
-      "",
-      "Escribí *ayuda* para ver todos los comandos disponibles.",
-    ].join("\n"));
+    // 4. Fallback: usar Claude para interpretar lenguaje natural
+    const interpretacion = await interpretarComandoAdmin(normalized);
+    console.log(`🧠 Admin interpret: ${JSON.stringify(interpretacion)}`);
+
+    if (interpretacion.accion === "outbound" && interpretacion.destino && interpretacion.mensaje) {
+      // Claude detectó que quiere enviar un mensaje
+      const telefono = await outbound.resolverTelefono(interpretacion.destino);
+      if (!telefono) {
+        await sendText(from, `❌ No encontré a *"${interpretacion.destino}"* en los clientes.\nIntentá con el número: _enviar a +506XXXXXXXX: [mensaje]_`);
+      } else {
+        const resultado = await outbound.enviarProactivo(telefono, interpretacion.mensaje);
+        if (resultado.ok) {
+          memoria.guardarMensaje({ phone: "+" + telefono, clientName: interpretacion.destino, direction: "out", type: "text", content: `[OUTBOUND] ${interpretacion.mensaje}` }).catch(() => {});
+          await sendText(from, `✅ *Mensaje enviado*\n📱 +${telefono}\n💬 _"${interpretacion.mensaje.slice(0, 100)}"_`);
+        } else {
+          await sendText(from, `❌ Error al enviar: ${resultado.error}`);
+        }
+      }
+      return;
+    }
+
+    if (interpretacion.accion === "historial" && interpretacion.busqueda) {
+      const resp = await memoria.procesarConsultaMemoria(`historial ${interpretacion.busqueda}`);
+      await sendText(from, resp || `📭 No encontré conversaciones de "${interpretacion.busqueda}".`);
+      return;
+    }
+
+    if (interpretacion.accion === "info_cliente" && interpretacion.busqueda) {
+      const resp = await memoria.procesarConsultaMemoria(`info de ${interpretacion.busqueda}`);
+      await sendText(from, resp || `📭 No encontré a "${interpretacion.busqueda}" en el CRM.`);
+      return;
+    }
+
+    if (interpretacion.accion === "listar") {
+      const resp = await memoria.procesarConsultaMemoria("listar clientes");
+      await sendText(from, resp || "📭 No hay clientes en el CRM aún.");
+      return;
+    }
+
+    if (interpretacion.accion === "buscar" && interpretacion.busqueda) {
+      const resp = await memoria.procesarConsultaMemoria(`buscar ${interpretacion.busqueda}`);
+      await sendText(from, resp || `📭 Sin resultados para "${interpretacion.busqueda}".`);
+      return;
+    }
+
+    // 5. No reconocido
+    await sendText(from, "No entendí ese comando. Escribí *ayuda* para ver ejemplos de lo que puedo hacer.");
     return;
   }
 
-  // ── Registrar timestamp de mensaje entrante (para ventana 24h de outbound) ──
+  // ── Registrar timestamp de mensaje entrante ───────────────────────────────
   outbound.registrarMensajeEntrante(from);
 
   if (session.escalated) return;
@@ -201,15 +280,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     }
 
     // ── Monitor supervisores ──────────────────────────────────────────────────
-    const clientLabel = session.name ? `${session.name} (${from})` : from;
+    const clientLabel    = session.name ? `${session.name} (${from})` : from;
     const clientMsgLabel = imageDataArray.length > 0
       ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
       : normalized;
     const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientLabel}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${cleanMessage}`;
     for (const supervisor of SUPERVISORES) {
-      sendText(supervisor, monitorMsg).catch(err => {
-        console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
-      });
+      sendText(supervisor, monitorMsg).catch(err => console.error(`❌ Monitor [${supervisor}]: ${err.message}`));
     }
     if (mediaIds) {
       const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
@@ -315,20 +392,18 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   }
 }
 
-// ── Flujo de recolección RRHH / Proveedores ───────────────────────────────────
+// ── Flujo RRHH / Proveedores ──────────────────────────────────────────────────
 async function handleRRHHFlow(from, text, session, tipo) {
   const pasos = tipo === "solicitante" ? PASOS_SOLICITANTE : PASOS_PROVEEDOR;
   const paso  = session.rrhh_paso || 0;
   const data  = { ...(session.rrhh_data || {}) };
 
-  // Guardar respuesta del paso actual
   if (pasos[paso]?.campo && text) {
     data[pasos[paso].campo] = text;
     update(from, { rrhh_data: data });
   }
 
   const siguientePaso = paso + 1;
-
   if (siguientePaso < pasos.length) {
     update(from, { rrhh_paso: siguientePaso });
     const msg = pasos[siguientePaso].pregunta;
@@ -337,54 +412,46 @@ async function handleRRHHFlow(from, text, session, tipo) {
     return;
   }
 
-  // ── Todos los datos recolectados ──────────────────────────────────────────
   update(from, { modo: null, rrhh_paso: 0, rrhh_data: {} });
 
   if (tipo === "solicitante") {
-    const ok = await guardarSolicitante({
+    await guardarSolicitante({
       phone: from, nombre: data.nombre, cedula: data.cedula,
       telefono: data.telefono, direccion: data.direccion,
       habilidad: data.habilidad, curriculum: data.curriculum,
     });
     const msg = `✅ Listo, registré su información con éxito.\n\nRecuerde que al ser contactado/a deberá presentar su *hoja de delincuencia* actualizada.\n\nLe estaremos llamando cuando tengamos proyectos disponibles. ¡Gracias por su interés en SS Remodelaciones! 🙌`;
     await sendText(from, msg);
-
     for (const sup of SUPERVISORES) {
       sendText(sup, `👷 *Nuevo solicitante de trabajo*\n\n📱 ${from}\n👤 ${data.nombre||"—"}\n🪪 Cédula: ${data.cedula||"—"}\n📞 ${data.telefono||"—"}\n📍 ${data.direccion||"—"}\n🔧 ${data.habilidad||"—"}\n📋 ${data.curriculum||"—"}\n\n_Sasha — Bot SSR_`).catch(() => {});
     }
-
   } else {
-    const ok = await guardarProveedor({
+    await guardarProveedor({
       phone: from, empresa: data.empresa, contacto: data.contacto,
       email: data.email, telefono: data.telefono, sector: data.sector,
     });
     const msg = `✅ ¡Perfecto! Registramos la información de *${data.empresa||"su empresa"}* en nuestra base de proveedores.\n\nCuando tengamos necesidades en su área, los contactaremos. ¡Gracias! 🏗️`;
     await sendText(from, msg);
-
     for (const sup of SUPERVISORES) {
       sendText(sup, `🏭 *Nuevo proveedor registrado*\n\n📱 ${from}\n🏢 ${data.empresa||"—"}\n👤 ${data.contacto||"—"}\n📧 ${data.email||"—"}\n📞 ${data.telefono||"—"}\n🏗️ ${data.sector||"—"}\n\n_Sasha — Bot SSR_`).catch(() => {});
     }
   }
 }
 
-// ── Detectar nombre de día O fecha específica ─────────────────────────────────
+// ── Detectar día/fecha ────────────────────────────────────────────────────────
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
   if (n.includes("lunes"))   return "lunes";
   if (n.includes("martes"))  return "martes";
   if (n.includes("viernes")) return "viernes";
-
   const MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
   for (const mes of MONTHS) {
     const re = new RegExp(`(\\d{1,2})\\s+(?:de\\s+)?${mes}`, "i");
     const m  = n.match(re);
     if (m) return `${m[1]} de ${mes}`;
   }
-
   const m2 = n.match(/\b(\d{1,2})\/(\d{1,2})\b/);
   if (m2) return `${m2[1]}/${m2[2]}`;
-
   return null;
 }
 
@@ -392,23 +459,19 @@ function detectDayOrDate(text) {
 function parseFlags(response) {
   const flagRegex    = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*)|SOLICITANTE|PROVEEDOR)\]\s*$/;
   const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
-  const match = response.match(flagRegex);
-
+  const match        = response.match(flagRegex);
   if (!match) return { cleanMessage: response.replace(sistemaRegex, "").trim(), flag: null, flagData: null };
-
   const cleanMessage = response.replace(flagRegex, "").replace(sistemaRegex, "").trim();
   const fullFlag     = match[1];
-
   if (fullFlag === "ESCALAR")     return { cleanMessage, flag: "ESCALAR",     flagData: null };
   if (fullFlag === "SOLICITANTE") return { cleanMessage, flag: "SOLICITANTE", flagData: null };
   if (fullFlag === "PROVEEDOR")   return { cleanMessage, flag: "PROVEEDOR",   flagData: null };
   if (fullFlag.startsWith("LEAD:"))   return { cleanMessage, flag: "LEAD",   flagData: fullFlag.slice(5) };
   if (fullFlag.startsWith("VISITA:")) return { cleanMessage, flag: "VISITA", flagData: fullFlag.slice(7) };
-
   return { cleanMessage, flag: null, flagData: null };
 }
 
-// ── Notificar a todos los supervisores ───────────────────────────────────────
+// ── Notificar supervisores ────────────────────────────────────────────────────
 async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   const header = {
     visita_solicitada: "🏗️ NUEVA VISITA AGENDADA",
@@ -436,7 +499,6 @@ async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   });
 }
 
-// ── Log de lead ───────────────────────────────────────────────────────────────
 function logLead(from, session, tipo = "lead") {
   console.log("📋 LEAD:", JSON.stringify({
     tipo, ts: new Date().toISOString(),
