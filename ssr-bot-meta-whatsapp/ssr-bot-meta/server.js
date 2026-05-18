@@ -684,6 +684,37 @@ app.post("/api/transcribir-voz", async (req, res) => {
   }
 });
 
+// ── SETUP TEMPORAL — Crear campaña Meta Ads ───────────────────────────────────
+// Llamar UNA SOLA VEZ desde el navegador para crear la campaña en Meta Ads.
+// URL: https://ssr-whatsapp-bot-production.up.railway.app/api/crear-campana?token=ssr2026bot_secure
+// IMPORTANTE: Borrar este endpoint después de usarlo.
+app.get("/api/crear-campana", async (req, res) => {
+  if (req.query.token !== process.env.WEBHOOK_VERIFY_TOKEN) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+  try {
+    const { execFile } = require("child_process");
+    execFile(
+      "node",
+      ["scripts/crear_campana_cocinas.js"],
+      { env: process.env, cwd: "/app" },
+      (error, stdout, stderr) => {
+        if (error) {
+          console.error("❌ crear-campana error:", error.message);
+          return res.json({ ok: false, error: error.message, detalle: stderr });
+        }
+        console.log("✅ crear-campana finalizado");
+        res.json({ ok: true, resultado: stdout });
+      }
+    );
+    // Responder inmediatamente que está procesando (puede tardar ~30s)
+    // El resultado llega cuando execFile termina
+  } catch (err) {
+    console.error("❌ /api/crear-campana:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ── Servidor ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`
