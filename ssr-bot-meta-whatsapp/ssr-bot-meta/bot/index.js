@@ -141,12 +141,25 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       // Claude detectó que quiere enviar un mensaje
       const telefono = await outbound.resolverTelefono(interpretacion.destino);
       if (!telefono) {
-        await sendText(from, `❌ No encontré a *"${interpretacion.destino}"* en los clientes.\nIntentá con el número: _enviar a +506XXXXXXXX: [mensaje]_`);
+        await sendText(from, `❌ No encontré a *"${interpretacion.destino}"* en los clientes.\nIntentá con el número: _enviar a +506XXXXXXXX: [instrucción]_`);
       } else {
-        const resultado = await outbound.enviarProactivo(telefono, interpretacion.mensaje);
+        // Obtener nombre del cliente para personalizar
+        let clientName = interpretacion.destino;
+        try {
+          const crmRows = await memoria.buscarClienteEnCRM(interpretacion.destino);
+          if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
+        } catch { /* no critical */ }
+
+        // Redactar mensaje profesional
+        const mensajeProfesional = await outbound.componerMensajeProfesional(interpretacion.mensaje, clientName);
+
+        const resultado = await outbound.enviarProactivo(telefono, mensajeProfesional);
         if (resultado.ok) {
-          memoria.guardarMensaje({ phone: "+" + telefono, clientName: interpretacion.destino, direction: "out", type: "text", content: `[OUTBOUND] ${interpretacion.mensaje}` }).catch(() => {});
-          await sendText(from, `✅ *Mensaje enviado*\n📱 +${telefono}\n💬 _"${interpretacion.mensaje.slice(0, 100)}"_`);
+          memoria.guardarMensaje({ phone: "+" + telefono, clientName, direction: "out", type: "text", content: `[OUTBOUND] ${mensajeProfesional}` }).catch(() => {});
+          await sendText(from,
+            `✅ *Mensaje enviado*\n📱 +${telefono}\n\n` +
+            `📝 *Sasha redactó:*\n${mensajeProfesional}`
+          );
         } else {
           await sendText(from, `❌ Error al enviar: ${resultado.error}`);
         }
