@@ -548,6 +548,8 @@ module.exports = {
   buscarPorNombre,
   buscarPorContenido,
   listarClientes,
+  listarClientesCRM,
+  buscarClienteEnCRM,
   obtenerFotos,
   formatearMensajes,
   esConsultaMemoria,
