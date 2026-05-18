@@ -146,11 +146,78 @@ app.get("/webhook", (req, res) => {
   res.sendStatus(403);
 });
 
-// ── Webhook messages ───────────────────────────────────────────────────────────
+// ── Webhook messages (WhatsApp + Facebook + Instagram) ───────────────────────
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
   try {
     const body = req.body;
+
+    // ── Facebook Messenger DMs y comentarios ─────────────────────────────────
+    if (body?.object === "page") {
+      const { handleFBDM, handleFBComment } = require("./bot/social");
+      for (const entry of (body.entry || [])) {
+        // DMs de Messenger
+        for (const event of (entry.messaging || [])) {
+          const senderId   = event.sender?.id;
+          const pageId     = event.recipient?.id;
+          const fbPageId   = process.env.FB_PAGE_ID;
+          if (!senderId || senderId === pageId || senderId === fbPageId) continue;
+          const text = event.message?.text;
+          if (!text) continue;
+          console.log(`💙 FB Messenger de ${senderId}: "${text.substring(0, 60)}"`);
+          handleFBDM(senderId, text, null).catch(e => console.error("❌ handleFBDM:", e.message));
+        }
+        // Comentarios en posts de la página
+        for (const change of (entry.changes || [])) {
+          if (change.field !== "feed") continue;
+          const val = change.value;
+          if (val?.item !== "comment" || val?.verb !== "add") continue;
+          const commentId = val.comment_id;
+          const texto     = val.message;
+          const userName  = val.from?.name || "Usuario";
+          const postId    = val.post_id;
+          if (!commentId || !texto) continue;
+          // No responder comentarios propios de la página
+          if (val.from?.id === process.env.FB_PAGE_ID) continue;
+          console.log(`💙 FB Comentario de ${userName}: "${texto.substring(0, 60)}"`);
+          handleFBComment(commentId, texto, userName, postId).catch(e => console.error("❌ handleFBComment:", e.message));
+        }
+      }
+      return;
+    }
+
+    // ── Instagram DMs y comentarios ───────────────────────────────────────────
+    if (body?.object === "instagram") {
+      const { handleIGDM, handleIGComment } = require("./bot/social");
+      const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
+      for (const entry of (body.entry || [])) {
+        // DMs de Instagram
+        for (const event of (entry.messaging || [])) {
+          const senderId = event.sender?.id;
+          if (!senderId || senderId === igAccountId) continue;
+          const text = event.message?.text;
+          if (!text) continue;
+          console.log(`🟣 IG DM de ${senderId}: "${text.substring(0, 60)}"`);
+          handleIGDM(senderId, text, null).catch(e => console.error("❌ handleIGDM:", e.message));
+        }
+        // Comentarios en posts de Instagram
+        for (const change of (entry.changes || [])) {
+          if (change.field !== "comments") continue;
+          const val       = change.value;
+          const commentId = val?.id;
+          const texto     = val?.text;
+          const userId    = val?.from?.id;
+          const mediaId   = val?.media?.id || "unknown";
+          if (!commentId || !texto || !userId) continue;
+          if (userId === igAccountId) continue; // no responder comentarios propios
+          console.log(`🟣 IG Comentario de ${userId}: "${texto.substring(0, 60)}"`);
+          handleIGComment(commentId, texto, userId, mediaId).catch(e => console.error("❌ handleIGComment:", e.message));
+        }
+      }
+      return;
+    }
+
+    // ── WhatsApp ──────────────────────────────────────────────────────────────
     if (body?.object !== "whatsapp_business_account") return;
     const messages = body.entry?.[0]?.changes?.[0]?.value?.messages;
     if (!messages?.length) return;
