@@ -1,5 +1,9 @@
-// Envío de mensajes vía Meta WhatsApp Business API
+// messenger.js — Envío de mensajes vía Meta WhatsApp Business API
 // Docs: https://developers.facebook.com/docs/whatsapp/cloud-api/messages
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANGELOG v2:
+//   + sendTemplate() — mensajes fuera de ventana 24h (HSM/plantillas aprobadas)
+// ─────────────────────────────────────────────────────────────────────────────
 
 const GRAPH_URL = "https://graph.facebook.com/v19.0";
 
@@ -50,11 +54,41 @@ async function sendList(to, bodyText, buttonLabel, sections) {
 }
 
 /**
+ * Envía un Message Template (HSM) aprobado por Meta.
+ * OBLIGATORIO para contactar clientes que no escribieron en las últimas 24h.
+ *
+ * @param {string} to           - Teléfono destino (con +)
+ * @param {string} templateName - Nombre exacto del template en Meta (ej: "ssr_mensaje_general")
+ * @param {string} languageCode - Código de idioma (ej: "es", "en_US")
+ * @param {Array}  components   - Parámetros del template
+ *
+ * Ejemplo para template con variable {{1}} en el body:
+ * sendTemplate("+50688887777", "ssr_mensaje_general", "es", [
+ *   { type: "body", parameters: [{ type: "text", text: "Tu mensaje aquí" }] }
+ * ])
+ *
+ * Docs: https://developers.facebook.com/docs/whatsapp/cloud-api/messages/template-messages
+ */
+async function sendTemplate(to, templateName, languageCode = "es", components = []) {
+  const payload = {
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: languageCode },
+    },
+  };
+  if (components && components.length > 0) {
+    payload.template.components = components;
+  }
+  return _post(to, payload);
+}
+
+/**
  * Reenvía una imagen/audio/video usando el Media ID de Meta
  * (no requiere re-subir el archivo, usa el ID que ya está en Meta)
- * @param {string} to - número destino
+ * @param {string} to      - número destino
  * @param {string} mediaId - Media ID recibido en el webhook
- * @param {string} type - "image" | "audio" | "video" | "document"
+ * @param {string} type    - "image" | "audio" | "video" | "document"
  * @param {string} caption - (opcional) texto debajo de la imagen
  */
 async function sendMediaById(to, mediaId, type = "image", caption = null) {
@@ -71,7 +105,6 @@ async function sendMediaById(to, mediaId, type = "image", caption = null) {
 async function downloadMedia(mediaId) {
   const token = process.env.WHATSAPP_TOKEN;
 
-  // Paso 1: obtener la URL de descarga desde Meta
   const metaRes = await fetch(`${GRAPH_URL}/${mediaId}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -80,7 +113,6 @@ async function downloadMedia(mediaId) {
   }
   const { url, mime_type } = await metaRes.json();
 
-  // Paso 2: descargar el archivo real
   const imgRes = await fetch(url, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -116,7 +148,7 @@ async function markRead(messageId) {
     });
     return res.ok;
   } catch {
-    return false; // No es crítico si falla
+    return false;
   }
 }
 
@@ -143,10 +175,13 @@ async function _post(to, messageFields) {
 
   const data = await res.json();
   if (!res.ok) {
+    const err = new Error(`Meta API error: ${data?.error?.message || res.status}`);
+    err.status = res.status;
+    err.meta   = data?.error;
     console.error(`❌ Meta API error (${res.status}):`, JSON.stringify(data));
-    throw new Error(`Meta API error: ${data?.error?.message || res.status}`);
+    throw err;
   }
   return data;
 }
 
-module.exports = { sendText, sendButtons, sendList, markRead, downloadMedia, sendMediaById };
+module.exports = { sendText, sendButtons, sendList, sendTemplate, markRead, downloadMedia, sendMediaById };
