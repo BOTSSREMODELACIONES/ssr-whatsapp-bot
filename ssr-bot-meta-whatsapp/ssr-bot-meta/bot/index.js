@@ -6,9 +6,16 @@ const { sendVisitConfirmation }      = require("./email");
 const { upsertLead, registerVisit }  = require("./crm");
 const KNOWLEDGE                      = require("./knowledge");
 const memoria                        = require("./memoria");
+const outbound                       = require("./outbound");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
-const SUPERVISORES = ["+50683091817", "+50671981370"];
+// ── Administradores / Supervisores ───────────────────────────────────────────
+const SUPERVISORES = [
+  "+50683091817",  // Darwin
+  "+50670068477",  // Darwin (segundo número)
+  "+50671981370",  // Melvin
+  "+50662052075",  // Jessy
+];
 
 // Números exactos a ignorar completamente
 const IGNORAR = [];
@@ -38,15 +45,67 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     return;
   }
 
-  // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
+  // ── MODO SUPERVISOR / ADMINISTRADOR ─────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
+
   if (esSupervisor && normalized) {
+    // 1. Registrar timestamp para ventana de 24h de outbound (no aplica a supervisores como destino)
+    //    — no se registra aquí, solo clientes
+
+    // 2. Menú de ayuda
+    if (/^(ayuda|help|\?|menu|comandos)$/i.test(normalized.trim())) {
+      await sendText(from, [
+        "🤖 *Comandos Sasha — Panel Admin*",
+        "",
+        "📋 *HISTORIAL DE CLIENTES:*",
+        "  • `historial [nombre]`",
+        "  • `historial +50688887777`",
+        "  • `qué habló María González`",
+        "  • `fotos de Juan Pérez`",
+        "  • `listar clientes`",
+        "  • `buscar remodelación cocina`",
+        "",
+        "📤 *ENVIAR MENSAJES PROACTIVOS:*",
+        "  • `enviar a [nombre]: [mensaje]`",
+        "  • `enviar a +506XXXXXXXX: [mensaje]`",
+        "  • `mensaje para [nombre]: [mensaje]`",
+        "  • `contactar [nombre]: [mensaje]`",
+        "  • `avisar a [nombre]: [mensaje]`",
+        "",
+        "💡 *Ejemplos:*",
+        "  _enviar a María González: Confirmamos su visita del jueves a las 10am_",
+        "  _contactar +50688884444: Buenos días, su cotización está lista_",
+        "  _historial +50688887777_",
+        "  _listar clientes_",
+      ].join("\n"));
+      return;
+    }
+
+    // 3. Comando outbound (enviar a cliente X: mensaje)
+    const respuestaOutbound = await outbound.procesarComandoOutbound(normalized);
+    if (respuestaOutbound) {
+      await sendText(from, respuestaOutbound);
+      return;
+    }
+
+    // 4. Consulta de memoria (historial, listar, buscar...)
     const respuestaMemoria = await memoria.procesarConsultaMemoria(normalized);
     if (respuestaMemoria) {
       await sendText(from, respuestaMemoria);
       return;
     }
+
+    // 5. Si no es ningún comando reconocido, informar al admin
+    await sendText(from, [
+      "⚙️ No reconocí ese comando.",
+      "",
+      "Escribí *ayuda* para ver todos los comandos disponibles.",
+    ].join("\n"));
+    return;
   }
+
+  // ── Registrar timestamp de mensaje entrante (para ventana 24h de outbound) ──
+  outbound.registrarMensajeEntrante(from);
 
   if (session.escalated) return;
 
@@ -109,8 +168,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
-    // ── NUEVO v4: Detectar día/fecha para disponibilidad ──────────────────────
-    // Ahora maneja tanto "martes" como "19 de mayo", "19/05", etc.
+    // ── Detectar día/fecha para disponibilidad ────────────────────────────────
     const dayMentioned = detectDayOrDate(normalized);
     let availabilityContext = "";
 
@@ -208,7 +266,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           phone:       from,
           project:     updated.project_desc,
           zone:        updated.zone,
-          day:         updated.visit_day,    // ← ahora puede ser "19 de mayo" o "martes"
+          day:         updated.visit_day,
           hour:        updated.visit_hour,
           wazeLink:    updated.waze_link,
           clientEmail: updated.client_email,
@@ -309,7 +367,7 @@ async function handleRRHHFlow(from, text, session, tipo) {
   }
 }
 
-// ── NUEVO: detectar nombre de día O fecha específica ─────────────────────────
+// ── Detectar nombre de día O fecha específica ─────────────────────────────────
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -330,6 +388,7 @@ function detectDayOrDate(text) {
   return null;
 }
 
+// ── Parsear flags de Claude ───────────────────────────────────────────────────
 function parseFlags(response) {
   const flagRegex    = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*)|SOLICITANTE|PROVEEDOR)\]\s*$/;
   const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
@@ -349,6 +408,7 @@ function parseFlags(response) {
   return { cleanMessage, flag: null, flagData: null };
 }
 
+// ── Notificar a todos los supervisores ───────────────────────────────────────
 async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   const header = {
     visita_solicitada: "🏗️ NUEVA VISITA AGENDADA",
@@ -376,6 +436,7 @@ async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   });
 }
 
+// ── Log de lead ───────────────────────────────────────────────────────────────
 function logLead(from, session, tipo = "lead") {
   console.log("📋 LEAD:", JSON.stringify({
     tipo, ts: new Date().toISOString(),
