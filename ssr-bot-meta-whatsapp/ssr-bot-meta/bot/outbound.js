@@ -2,38 +2,12 @@
  * outbound.js — Mensajes Proactivos / Salientes
  * SS Remodelaciones — Sasha Bot
  *
- * Permite a Darwin, Melvin y Jessy ordenarle a Sasha que contacte
- * a un cliente sin que este haya escrito primero.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * RESTRICCIÓN DE META (importante):
- * Fuera de la ventana de 24h desde el último mensaje del cliente,
- * Meta solo acepta Message Templates aprobados (HSM).
- * Este módulo detecta la ventana automáticamente y usa el método correcto.
- *
- * TEMPLATE REQUERIDO (crear en Meta Business Manager):
- *  Nombre:    ssr_mensaje_general
- *  Categoría: UTILITY
- *  Idioma:    es
- *  Cuerpo:    {{1}}
- *  Pie:       SS Remodelaciones
- *
- *  Crear en: business.facebook.com → Cuenta WhatsApp → Plantillas de mensajes
- * ─────────────────────────────────────────────────────────────────────────────
- *
- * COMANDOS DISPONIBLES (desde WhatsApp de cualquier admin):
- *  enviar a +50688887777: [mensaje]
- *  enviar a María González: [mensaje]
- *  mensaje para +506XXXXXXXX: [mensaje]
- *  contactar +50688887777: [mensaje]
- *  avisar a Juan Pérez: [mensaje]
- *  dile a Carlos: [mensaje]
- *
- * ENDPOINT HTTP (para Make / n8n):
- *  POST /api/outbound
- *  Headers: x-outbound-token: [OUTBOUND_SECRET]
- *  Body: { "to": "+50688887777", "message": "..." }
- *        { "nombre": "María González", "message": "..." }
+ * COMANDOS NATURALES (no requieren formato exacto):
+ *  envíale a María González: mensaje
+ *  manda a +50688887777, dile que mañana es la visita
+ *  enviar a 88887777 que la cita es a las 10am
+ *  escríbele a Juan Pérez: hola, confirmamos
+ *  contactar +50688887777: texto
  */
 
 const { sendText, sendTemplate } = require("./messenger");
@@ -60,6 +34,7 @@ function limpiarTelefono(phone) {
   return clean;
 }
 
+// ── Envío proactivo ───────────────────────────────────────────────────────────
 async function enviarProactivo(to, message) {
   const cleanPhone = limpiarTelefono(to);
   const toE164     = "+" + cleanPhone;
@@ -84,7 +59,6 @@ async function enviarProactivo(to, message) {
       } catch (templateErr) {
         console.warn(`⚠️ Template falló (${templateErr.message}), intentando texto libre...`);
         await sendText(toE164, message.trim());
-        console.log(`✅ Outbound [texto libre fallback] → ${toE164}`);
         return { ok: true, method: "free_text_fallback" };
       }
     }
@@ -94,8 +68,9 @@ async function enviarProactivo(to, message) {
   }
 }
 
+// ── Resolver teléfono por nombre ──────────────────────────────────────────────
 async function resolverTelefono(nombreOTelefono) {
-  const clean      = (nombreOTelefono || "").trim();
+  const clean       = (nombreOTelefono || "").trim();
   const soloDigitos = clean.replace(/\D/g, "");
   if (soloDigitos.length >= 8) return limpiarTelefono(clean);
 
@@ -105,16 +80,11 @@ async function resolverTelefono(nombreOTelefono) {
       console.log(`🔍 Outbound MENSAJES: "${clean}" → ${rows[0][1]}`);
       return limpiarTelefono(rows[0][1]);
     }
-
-    const clientes   = await memoria.listarClientes();
-    const normalizado = clean.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    const match = clientes.find(r => {
-      const nombre = (r[1] || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-      return nombre.includes(normalizado) || normalizado.includes((nombre.split(" ")[0] || ""));
-    });
-    if (match) {
-      console.log(`🔍 Outbound CLIENTES: "${clean}" → ${match[0]}`);
-      return limpiarTelefono(match[0]);
+    // Buscar en CRM
+    const crmRows = await memoria.buscarClienteEnCRM(clean);
+    if (crmRows && crmRows.length > 0 && crmRows[0][1]) {
+      console.log(`🔍 Outbound CRM: "${clean}" → ${crmRows[0][1]}`);
+      return limpiarTelefono(crmRows[0][1]);
     }
   } catch (err) {
     console.warn("⚠️ Outbound: error buscando en memoria:", err.message);
@@ -122,19 +92,55 @@ async function resolverTelefono(nombreOTelefono) {
   return null;
 }
 
+// ── Parser de lenguaje natural ────────────────────────────────────────────────
+/**
+ * Detecta comandos de envío en lenguaje natural.
+ * Soporta múltiples formatos sin requerir sintaxis exacta.
+ */
 function parsearComandoOutbound(text) {
-  const PATRONES = [
-    /^(?:enviar\s+a|mensaje\s+para|contactar|escribir\s+a|escrib[ií]le?\s+a)\s+(.+?):\s*(.+)/is,
-    /^(?:avisar\s+a|av[íi]sale?\s+a|notific(?:ar\s+a|a)\s+)\s*(.+?):\s*(.+)/is,
-    /^(?:dile?\s+a|dec[ií]le?\s+a)\s+(.+?):\s*(.+)/is,
+  const t = text.trim();
+
+  // ── Formato con dos puntos: "enviar a X: mensaje" ──────────────────────────
+  const conDosPuntos = [
+    /^(?:enviar?\s+(?:un\s+mensaje\s+)?a|mensaje\s+para|contactar|escrib[ií]r?\s+a|escrib[ií]le?\s+(?:un\s+mensaje\s+)?a|env[ií]ale?\s+(?:un\s+mensaje\s+)?a)\s+(.+?):\s*(.+)/is,
+    /^(?:av[ií]sale?\s+a|notific(?:ar\s+a|ale?\s+a)|d[ií]le?\s+a|dec[ií]le?\s+a|mand(?:ar?\s+a|ale?\s+a))\s+(.+?):\s*(.+)/is,
   ];
-  for (const patron of PATRONES) {
-    const match = text.trim().match(patron);
-    if (match) return { destino: match[1].trim(), mensaje: match[2].trim() };
+  for (const p of conDosPuntos) {
+    const m = t.match(p);
+    if (m) return { destino: m[1].trim(), mensaje: m[2].trim() };
   }
+
+  // ── Formato con coma: "envíale a X, indíquele que Y" ──────────────────────
+  const conComa = [
+    /^(?:enviar?\s+(?:un\s+mensaje\s+)?a|env[ií]ale?\s+(?:un\s+mensaje\s+)?a|escrib[ií]le?\s+a|mand(?:ar?\s+a|ale?\s+a))\s+(.+?),\s*(?:ind[ií][cq]ue?le?|d[ií]gale?|com[uú]n[ií][cq]ue?le?|dile?|que)\s*(?:que\s+)?(.+)/is,
+  ];
+  for (const p of conComa) {
+    const m = t.match(p);
+    if (m) return { destino: m[1].trim(), mensaje: m[2].trim() };
+  }
+
+  // ── Formato con "que": "envíale a X que Y" ─────────────────────────────────
+  const conQue = [
+    /^(?:env[ií]ale?\s+(?:un\s+mensaje\s+)?a|d[ií]le?\s+a|av[ií]sale?\s+a|mand(?:ar?\s+a|ale?\s+a))\s+(.+?)\s+que\s+(.+)/is,
+  ];
+  for (const p of conQue) {
+    const m = t.match(p);
+    if (m) return { destino: m[1].trim(), mensaje: m[2].trim() };
+  }
+
+  // ── Teléfono seguido directo de mensaje (sin separador) ────────────────────
+  // "enviar a +50688887777 hola buenos días"
+  const conTelefono = /^(?:enviar?\s+a|env[ií]ale?\s+a|escrib[ií]le?\s+a|mand(?:ar?\s+a|ale?\s+a))\s+([+]?[\d\s]{8,15})\s+(.+)/is;
+  const mTel = t.match(conTelefono);
+  if (mTel) {
+    const posibleTel = mTel[1].replace(/\D/g, "");
+    if (posibleTel.length >= 8) return { destino: mTel[1].trim(), mensaje: mTel[2].trim() };
+  }
+
   return null;
 }
 
+// ── Procesar comando desde WhatsApp de admin ──────────────────────────────────
 async function procesarComandoOutbound(commandText) {
   const parsed = parsearComandoOutbound(commandText);
   if (!parsed) return null;
@@ -144,7 +150,7 @@ async function procesarComandoOutbound(commandText) {
 
   if (!telefono) {
     return (
-      `❌ No encontré a *"${destino}"* en la memoria de clientes.\n\n` +
+      `❌ No encontré a *"${destino}"* en los clientes.\n\n` +
       `Intentá con el número directo:\n` +
       `_enviar a +506XXXXXXXX: [tu mensaje]_`
     );
