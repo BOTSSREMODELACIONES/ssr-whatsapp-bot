@@ -7,7 +7,7 @@ const Anthropic = require("@anthropic-ai/sdk");
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 // URL del Apps Script desplegado como Web App (ver instrucciones abajo)
-const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || "";
+const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || "https://script.google.com/macros/s/AKfycbxpOjoxmar3WsfqwFS1EXJN4uYApUtXph08NSt_q35_6QIX-IP0SuFEqNFqhExRKIvx/exec";
 
 // ID de tu Google Sheets (el de la URL del archivo)
 const SHEETS_ID = process.env.SHEETS_ID || "1H8DxPYEIECGQ-UwBz8ex76fam5_OCbS7";
