@@ -75,15 +75,18 @@ ${proyectosCtx}
 
 REGLAS DE INTERPRETACIÓN:
 - "X mil" = X*1000. "medio millón" = 500000
+- FORMATO COSTARRICENSE: el punto es separador de miles — "4.500" = 4500, "1.200.000" = 1200000
 - Sin fecha = hoy: ${TODAY()}
-- Detectá proyecto por alias: "fede" → PROY 018/2026, "sergio" → PROY 001/2026
-- Proyectos cerrados también reciben gastos (garantías, reparaciones) — no los rechaces
+- Detectá proyecto por alias: "fede" → PROY 028/2026, "sergio" → PROY 001/2026
+- Proyectos cerrados también reciben gastos (garantías, reparaciones)
 - EPA, Ferretería, Construplaza = categoría "Materiales"
 - Gasolina, combustible, diésel = categoría "Gasolina"
 - "planilla", "sueldo", pago a trabajador = tipo PLANILLA
-- "me pagaron", "adelanto", "abono de cliente", "depósito" = tipo INGRESO
+- "me pagaron", "adelanto", "abono de cliente", "depósito", "ingreso" = tipo INGRESO
 - "inventario", "para bodega", "para stock" = tipo INVENTARIO
 - "gimnasio", gastos personales ajenos a SSR = es_personal: true
+- Si recibís MÚLTIPLES instrucciones en un mensaje, procesá SOLO LA PRIMERA y devolvé un JSON válido con su monto
+- NUNCA devuelvas monto: 0 ni monto: null — si no podés detectar el monto, usá tu mejor estimación
 
 REGLA CRÍTICA — campo proyecto_codigo:
 - Si mencionan un cliente/proyecto específico → usar el código del proyecto (ej: "PROY 018/2026")
