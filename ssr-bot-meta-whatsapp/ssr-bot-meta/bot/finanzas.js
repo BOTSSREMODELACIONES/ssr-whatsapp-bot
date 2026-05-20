@@ -1,6 +1,5 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
-// Ubicación: ssr-bot-meta-whatsapp/ssr-bot-meta/bot/finanzas.js
 // ============================================================
 
 const Anthropic = require("@anthropic-ai/sdk");
@@ -34,12 +33,14 @@ const KEYWORDS_FINANZAS = [
   "carga","cargá","cargame","cárgame","cargalo","cargar",
   "registra","registrame","registrá","anota","apunta",
   "ingreso","adelanto","abono","depósito","deposito",
-  "planilla","sueldo","salario","quincena",
+  "planilla","sueldo","salario","quincena","jornal",
+  "trabajó","trabajo","trabajaron","horas","hora",
+  "vale","adelanto planilla",
   "subcontrato","subcontratista",
   "materiales","herramientas","gasolina","combustible","diesel","diésel",
   "transporte","flete","almuerzo","comida","alimentacion",
   "ferretería","ferreteria","epa","construplaza",
-  "bodega","inventario","mano de obra","jornal",
+  "bodega","inventario","mano de obra",
   "alquiler","contabilidad","seguro","luz","electricidad","agua","internet",
   "colones","mil colones","millones","efectivo","transferencia","sinpe","tarjeta",
 ];
@@ -62,48 +63,57 @@ PROYECTOS (activos y cerrados — ambos reciben gastos):
 ${proyectosCtx}
 
 REGLAS DE INTERPRETACIÓN:
-- NÚMEROS COSTARRICENSES: el punto es separador de miles → "4.500" = 4500, "1.200.000" = 1200000
+- NÚMEROS COSTARRICENSES: punto = separador de miles → "4.500" = 4500, "1.200.000" = 1200000
 - "X mil" = X*1000. "medio millón" = 500000
 - Sin fecha = hoy: ${TODAY()}
-- Detectá proyecto por alias: "juan diego" → PROY 045/2026, "fede" → PROY 028/2026
-- Proyectos cerrados también reciben gastos (garantías, reparaciones)
-- EPA, Ferretería, Construplaza = "Materiales". Gasolina/diésel = "Gasolina"
-- "planilla","sueldo" = PLANILLA. "me pagaron","adelanto","abono","ingreso" = INGRESO
-- Gastos operativos sin proyecto (luz, alquiler, contabilidad, internet, etc.) → proyecto_codigo = "SSR"
-- Gastos personales (gimnasio, etc.) → es_personal: true
-- SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales
+- Detectá proyecto por alias. Proyectos cerrados también reciben gastos
+- Gastos operativos sin proyecto → proyecto_codigo = "SSR"
+- SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales, EXCEPTO para entradas de planilla sin monto definido
 
 PESTAÑAS — SOLO ESTOS NOMBRES:
 - "GASTOS_PROYECTO" → cualquier gasto
 - "INGRESOS_CLIENTES" → pago de cliente
-- "BASE_PLANILLA" → pago a empleado
+- "BASE_PLANILLA" → registro de horas trabajadas y planilla
 - "INVENTARIO" → compra para bodega
 - "SUBCONTRATOS" → pago a subcontratista
-PROHIBIDO: "GASTOS_GENERALES" u otros nombres inventados.
+
+REGLAS PARA PLANILLA (horas trabajadas):
+Cuando alguien dice "X trabajó N horas" o "X y Y trabajaron N horas":
+- tipo = "PLANILLA"
+- pestaña_principal = "BASE_PLANILLA"
+- pestanas_adicionales = [] (sin CAJA_GENERAL porque no se sabe el monto total aún)
+- monto = 0 (el total bruto se calcula después con la tarifa)
+- Usá el campo "horas" para las horas trabajadas
+- Usá el campo "vale_colones" para el vale (adelanto en efectivo), 0 si no hay vale
+- Si hay vale, el vale SÍ va a CAJA_GENERAL como salida separada
+- Cada trabajador = un objeto separado en el array
+- Si se menciona un vale, creá un objeto adicional tipo GASTO para registrarlo en CAJA_GENERAL:
+  { tipo: "GASTO", descripcion: "Vale planilla [nombre]", monto: [vale], proyecto_codigo: proyecto, pestaña_principal: "GASTOS_PROYECTO", pestanas_adicionales: ["CAJA_GENERAL"] }
 
 INSTRUCCIONES MÚLTIPLES:
-Si el mensaje contiene MÁS DE UNA operación financiera, devolvés un ARRAY JSON con un objeto por operación.
-Si es UNA SOLA operación, devolvés un ARRAY con un único objeto.
-SIEMPRE devolvés un array, nunca un objeto suelto.
+Siempre devolvés un ARRAY JSON. Un objeto por operación o trabajador.
+Si hay 2 trabajadores = 2 objetos de planilla + 1 objeto por cada vale.
 
-Formato de cada objeto del array:
+Formato de cada objeto:
 {
   "fecha": "YYYY-MM-DD",
-  "monto": 45000,
-  "tipo": "GASTO",
-  "proyecto": "nombre o SS Remodelaciones si es operativo",
+  "monto": 0,
+  "horas": 9,
+  "vale_colones": 15000,
+  "tipo": "PLANILLA",
+  "proyecto": "nombre del proyecto",
   "proyecto_codigo": "PROY XXX/YYYY o SSR",
-  "cliente": "nombre o null",
-  "categoria": "Gasolina",
-  "descripcion": "3-6 palabras",
-  "proveedor": "nombre o null",
-  "forma_pago": "Efectivo|Transferencia|SINPE|Tarjeta|null",
-  "responsable": "nombre o null",
+  "cliente": null,
+  "categoria": "Mano de obra",
+  "descripcion": "Planilla Fernando - 9h",
+  "responsable": "Fernando",
+  "proveedor": null,
+  "forma_pago": null,
   "es_personal": false,
-  "pestaña_principal": "GASTOS_PROYECTO",
-  "pestanas_adicionales": ["CAJA_GENERAL"],
+  "pestaña_principal": "BASE_PLANILLA",
+  "pestanas_adicionales": [],
   "confianza": 95,
-  "observaciones": "nota o null"
+  "observaciones": "Vale: ₡15.000" 
 }
 
 Respondé ÚNICAMENTE con JSON array válido, sin markdown, sin texto extra.`;
@@ -121,14 +131,13 @@ async function interpretarMovimientos(texto) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const response = await client.messages.create({
     model: "claude-sonnet-4-5",
-    max_tokens: 1200,
+    max_tokens: 1500,
     system: buildSystemPrompt(),
     messages: [{ role: "user", content: texto }],
   });
   const raw   = response.content[0]?.text || "[]";
   const clean = raw.replace(/```json\n?|\n?```/g, "").trim();
   const parsed = JSON.parse(clean);
-  // Normalizar: si Claude devuelve objeto suelto en vez de array
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
@@ -147,7 +156,7 @@ function formatCRC(n) {
   return `₡${Number(n).toLocaleString("es-CR")}`;
 }
 
-function generarConfirmacionItem(data, resultado, index, total) {
+function generarConfirmacionItem(data, index, total) {
   const tipos = {
     GASTO:      { emoji: "💸", label: "Gasto" },
     INGRESO:    { emoji: "💰", label: "Ingreso" },
@@ -155,38 +164,43 @@ function generarConfirmacionItem(data, resultado, index, total) {
     INVENTARIO: { emoji: "📦", label: "Inventario" },
   };
   const cfg = tipos[data.tipo] || { emoji: "📋", label: data.tipo };
-  const prefijo = total > 1 ? `*${index + 1} de ${total}*\n` : "";
+  const prefijo = total > 1 ? `*${index + 1}/${total}* ` : "";
 
-  const lineas = [
-    `${prefijo}${cfg.emoji} *${cfg.label} registrado*`,
-    `📝 ${data.descripcion}`,
-    `💵 *${formatCRC(data.monto)}*`,
-  ];
-  if (data.proyecto_codigo && data.proyecto_codigo !== "SSR")
-    lineas.push(`🏗️ ${data.proyecto_codigo}`);
-  else if (data.proyecto_codigo === "SSR")
-    lineas.push(`🏢 Gasto operativo SSR`);
-  if (data.cliente) lineas.push(`👤 ${data.cliente}`);
+  const lineas = [`${prefijo}${cfg.emoji} *${cfg.label} registrado*`, `📝 ${data.descripcion}`];
+
+  if (data.tipo === "PLANILLA") {
+    if (data.horas)        lineas.push(`🕐 ${data.horas} horas`);
+    if (data.vale_colones) lineas.push(`💵 Vale: *${formatCRC(data.vale_colones)}*`);
+    if (data.proyecto_codigo && data.proyecto_codigo !== "SSR")
+      lineas.push(`🏗️ ${data.proyecto_codigo}`);
+  } else {
+    lineas.push(`💵 *${formatCRC(data.monto)}*`);
+    if (data.proyecto_codigo && data.proyecto_codigo !== "SSR")
+      lineas.push(`🏗️ ${data.proyecto_codigo}`);
+    else if (data.proyecto_codigo === "SSR")
+      lineas.push(`🏢 SSR`);
+    if (data.cliente) lineas.push(`👤 ${data.cliente}`);
+  }
   lineas.push(`📊 ${data.pestaña_principal}`);
   if (data.observaciones) lineas.push(`📌 ${data.observaciones}`);
   return lineas.join("\n");
 }
 
-// ─── Función principal ────────────────────────────────────────
 async function procesarComandoFinanciero(texto) {
   if (!esComandoFinanciero(texto)) return null;
 
   try {
     const movimientos = await interpretarMovimientos(texto);
-
     if (!movimientos.length) return null;
 
     const confirmaciones = [];
     const errores = [];
 
     for (const datos of movimientos) {
-      if (!datos.monto || datos.monto <= 0) {
-        errores.push(`❌ Monto inválido en: ${datos.descripcion || "movimiento sin descripción"}`);
+      // Para planilla, monto puede ser 0 — es válido
+      const esPlanilla = datos.tipo === "PLANILLA";
+      if (!esPlanilla && (!datos.monto || datos.monto <= 0)) {
+        errores.push(`❌ Monto inválido: ${datos.descripcion || "sin descripción"}`);
         continue;
       }
 
@@ -198,21 +212,23 @@ async function procesarComandoFinanciero(texto) {
         });
 
         if (resultado?.resultado?.status === "DUPLICADO") {
-          errores.push(`⚠️ Duplicado: ${datos.descripcion} — ${formatCRC(datos.monto)}`);
+          errores.push(`⚠️ Duplicado: ${datos.descripcion}`);
         } else {
           confirmaciones.push(
-            generarConfirmacionItem(datos, resultado, confirmaciones.length, movimientos.length)
+            generarConfirmacionItem(datos, confirmaciones.length, movimientos.length)
           );
         }
       } catch (err) {
-        console.error("❌ Error registrando:", err.message);
+        console.error("❌ Error:", err.message);
         errores.push(`❌ Error en: ${datos.descripcion}`);
       }
     }
 
     const partes = [];
-    if (confirmaciones.length) partes.push(confirmaciones.join("\n\n─────────────\n\n"));
-    if (errores.length) partes.push(errores.join("\n"));
+    if (confirmaciones.length)
+      partes.push(confirmaciones.join("\n\n─────────────\n\n"));
+    if (errores.length)
+      partes.push(errores.join("\n"));
     partes.push("_Sasha — Agente Financiero SSR_");
 
     return partes.join("\n\n");
