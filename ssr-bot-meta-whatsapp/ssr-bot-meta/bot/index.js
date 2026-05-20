@@ -1,34 +1,37 @@
 const { get, update, addMsg, reset } = require("./state");
-const { ask }                        = require("./claude");
+const { ask } = require("./claude");
 const { sendText, markRead, downloadMedia, sendMediaById } = require("./messenger");
 const { createVisitEvent, getAvailableSlots } = require("./calendar");
-const { sendVisitConfirmation }      = require("./email");
-const { upsertLead, registerVisit }  = require("./crm");
-const KNOWLEDGE                      = require("./knowledge");
-const memoria                        = require("./memoria");
-const outbound                       = require("./outbound");
+const { sendVisitConfirmation } = require("./email");
+const { upsertLead, registerVisit } = require("./crm");
+const KNOWLEDGE = require("./knowledge");
+const memoria = require("./memoria");
+const outbound = require("./outbound");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
+const finanzas = require("./finanzas"); // ← INTEGRACIÓN FINANCIERA SSR
 
 // ── Administradores / Supervisores ───────────────────────────────────────────
+
 const SUPERVISORES = [
-  "+50683091817",  // Darwin
-  "+50670068477",  // Darwin (segundo número)
-  "+50671981370",  // Melvin
-  "+50662052075",  // Jessy
+  "+50683091817", // Darwin
+  "+50670068477", // Darwin (segundo número)
+  "+50671981370", // Melvin
+  "+50662052075", // Jessy
 ];
 
 // Números exactos a ignorar completamente
 const IGNORAR = [
-  "+5215571965946",  // Estafador México
+  "+5215571965946", // Estafador México
 ];
 
 // Prefijos de país a bloquear por seguridad
 const IGNORAR_PREFIJOS = [
-  "+57",  // Colombia
-  "+52",  // México
+  "+57", // Colombia
+  "+52", // México
 ];
 
 // ── Interpretar comando de supervisor con Claude ──────────────────────────────
+
 /**
  * Interpreta el comando del admin en lenguaje natural.
  * Incluye contexto de clientes recientes para resolver referencias
@@ -37,7 +40,7 @@ const IGNORAR_PREFIJOS = [
 async function interpretarComandoAdmin(text) {
   try {
     const Anthropic = require("@anthropic-ai/sdk");
-    const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     // Obtener clientes recientes para resolver referencias contextuales
     let contextoClientes = "";
@@ -49,7 +52,7 @@ async function interpretarComandoAdmin(text) {
         contextoClientes = "\n\nCLIENTES RECIENTES EN MEMORIA (más reciente primero):\n" +
           recientes.map(r => {
             const ult = r[5] ? new Date(r[5]).toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica" }) : "—";
-            return `  • ${r[2] || r[1] || "?"} | Tel: ${r[0]} | Últ. actividad: ${ult}`;
+            return ` • ${r[2] || r[1] || "?"} | Tel: ${r[0]} | Últ. actividad: ${ult}`;
           }).join("\n");
       }
     } catch (e) {
@@ -57,10 +60,12 @@ async function interpretarComandoAdmin(text) {
     }
 
     const response = await client.messages.create({
-      model:      "claude-sonnet-4-5",
+      model: "claude-sonnet-4-5",
       max_tokens: 400,
       system: `Sos el sistema de interpretación de comandos de Sasha para los administradores de SS Remodelaciones.
+
 Tu trabajo es clasificar el mensaje del administrador y extraer los parámetros.
+
 ${contextoClientes}
 
 REGLA IMPORTANTE — Referencias contextuales:
@@ -87,7 +92,7 @@ Ejemplos:
     });
 
     const rawText = response.content[0]?.text || "{}";
-    const clean   = rawText.replace(/```json|```/g, "").trim();
+    const clean = rawText.replace(/```json|```/g, "").trim();
     return JSON.parse(clean);
   } catch (err) {
     console.warn("⚠️ interpretarComandoAdmin error:", err.message);
@@ -99,8 +104,8 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   if (messageId) markRead(messageId).catch(() => {});
 
   const normalized = (text || "").trim();
-  const session    = get(from);
-  const fromE164   = from.startsWith("+") ? from : `+${from}`;
+  const session = get(from);
+  const fromE164 = from.startsWith("+") ? from : `+${from}`;
 
   if (normalized === "/reset") {
     reset(from);
@@ -109,13 +114,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   }
 
   if (IGNORAR.includes(fromE164) || IGNORAR.includes(from)) return;
-
   if (IGNORAR_PREFIJOS.some(p => fromE164.startsWith(p) || from.startsWith(p))) {
     console.log(`🚫 Mensaje bloqueado de país restringido: ${from}`);
     return;
   }
 
   // ── MODO SUPERVISOR / ADMINISTRADOR ─────────────────────────────────────────
+
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
 
   if (esSupervisor && normalized) {
@@ -128,23 +133,39 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         "Podés escribirme en lenguaje natural, por ejemplo:",
         "",
         "📤 *Enviar mensajes:*",
-        "  _envíale a María González que mañana es la visita_",
-        "  _manda a +50688887777: confirmamos cita_",
-        "  _escríbele a Juan Pérez, dile que la cotización está lista_",
+        " _envíale a María González que mañana es la visita_",
+        " _manda a +50688887777: confirmamos cita_",
+        " _escríbele a Juan Pérez, dile que la cotización está lista_",
         "",
         "📋 *Consultar clientes:*",
-        "  _listar clientes_",
-        "  _pasame los datos de Gustavo_",
-        "  _info de +50688887777_",
+        " _listar clientes_",
+        " _pasame los datos de Gustavo_",
+        " _info de +50688887777_",
         "",
         "💬 *Historial WhatsApp:*",
-        "  _qué habló María González_",
-        "  _historial de Juan Pérez_",
-        "  _buscar remodelación cocina_",
-        "  _fotos de Carlos_",
+        " _qué habló María González_",
+        " _historial de Juan Pérez_",
+        " _buscar remodelación cocina_",
+        " _fotos de Carlos_",
+        "",
+        "💰 *Registrar gastos e ingresos:*",
+        " _pagué 125 mil de gasolina para Sergio_",
+        " _compré materiales en EPA por 340 mil para Jeannette_",
+        " _me pagaron 500 mil de adelanto del proyecto 021_",
+        " _le pagué a Melvin 80 mil de planilla_",
+        " _compré tornillos para inventario 15 mil_",
       ].join("\n"));
       return;
     }
+
+    // ── 1.5 MÓDULO FINANCIERO ─────────────────────────────────────────────────
+    // Detectar y procesar gastos/ingresos en lenguaje natural
+    const respuestaFinanciera = await finanzas.procesarComandoFinanciero(normalized);
+    if (respuestaFinanciera) {
+      await sendText(from, respuestaFinanciera);
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // 2. Intentar outbound (patrones directos)
     const respuestaOutbound = await outbound.procesarComandoOutbound(normalized);
@@ -179,8 +200,8 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
         // Redactar mensaje profesional
         const mensajeProfesional = await outbound.componerMensajeProfesional(interpretacion.mensaje, clientName);
-
         const resultado = await outbound.enviarProactivo(telefono, mensajeProfesional);
+
         if (resultado.ok) {
           memoria.guardarMensaje({ phone: "+" + telefono, clientName, direction: "out", type: "text", content: `[OUTBOUND] ${mensajeProfesional}` }).catch(() => {});
           await sendText(from,
@@ -301,14 +322,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero SS Remodelaciones NO realiza visitas los miércoles ni jueves (tampoco sábados ni domingos). Debes decirle claramente que ese día no hay disponibilidad y ofrecerle el próximo día hábil: lunes, martes o viernes. Sé amable y directo — NO digas que vas a "verificar", ya sabes la respuesta.]`;
       } else {
         const slots = await getAvailableSlots(dayMentioned);
-
         if (slots.length === 0) {
           availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele los otros días disponibles: lunes, martes o viernes.]`;
         } else {
           const slotsText = slots.map(s => {
             const [h, m] = s.split(":");
             const hNum = parseInt(h);
-            const h12  = hNum > 12 ? hNum - 12 : hNum;
+            const h12 = hNum > 12 ? hNum - 12 : hNum;
             return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
           }).join(", ");
           availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.]`;
@@ -328,14 +348,17 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     }
 
     // ── Monitor supervisores ──────────────────────────────────────────────────
-    const clientLabel    = session.name ? `${session.name} (${from})` : from;
+    const clientLabel = session.name ? `${session.name} (${from})` : from;
     const clientMsgLabel = imageDataArray.length > 0
       ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
       : normalized;
+
     const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientLabel}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${cleanMessage}`;
+
     for (const supervisor of SUPERVISORES) {
       sendText(supervisor, monitorMsg).catch(err => console.error(`❌ Monitor [${supervisor}]: ${err.message}`));
     }
+
     if (mediaIds) {
       const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
       for (const mediaId of ids) {
@@ -354,9 +377,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     } else if (flag === "LEAD") {
       const [name, project, zone] = (flagData || "").split("|");
       const updated = update(from, {
-        name:         name?.trim()    || session.name,
+        name: name?.trim() || session.name,
         project_desc: project?.trim() || session.project_desc,
-        zone:         zone?.trim()    || session.zone,
+        zone: zone?.trim() || session.zone,
       });
       if (!session.lead_saved) {
         update(from, { lead_saved: true });
@@ -367,33 +390,33 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     } else if (flag === "VISITA") {
       const [name, project, zone, day, hour, ubicacion, email] = (flagData || "").split("|");
       const updated = update(from, {
-        name:            name?.trim()      || session.name,
-        project_desc:    project?.trim()   || session.project_desc,
-        zone:            zone?.trim()      || session.zone,
-        visit_day:       day?.trim()       || "a coordinar",
-        visit_hour:      hour?.trim()      || "09:00",
-        waze_link:       ubicacion?.trim() || "",
-        client_email:    email?.trim()     || "",
+        name: name?.trim() || session.name,
+        project_desc: project?.trim() || session.project_desc,
+        zone: zone?.trim() || session.zone,
+        visit_day: day?.trim() || "a coordinar",
+        visit_hour: hour?.trim() || "09:00",
+        waze_link: ubicacion?.trim() || "",
+        client_email: email?.trim() || "",
         visit_confirmed: true,
-        lead_saved:      true,
+        lead_saved: true,
       });
 
       const visitHour = updated.visit_hour || "09:00";
-      const [hh, mm]  = visitHour.split(":");
-      const hourNum   = parseInt(hh);
-      const hour12    = hourNum > 12 ? hourNum - 12 : hourNum === 0 ? 12 : hourNum;
-      let timeStr     = `${hour12}:${mm} ${hourNum >= 12 ? "p.m." : "a.m."}`;
-      let dateStr     = updated.visit_day;
+      const [hh, mm] = visitHour.split(":");
+      const hourNum = parseInt(hh);
+      const hour12 = hourNum > 12 ? hourNum - 12 : hourNum === 0 ? 12 : hourNum;
+      let timeStr = `${hour12}:${mm} ${hourNum >= 12 ? "p.m." : "a.m."}`;
+      let dateStr = updated.visit_day;
 
       try {
         const eventData = await createVisitEvent({
-          name:        updated.name,
-          phone:       from,
-          project:     updated.project_desc,
-          zone:        updated.zone,
-          day:         updated.visit_day,
-          hour:        updated.visit_hour,
-          wazeLink:    updated.waze_link,
+          name: updated.name,
+          phone: from,
+          project: updated.project_desc,
+          zone: updated.zone,
+          day: updated.visit_day,
+          hour: updated.visit_hour,
+          wazeLink: updated.waze_link,
           clientEmail: updated.client_email,
         });
         dateStr = eventData.startDate.toLocaleDateString("es-CR", {
@@ -441,10 +464,11 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 }
 
 // ── Flujo RRHH / Proveedores ──────────────────────────────────────────────────
+
 async function handleRRHHFlow(from, text, session, tipo) {
   const pasos = tipo === "solicitante" ? PASOS_SOLICITANTE : PASOS_PROVEEDOR;
-  const paso  = session.rrhh_paso || 0;
-  const data  = { ...(session.rrhh_data || {}) };
+  const paso = session.rrhh_paso || 0;
+  const data = { ...(session.rrhh_data || {}) };
 
   if (pasos[paso]?.campo && text) {
     data[pasos[paso].campo] = text;
@@ -507,10 +531,12 @@ function detectDayOrDate(text) {
   if (n.includes("hoy")) {
     return DIAS[ahoraCR.getDay()];
   }
+
   if (n.includes("pasado manana")) {
     const d = new Date(ahoraCR); d.setDate(d.getDate() + 2);
     return DIAS[d.getDay()];
   }
+
   if (n.includes("manana")) {
     const d = new Date(ahoraCR); d.setDate(d.getDate() + 1);
     return DIAS[d.getDay()];
@@ -520,9 +546,10 @@ function detectDayOrDate(text) {
   const MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
   for (const mes of MONTHS) {
     const re = new RegExp(`(\\d{1,2})\\s+(?:de\\s+)?${mes}`, "i");
-    const m  = n.match(re);
+    const m = n.match(re);
     if (m) return `${m[1]} de ${mes}`;
   }
+
   const m2 = n.match(/\b(\d{1,2})\/(\d{1,2})\b/);
   if (m2) return `${m2[1]}/${m2[2]}`;
 
@@ -531,17 +558,21 @@ function detectDayOrDate(text) {
 
 // ── Parsear flags de Claude ───────────────────────────────────────────────────
 function parseFlags(response) {
-  const flagRegex    = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*)|SOLICITANTE|PROVEEDOR)\]\s*$/;
+  const flagRegex = /\[(ESCALAR|LEAD:([^\]]*)|VISITA:([^\]]*)|SOLICITANTE|PROVEEDOR)\]\s*$/;
   const sistemaRegex = /\[SISTEMA:[\s\S]*?\]/g;
-  const match        = response.match(flagRegex);
+  const match = response.match(flagRegex);
+
   if (!match) return { cleanMessage: response.replace(sistemaRegex, "").trim(), flag: null, flagData: null };
+
   const cleanMessage = response.replace(flagRegex, "").replace(sistemaRegex, "").trim();
-  const fullFlag     = match[1];
-  if (fullFlag === "ESCALAR")     return { cleanMessage, flag: "ESCALAR",     flagData: null };
+  const fullFlag = match[1];
+
+  if (fullFlag === "ESCALAR")    return { cleanMessage, flag: "ESCALAR",    flagData: null };
   if (fullFlag === "SOLICITANTE") return { cleanMessage, flag: "SOLICITANTE", flagData: null };
-  if (fullFlag === "PROVEEDOR")   return { cleanMessage, flag: "PROVEEDOR",   flagData: null };
-  if (fullFlag.startsWith("LEAD:"))   return { cleanMessage, flag: "LEAD",   flagData: fullFlag.slice(5) };
+  if (fullFlag === "PROVEEDOR")  return { cleanMessage, flag: "PROVEEDOR",  flagData: null };
+  if (fullFlag.startsWith("LEAD:"))  return { cleanMessage, flag: "LEAD",  flagData: fullFlag.slice(5) };
   if (fullFlag.startsWith("VISITA:")) return { cleanMessage, flag: "VISITA", flagData: fullFlag.slice(7) };
+
   return { cleanMessage, flag: null, flagData: null };
 }
 
@@ -555,13 +586,13 @@ async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   const lines = [
     header, "",
     `📱 ${from}`,
-    session.name         && `👤 ${session.name}`,
-    session.project_desc && `🏗️ ${session.project_desc}`,
-    session.zone         && `📍 ${session.zone}`,
-    session.visit_day    && `📅 Día: ${session.visit_day}`,
-    session.visit_hour   && `🕐 Hora: ${session.visit_hour}`,
-    session.waze_link    && `🗺️ Ubicación: ${session.waze_link}`,
-    session.client_email && `📧 Email: ${session.client_email}`,
+    session.name          && `👤 ${session.name}`,
+    session.project_desc  && `🏗️ ${session.project_desc}`,
+    session.zone          && `📍 ${session.zone}`,
+    session.visit_day     && `📅 Día: ${session.visit_day}`,
+    session.visit_hour    && `🕐 Hora: ${session.visit_hour}`,
+    session.waze_link     && `🗺️ Ubicación: ${session.waze_link}`,
+    session.client_email  && `📧 Email: ${session.client_email}`,
     "", `💬 "${lastMsg}"`, "",
     "_Sasha — Bot SSR_",
   ].filter(Boolean).join("\n");
