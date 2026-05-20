@@ -270,19 +270,27 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     let availabilityContext = "";
 
     if (dayMentioned && dayMentioned !== session.slots_shown) {
-      const slots = await getAvailableSlots(dayMentioned);
       update(from, { slots_shown: dayMentioned });
 
-      if (slots.length === 0) {
-        availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele los otros días disponibles: lunes, martes o viernes.]`;
+      // Días en que NUNCA hay visitas — bloqueo directo sin consultar Calendar
+      const DIAS_NO_DISPONIBLES = ["miercoles", "jueves", "sabado", "domingo"];
+
+      if (DIAS_NO_DISPONIBLES.includes(dayMentioned)) {
+        availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero SS Remodelaciones NO realiza visitas los miércoles ni jueves (tampoco sábados ni domingos). Debes decirle claramente que ese día no hay disponibilidad y ofrecerle el próximo día hábil: lunes, martes o viernes. Sé amable y directo — NO digas que vas a "verificar", ya sabes la respuesta.]`;
       } else {
-        const slotsText = slots.map(s => {
-          const [h, m] = s.split(":");
-          const hNum = parseInt(h);
-          const h12  = hNum > 12 ? hNum - 12 : hNum;
-          return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
-        }).join(", ");
-        availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.]`;
+        const slots = await getAvailableSlots(dayMentioned);
+
+        if (slots.length === 0) {
+          availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele los otros días disponibles: lunes, martes o viernes.]`;
+        } else {
+          const slotsText = slots.map(s => {
+            const [h, m] = s.split(":");
+            const hNum = parseInt(h);
+            const h12  = hNum > 12 ? hNum - 12 : hNum;
+            return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
+          }).join(", ");
+          availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.]`;
+        }
       }
     }
 
@@ -457,11 +465,36 @@ async function handleRRHHFlow(from, text, session, tipo) {
 }
 
 // ── Detectar día/fecha ────────────────────────────────────────────────────────
+// Resuelve nombres explícitos Y referencias relativas ("mañana", "hoy", etc.)
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  if (n.includes("lunes"))   return "lunes";
-  if (n.includes("martes"))  return "martes";
-  if (n.includes("viernes")) return "viernes";
+
+  // Días explícitos (incluir todos para poder bloquear miércoles/jueves)
+  if (n.includes("lunes"))     return "lunes";
+  if (n.includes("martes"))    return "martes";
+  if (n.includes("miercoles")) return "miercoles";
+  if (n.includes("jueves"))    return "jueves";
+  if (n.includes("viernes"))   return "viernes";
+  if (n.includes("sabado"))    return "sabado";
+  if (n.includes("domingo"))   return "domingo";
+
+  // Referencias relativas → convertir al día real en hora Costa Rica (UTC-6)
+  const DIAS = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
+  const ahoraCR = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+
+  if (n.includes("hoy")) {
+    return DIAS[ahoraCR.getDay()];
+  }
+  if (n.includes("pasado manana")) {
+    const d = new Date(ahoraCR); d.setDate(d.getDate() + 2);
+    return DIAS[d.getDay()];
+  }
+  if (n.includes("manana")) {
+    const d = new Date(ahoraCR); d.setDate(d.getDate() + 1);
+    return DIAS[d.getDay()];
+  }
+
+  // Fechas numéricas (ej: "15 de mayo", "20/05")
   const MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
   for (const mes of MONTHS) {
     const re = new RegExp(`(\\d{1,2})\\s+(?:de\\s+)?${mes}`, "i");
@@ -470,6 +503,7 @@ function detectDayOrDate(text) {
   }
   const m2 = n.match(/\b(\d{1,2})\/(\d{1,2})\b/);
   if (m2) return `${m2[1]}/${m2[2]}`;
+
   return null;
 }
 
