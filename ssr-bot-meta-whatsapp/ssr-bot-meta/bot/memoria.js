@@ -389,12 +389,84 @@ function formatearFichaCRM(row) {
   return lines;
 }
 
+// ── Resumir conversación con IA ──────────────────────────────────────────────
+/**
+ * Usa Claude para generar un resumen inteligente de la conversación
+ * incluyendo fotos, videos y estado actual del cliente.
+ */
+async function resumirConversacion(rows, clientName, phone) {
+  if (!rows || rows.length === 0) return null;
+
+  try {
+    const Anthropic = require("@anthropic-ai/sdk");
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    // Preparar texto de conversación para el resumen
+    const mensajesTexto = rows.slice(-50).map(r => {
+      const hora    = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" });
+      const quien   = r[3] === "in" ? "Cliente" : "Sasha";
+      const tipo    = r[4] === "image" ? "[Foto enviada]" : (r[5] || "");
+      return `[${hora}] ${quien}: ${tipo.slice(0, 300)}`;
+    }).join("\n");
+
+    // Separar fotos y videos
+    const fotos  = rows.filter(r => r[4] === "image"  && r[7]);
+    const videos = rows.filter(r => r[4] === "video"  && r[7]);
+
+    const response = await anthropic.messages.create({
+      model:      "claude-sonnet-4-5",
+      max_tokens: 500,
+      system: `Sos asistente de SS Remodelaciones. Resumí esta conversación de WhatsApp entre Sasha y un cliente.
+Formato de respuesta (WhatsApp, conciso):
+- Qué quiere el cliente (en 1-2 líneas)
+- Estado actual (¿agendó visita? ¿está cotizando? ¿pendiente de respuesta?)
+- Puntos importantes mencionados
+- NO incluyas los mensajes literales, solo el resumen`,
+      messages: [{ role: "user", content: `Cliente: ${clientName || phone}\n\nConversación:\n${mensajesTexto}` }],
+    });
+
+    const resumen = response.content[0]?.text?.trim() || "";
+
+    // Construir respuesta con resumen + multimedia
+    const lines = [
+      `📋 *Resumen — ${clientName || phone}*`,
+      `📱 ${phone}`,
+      "",
+      resumen,
+    ];
+
+    if (fotos.length > 0) {
+      lines.push("", `📷 *Fotos enviadas (${fotos.length}):*`);
+      fotos.slice(-10).forEach(r => {
+        const hora = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short" });
+        lines.push(`  • ${hora}: ${r[7]}`);
+      });
+    }
+
+    if (videos.length > 0) {
+      lines.push("", `🎥 *Videos enviados (${videos.length}):*`);
+      videos.slice(-5).forEach(r => {
+        const hora = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short" });
+        lines.push(`  • ${hora}: ${r[7]}`);
+      });
+    }
+
+    return lines.join("\n");
+
+  } catch (err) {
+    console.warn("⚠️ Memoria: error resumiendo:", err.message);
+    // Fallback: historial simple
+    return formatearMensajes(rows, `Historial de ${clientName || phone}`);
+  }
+}
+
 // ── Triggers de memoria ───────────────────────────────────────────────────────
 const MEMORY_TRIGGERS = [
   /historial/i,
-  /qu[eé]\s+(hab[ló]|dij[oi]|mand[oó]|escrib)/i,
+  /qu[eé]\s+(hab[ló]|dij[oi]|mand[oó]|escrib|hablaste|conversaste)/i,
   /conversaci[oó]n/i,
   /fotos?\s+de/i,
+  /videos?\s+de/i,
   /listar?\s+clientes?/i,
   /buscar?\s+/i,
   /cu[aá]ntos?\s+mensajes?/i,
@@ -404,6 +476,12 @@ const MEMORY_TRIGGERS = [
   /info\s+(de\s+)?/i,
   /ficha\s+(de\s+)?/i,
   /datos\s+(de\s+)?/i,
+  /res[uú]me(n|[nm]e)\s+(la\s+)?conversaci[oó]n/i,
+  /d[ií]me\s+(qu[eé]|c[oó]mo)/i,
+  /cu[eé]ntame\s+(qu[eé]|c[oó]mo)/i,
+  /qu[eé]\s+pas[oó]\s+(con|de)/i,
+  /medios?\s+de/i,
+  /archivos?\s+de/i,
 ];
 
 function esConsultaMemoria(text) {
@@ -484,12 +562,44 @@ async function procesarConsultaMemoria(text) {
       return formatearMensajes(rows, `Historial de ${clientName} (+${phone})`) || `📭 Sin mensajes de +${phone}.`;
     }
 
-    // ── Historial por nombre ─────────────────────────────────────────────────
+    // ── Resumen con IA ───────────────────────────────────────────────────────
+    // "dime qué hablaste con X", "resúmeme la conversación de X", "qué pasó con X"
+    const resumenPatterns = [
+      /(?:d[ií]me|cu[eé]ntame)\s+(?:qu[eé]|c[oó]mo)\s+(?:hab[ló]|fue|anda|est[aá])\s+(?:con\s+)?(.+)/i,
+      /res[uú]me(?:n|me)?\s+(?:la\s+)?conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,
+      /qu[eé]\s+pas[oó]\s+(?:con|de)\s+(.+)/i,
+      /c[oó]mo\s+va\s+(?:el\s+|la\s+)?(?:cliente\s+)?(.+)/i,
+    ];
+
+    for (const pattern of resumenPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        const nombre = match[1].replace(/[?.!].*$/, "").trim();
+        if (nombre.length < 3) continue;
+
+        const rows = await buscarPorNombre(nombre);
+        if (!rows.length) {
+          const crmRows = await buscarClienteEnCRM(nombre);
+          if (crmRows.length) {
+            return `📭 No hay conversaciones de "${nombre}" en WhatsApp aún.\n\n*Ficha CRM:*\n` + formatearFichaCRM(crmRows[0]);
+          }
+          return `📭 No encontré conversaciones de "${nombre}".`;
+        }
+
+        const phone      = rows[0][1];
+        const clientName = rows[0][2] || nombre;
+        return await resumirConversacion(rows, clientName, phone) || `📭 Sin mensajes de "${nombre}".`;
+      }
+    }
+
+    // ── Historial por nombre (detalle completo) ──────────────────────────────
     const nombrePatterns = [
       /historial\s+(?:de\s+)?(.+)/i,
-      /qu[eé]\s+(?:hab[ló]|dij[oi]|mand[oó])\s+(.+)/i,
+      /qu[eé]\s+(?:hab[ló]|dij[oi]|mand[oó]|hablaste|conversaste)\s+(?:con\s+)?(.+)/i,
       /conversaci[oó]n\s+(?:de\s+)?(.+)/i,
       /cu[aá]ntos?\s+mensajes?\s+(?:de\s+|tiene\s+)?(.+)/i,
+      /medios?\s+(?:de|enviados?\s+(?:por|de))\s+(.+)/i,
+      /archivos?\s+(?:de|enviados?\s+(?:por|de))\s+(.+)/i,
     ];
 
     for (const pattern of nombrePatterns) {
@@ -500,7 +610,6 @@ async function procesarConsultaMemoria(text) {
 
         const rows = await buscarPorNombre(nombre);
         if (!rows.length) {
-          // Buscar en CRM si no hay conversaciones aún
           const crmRows = await buscarClienteEnCRM(nombre);
           if (crmRows.length) {
             return `📭 No hay conversaciones de "${nombre}" en WhatsApp aún.\n\n*Ficha CRM:*\n` + formatearFichaCRM(crmRows[0]);
@@ -510,6 +619,18 @@ async function procesarConsultaMemoria(text) {
 
         const phone      = rows[0][1];
         const clientName = rows[0][2] || nombre;
+
+        // Si pide fotos/videos/archivos, mostrar solo multimedia
+        if (/fotos?|videos?|medios?|archivos?|im[aá]genes?/i.test(text)) {
+          const fotos  = rows.filter(r => r[4] === "image" && r[7]);
+          const videos = rows.filter(r => r[4] === "video" && r[7]);
+          if (!fotos.length && !videos.length) return `📭 No encontré fotos ni videos de "${nombre}".`;
+          const lines = [`📎 *Archivos de ${clientName}:*`, ""];
+          if (fotos.length)  lines.push(`📷 *Fotos (${fotos.length}):*`, ...fotos.slice(-15).map(r => `  • ${new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ })} → ${r[7]}`));
+          if (videos.length) lines.push("", `🎥 *Videos (${videos.length}):*`, ...videos.slice(-10).map(r => `  • ${new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ })} → ${r[7]}`));
+          return lines.join("\n");
+        }
+
         return formatearMensajes(rows, `Historial de ${clientName} (${phone})`) || `📭 Sin mensajes de "${nombre}".`;
       }
     }
