@@ -23,7 +23,7 @@ const PROYECTOS = [
   { codigo: "PROY 004/2025", nombre: "Franxi Solano",          alias: ["franxi", "solano"] },
   { codigo: "PROY 008/2025", nombre: "Jorge Córdoba",          alias: ["jorge", "cordoba"] },
   { codigo: "PROY 015/2025", nombre: "Fede y Lore",            alias: ["lore"] },
-  { codigo: "PROY 022/2025", nombre: "Nathalie",               alias: ["nathalie", "natalie"] },
+  { codigo: "PROY 022/2025", nombre: "Nathalie",               alias: ["nathalie"] },
 ];
 
 const KEYWORDS_FINANZAS = [
@@ -38,13 +38,14 @@ const KEYWORDS_FINANZAS = [
   "vale","adelanto planilla",
   "subcontrato","subcontratista",
   "materiales","herramientas","gasolina","combustible","diesel","diésel",
-  "transporte","flete","almuerzo","comida","alimentacion",
+  "transporte","almuerzo","comida","alimentacion",
   "ferretería","ferreteria","epa","construplaza",
   "bodega","inventario","mano de obra",
   "alquiler","contabilidad","seguro","luz","electricidad","agua","internet",
   "colones","mil colones","millones","efectivo","transferencia","sinpe","tarjeta",
 ];
 
+// ─── Helpers de fecha ────────────────────────────────────────
 const TODAY = () => {
   const cr = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
   return cr.getFullYear() + "-"
@@ -52,68 +53,115 @@ const TODAY = () => {
     + String(cr.getDate()).padStart(2, "0");
 };
 
+const getMesActual = () => {
+  const meses = ["ENERO","FEBRERO","MARZO","ABRIL","MAYO","JUNIO",
+                 "JULIO","AGOSTO","SEPTIEMBRE","OCTUBRE","NOVIEMBRE","DICIEMBRE"];
+  const cr = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  return meses[cr.getMonth()];
+};
+
+const getDiaSemana = () => {
+  const dias = ["","LUN","MAR","MIÉ","JUE","VIE","SÁB"];
+  const cr = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  const d = cr.getDay(); // 0=Dom, 1=Lun...6=Sáb
+  return d === 0 ? "DOM" : dias[d];
+};
+
+const getSemanaDelMes = () => {
+  const cr = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  return Math.ceil(cr.getDate() / 7);
+};
+
 const buildSystemPrompt = () => {
   const proyectosCtx = PROYECTOS
     .map(p => `- ${p.codigo}: ${p.nombre} (alias: ${p.alias.join(", ")})`)
     .join("\n");
+
+  const mesActual   = getMesActual();
+  const diaSemana   = getDiaSemana();
+  const numSemana   = getSemanaDelMes();
+  const planillaMes = `PLANILLA_${mesActual}`;
 
   return `Sos el agente financiero IA de SS Remodelaciones, empresa costarricense de construcción.
 
 PROYECTOS (activos y cerrados — ambos reciben gastos):
 ${proyectosCtx}
 
+CONTEXTO HOY: ${TODAY()} | Día: ${diaSemana} | Semana del mes: ${numSemana} | Mes planilla: ${planillaMes}
+
 REGLAS DE INTERPRETACIÓN:
-- NÚMEROS COSTARRICENSES: punto = separador de miles → "4.500" = 4500, "1.200.000" = 1200000
+- NÚMEROS COSTARRICENSES: punto = separador de miles → "4.500"=4500, "1.200.000"=1200000
 - "X mil" = X*1000. "medio millón" = 500000
 - Sin fecha = hoy: ${TODAY()}
 - Detectá proyecto por alias. Proyectos cerrados también reciben gastos
 - Gastos operativos sin proyecto → proyecto_codigo = "SSR"
-- SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales, EXCEPTO para entradas de planilla sin monto definido
+- SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales (excepto planillas de horas)
 
-PESTAÑAS — SOLO ESTOS NOMBRES:
+PESTAÑAS VÁLIDAS — SOLO ESTOS NOMBRES:
 - "GASTOS_PROYECTO" → cualquier gasto
 - "INGRESOS_CLIENTES" → pago de cliente
-- "BASE_PLANILLA" → registro de horas trabajadas y planilla
+- "${planillaMes}" → registro de horas trabajadas (hoy corresponde a ${planillaMes})
+- "BASE_PLANILLA" → copia plana de planilla
 - "INVENTARIO" → compra para bodega
 - "SUBCONTRATOS" → pago a subcontratista
 
-REGLAS PARA PLANILLA (horas trabajadas):
-Cuando alguien dice "X trabajó N horas" o "X y Y trabajaron N horas":
+REGLAS PARA PLANILLA (cuando alguien dice "X trabajó N horas"):
 - tipo = "PLANILLA"
-- pestaña_principal = "BASE_PLANILLA"
-- pestanas_adicionales = [] (sin CAJA_GENERAL porque no se sabe el monto total aún)
-- monto = 0 (el total bruto se calcula después con la tarifa)
-- Usá el campo "horas" para las horas trabajadas
-- Usá el campo "vale_colones" para el vale (adelanto en efectivo), 0 si no hay vale
-- Si hay vale, el vale SÍ va a CAJA_GENERAL como salida separada
+- pestaña_principal = "${planillaMes}"
+- pestanas_adicionales = ["BASE_PLANILLA"] (sin CAJA_GENERAL, el monto se calcula después)
+- monto = 0
+- horas = número de horas trabajadas (campo extra obligatorio)
+- dia_semana = "${diaSemana}" (día de hoy)
+- num_semana = ${numSemana} (semana del mes de hoy)
+- vale_colones = monto del vale si hay, 0 si no
 - Cada trabajador = un objeto separado en el array
-- Si se menciona un vale, creá un objeto adicional tipo GASTO para registrarlo en CAJA_GENERAL:
-  { tipo: "GASTO", descripcion: "Vale planilla [nombre]", monto: [vale], proyecto_codigo: proyecto, pestaña_principal: "GASTOS_PROYECTO", pestanas_adicionales: ["CAJA_GENERAL"] }
+- Si hay vale, agregá UN objeto extra de tipo GASTO: descripcion="Vale planilla [nombre]", monto=[vale], pestaña_principal="GASTOS_PROYECTO", pestanas_adicionales=["CAJA_GENERAL"]
 
 INSTRUCCIONES MÚLTIPLES:
 Siempre devolvés un ARRAY JSON. Un objeto por operación o trabajador.
-Si hay 2 trabajadores = 2 objetos de planilla + 1 objeto por cada vale.
 
-Formato de cada objeto:
+Formato objeto planilla:
 {
-  "fecha": "YYYY-MM-DD",
+  "fecha": "${TODAY()}",
   "monto": 0,
   "horas": 9,
-  "vale_colones": 15000,
+  "dia_semana": "${diaSemana}",
+  "num_semana": ${numSemana},
+  "vale_colones": 0,
   "tipo": "PLANILLA",
-  "proyecto": "nombre del proyecto",
+  "proyecto": "nombre o SS Remodelaciones",
   "proyecto_codigo": "PROY XXX/YYYY o SSR",
-  "cliente": null,
   "categoria": "Mano de obra",
-  "descripcion": "Planilla Fernando - 9h",
+  "descripcion": "Planilla Fernando - 9h ${diaSemana}",
   "responsable": "Fernando",
   "proveedor": null,
   "forma_pago": null,
+  "cliente": null,
   "es_personal": false,
-  "pestaña_principal": "BASE_PLANILLA",
-  "pestanas_adicionales": [],
+  "pestaña_principal": "${planillaMes}",
+  "pestanas_adicionales": ["BASE_PLANILLA"],
   "confianza": 95,
-  "observaciones": "Vale: ₡15.000" 
+  "observaciones": null
+}
+
+Formato objeto gasto/ingreso normal:
+{
+  "fecha": "${TODAY()}",
+  "monto": 45000,
+  "tipo": "GASTO",
+  "proyecto": "nombre o SS Remodelaciones",
+  "proyecto_codigo": "SSR",
+  "cliente": null,
+  "categoria": "Gasolina",
+  "descripcion": "3-6 palabras",
+  "proveedor": null,
+  "forma_pago": null,
+  "responsable": null,
+  "es_personal": false,
+  "pestaña_principal": "GASTOS_PROYECTO",
+  "pestanas_adicionales": ["CAJA_GENERAL"],
+  "confianza": 95,
+  "observaciones": null
 }
 
 Respondé ÚNICAMENTE con JSON array válido, sin markdown, sin texto extra.`;
@@ -135,8 +183,8 @@ async function interpretarMovimientos(texto) {
     system: buildSystemPrompt(),
     messages: [{ role: "user", content: texto }],
   });
-  const raw   = response.content[0]?.text || "[]";
-  const clean = raw.replace(/```json\n?|\n?```/g, "").trim();
+  const raw    = response.content[0]?.text || "[]";
+  const clean  = raw.replace(/```json\n?|\n?```/g, "").trim();
   const parsed = JSON.parse(clean);
   return Array.isArray(parsed) ? parsed : [parsed];
 }
@@ -163,14 +211,14 @@ function generarConfirmacionItem(data, index, total) {
     PLANILLA:   { emoji: "👷", label: "Planilla" },
     INVENTARIO: { emoji: "📦", label: "Inventario" },
   };
-  const cfg = tipos[data.tipo] || { emoji: "📋", label: data.tipo };
+  const cfg    = tipos[data.tipo] || { emoji: "📋", label: data.tipo };
   const prefijo = total > 1 ? `*${index + 1}/${total}* ` : "";
 
   const lineas = [`${prefijo}${cfg.emoji} *${cfg.label} registrado*`, `📝 ${data.descripcion}`];
 
   if (data.tipo === "PLANILLA") {
-    if (data.horas)        lineas.push(`🕐 ${data.horas} horas`);
-    if (data.vale_colones) lineas.push(`💵 Vale: *${formatCRC(data.vale_colones)}*`);
+    if (data.horas)         lineas.push(`🕐 ${data.horas} horas — ${data.dia_semana || ""}`);
+    if (data.vale_colones)  lineas.push(`💵 Vale: *${formatCRC(data.vale_colones)}*`);
     if (data.proyecto_codigo && data.proyecto_codigo !== "SSR")
       lineas.push(`🏗️ ${data.proyecto_codigo}`);
   } else {
@@ -197,7 +245,6 @@ async function procesarComandoFinanciero(texto) {
     const errores = [];
 
     for (const datos of movimientos) {
-      // Para planilla, monto puede ser 0 — es válido
       const esPlanilla = datos.tipo === "PLANILLA";
       if (!esPlanilla && (!datos.monto || datos.monto <= 0)) {
         errores.push(`❌ Monto inválido: ${datos.descripcion || "sin descripción"}`);
