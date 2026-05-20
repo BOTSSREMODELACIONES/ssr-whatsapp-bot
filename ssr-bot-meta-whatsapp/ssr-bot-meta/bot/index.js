@@ -30,37 +30,59 @@ const IGNORAR_PREFIJOS = [
 
 // ── Interpretar comando de supervisor con Claude ──────────────────────────────
 /**
- * Cuando ningún patrón rígido reconoce el comando del supervisor,
- * se usa Claude para interpretar la intención en lenguaje natural.
+ * Interpreta el comando del admin en lenguaje natural.
+ * Incluye contexto de clientes recientes para resolver referencias
+ * como "ese cliente", "la señora de ayer", "el que estaba agendando", etc.
  */
 async function interpretarComandoAdmin(text) {
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const client    = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+    // Obtener clientes recientes para resolver referencias contextuales
+    let contextoClientes = "";
+    try {
+      const clientes = await memoria.listarClientes();
+      if (clientes && clientes.length > 0) {
+        // Tomar los últimos 8 clientes con actividad reciente
+        const recientes = clientes.slice(-8).reverse();
+        contextoClientes = "\n\nCLIENTES RECIENTES EN MEMORIA (más reciente primero):\n" +
+          recientes.map(r => {
+            const ult = r[5] ? new Date(r[5]).toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica" }) : "—";
+            return `  • ${r[2] || r[1] || "?"} | Tel: ${r[0]} | Últ. actividad: ${ult}`;
+          }).join("\n");
+      }
+    } catch (e) {
+      console.warn("⚠️ interpretarComandoAdmin: no pude cargar clientes recientes:", e.message);
+    }
+
     const response = await client.messages.create({
       model:      "claude-sonnet-4-5",
-      max_tokens: 300,
+      max_tokens: 400,
       system: `Sos el sistema de interpretación de comandos de Sasha para los administradores de SS Remodelaciones.
 Tu trabajo es clasificar el mensaje del administrador y extraer los parámetros.
+${contextoClientes}
+
+REGLA IMPORTANTE — Referencias contextuales:
+Cuando el admin dice "ese cliente", "el cliente", "la señora", "el señor", "el de antes",
+"el que estaba agendando", "el último cliente", etc. — debés resolver a quién se refiere
+usando la lista de clientes recientes de arriba. Elegí el cliente con actividad más reciente.
 
 Respondé SOLO con un JSON válido (sin markdown, sin explicaciones):
 {
   "accion": "outbound" | "historial" | "info_cliente" | "listar" | "buscar" | "desconocido",
-  "destino": "nombre o número del cliente (solo para outbound)",
-  "mensaje": "mensaje a enviar al cliente (solo para outbound)",
+  "destino": "nombre o número del cliente resuelto (para outbound)",
+  "mensaje": "instrucción de lo que hay que comunicarle al cliente (para outbound)",
   "busqueda": "término de búsqueda (para historial, info, buscar)"
 }
 
-Ejemplos de clasificación:
-- "envíale a María que mañana es la visita" → outbound, destino=María, mensaje=mañana es la visita
-- "manda a 88887777: hola" → outbound
-- "qué conversaste/hablaste con Juan" → historial, busqueda=Juan
-- "qué pasó con Gustavo" → historial, busqueda=Gustavo
+Ejemplos:
+- "envíale a María que mañana es la visita" → outbound, destino=María
+- "avísale a ese cliente que para mañana no hay, que para el viernes" → outbound, destino=cliente más reciente de la lista
+- "manda a 88887777: hola" → outbound, destino=88887777
+- "qué conversaste con Juan" → historial, busqueda=Juan
 - "pasame los datos de Ana" → info_cliente, busqueda=Ana
-- "cómo va el cliente Pérez" → info_cliente, busqueda=Pérez
-- "listar clientes" → listar
-- "buscar remodelación cocina" → buscar, busqueda=remodelación cocina`,
+- "listar clientes" → listar`,
       messages: [{ role: "user", content: text }],
     });
 
