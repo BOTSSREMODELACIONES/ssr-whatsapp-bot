@@ -685,9 +685,6 @@ app.post("/api/transcribir-voz", async (req, res) => {
 });
 
 // ── SETUP TEMPORAL — Crear campaña Meta Ads ───────────────────────────────────
-// Llamar UNA SOLA VEZ desde el navegador para crear la campaña en Meta Ads.
-// URL: https://ssr-whatsapp-bot-production.up.railway.app/api/crear-campana?token=ssr2026bot_secure
-// IMPORTANTE: Borrar este endpoint después de usarlo.
 app.get("/api/crear-campana", async (req, res) => {
   if (req.query.token !== process.env.WEBHOOK_VERIFY_TOKEN) {
     return res.status(401).json({ error: "No autorizado" });
@@ -707,11 +704,34 @@ app.get("/api/crear-campana", async (req, res) => {
         res.json({ ok: true, resultado: stdout });
       }
     );
-    // Responder inmediatamente que está procesando (puede tardar ~30s)
-    // El resultado llega cuando execFile termina
   } catch (err) {
     console.error("❌ /api/crear-campana:", err.message);
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── CONTROL DE ASISTENCIA SSR REMODELACIONES (GLIDE + GOOGLE SHEETS) ──────────
+// Endpoint dedicado para recibir alertas desde Google Apps Script de forma segura.
+app.post("/webhook-asistencia", async (req, res) => {
+  try {
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ ok: false, error: "Mensaje vacío" });
+
+    console.log(`⏰ Alerta recibida de Sheets: "${message}"`);
+
+    const { sendText } = require("./bot/messenger");
+
+    // Enviamos la notificación en bucle a todos los supervisores asignados
+    for (const sup of SUPERVISOR_NUMS) {
+      await sendText(sup, message).catch(e => 
+        console.warn(`⚠️ No se pudo enviar reporte de asistencia a ${sup}:`, e.message)
+      );
+    }
+
+    return res.status(200).json({ ok: true, status: "Notificaciones enviadas" });
+  } catch (error) {
+    console.error("❌ Error en Webhook de Asistencia:", error.message);
+    return res.status(500).json({ ok: false, error: error.message });
   }
 });
 
@@ -723,9 +743,10 @@ app.listen(PORT, () => {
 │  🤖  IA: Claude Sonnet                                     │
 │  🎙️  Notas de voz: admins pueden hablarle a Sasha         │
 │  ⏰  Recordatorios: 8:00 AM CR diario                      │
-│  🚀  Puerto: ${PORT}                                           │
+│  🚀  Puerto: ${PORT}                                       │
 │  📌  Webhook WhatsApp: GET|POST /webhook                   │
 │  🔥  Webhook Meta Leads: GET|POST /meta-lead               │
+│  📊  Webhook Asistencia Sheets: POST /webhook-asistencia   │
 └────────────────────────────────────────────────────────────┘
   `);
 });
