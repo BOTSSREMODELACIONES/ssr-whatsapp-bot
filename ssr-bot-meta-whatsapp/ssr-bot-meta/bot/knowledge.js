@@ -10,6 +10,29 @@ const KNOWLEDGE = {
     sinpe_nombre: "SS Remodelaciones / Melvin Zúñiga",
   },
 
+  // ─────────────────────────────────────────────────────────────────────────────
+  // REDES SOCIALES Y CANALES OFICIALES
+  // Sasha NUNCA envía fotos directamente desde el chat. Cuando un cliente pide
+  // ver proyectos anteriores, ejemplos, portfolio o trabajos realizados,
+  // redirigí siempre a estos canales oficiales (Instagram → Facebook → Web).
+  // ─────────────────────────────────────────────────────────────────────────────
+  redes_sociales: {
+    instagram: {
+      url: "https://www.instagram.com/ssremodelaciones",
+      handle: "@ssremodelaciones",
+      descripcion: "Canal principal de fotos. Resumen visual de remodelaciones, antes/después, baños, cocinas, acabados.",
+    },
+    facebook: {
+      // ⚠️ VERIFICAR ESTA URL — ajustar si el perfil real de Facebook es distinto
+      url: "https://www.facebook.com/ssremodelaciones",
+      descripcion: "Alternativa cuando el cliente no usa Instagram.",
+    },
+    sitio_web: {
+      url: "https://ssremodelaciones.com",
+      descripcion: "Página oficial de la empresa. Información general, servicios y contacto.",
+    },
+  },
+
   visita: {
     costo: 25000,
     costo_texto: "₡25.000",
@@ -460,8 +483,8 @@ const KNOWLEDGE = {
       },
       {
         trigger: "No confío / cómo sé que son serios / quiero referencias",
-        estrategia: "Prueba social concreta. Fotos de proyectos. Contacto humano disponible.",
-        respuesta_guia: "Completamente válido. ¿Le comparto fotos de proyectos similares que hemos hecho? Y si prefiere hablar directamente con Melvin, nuestro encargado, con gusto lo conecto.",
+        estrategia: "Prueba social vía Instagram (canal principal). Nunca prometer enviar fotos directamente al chat. Si insiste, ofrecer Facebook o conectar con Melvin.",
+        respuesta_guia: "Completamente válido. Le invito a ver un resumen de nuestros proyectos en nuestro Instagram: https://www.instagram.com/ssremodelaciones — ahí hay fotos reales de remodelaciones que hemos hecho. Y si prefiere hablar directamente con Melvin, nuestro encargado, con gusto lo conecto.",
       },
     ],
   },
