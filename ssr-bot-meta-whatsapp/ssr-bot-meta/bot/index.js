@@ -8,15 +8,14 @@ const KNOWLEDGE = require("./knowledge");
 const memoria = require("./memoria");
 const outbound = require("./outbound");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
-const finanzas = require("./finanzas"); // ← INTEGRACIÓN FINANCIERA SSR
+const finanzas = require("./finanzas");
 
 // ── Administradores / Supervisores ───────────────────────────────────────────
 
 const SUPERVISORES = [
-  "+50683091817", // Darwin
+  "+50683091817", // Darwin — Gerente General
   "+50670068477", // Darwin (segundo número)
-  "+50671981370", // Melvin
-  "+50662052075", // Jessy
+  "+50671981370", // Melvin — Encargado de proyectos
 ];
 
 // Números exactos a ignorar completamente
@@ -32,22 +31,15 @@ const IGNORAR_PREFIJOS = [
 
 // ── Interpretar comando de supervisor con Claude ──────────────────────────────
 
-/**
- * Interpreta el comando del admin en lenguaje natural.
- * Incluye contexto de clientes recientes para resolver referencias
- * como "ese cliente", "la señora de ayer", "el que estaba agendando", etc.
- */
 async function interpretarComandoAdmin(text) {
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    // Obtener clientes recientes para resolver referencias contextuales
     let contextoClientes = "";
     try {
       const clientes = await memoria.listarClientes();
       if (clientes && clientes.length > 0) {
-        // Tomar los últimos 8 clientes con actividad reciente
         const recientes = clientes.slice(-8).reverse();
         contextoClientes = "\n\nCLIENTES RECIENTES EN MEMORIA (más reciente primero):\n" +
           recientes.map(r => {
@@ -150,8 +142,8 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         "",
         "💰 *Registrar gastos e ingresos:*",
         " _pagué 125 mil de gasolina para Sergio_",
-        " _compré materiales en EPA por 340 mil para Jeannette_",
-        " _me pagaron 500 mil de adelanto del proyecto 021_",
+        " _compré materiales en EPA por 340 mil para Karim_",
+        " _me pagaron 500 mil de adelanto del proyecto 044_",
         " _le pagué a Melvin 80 mil de planilla_",
         " _compré tornillos para inventario 15 mil_",
       ].join("\n"));
@@ -159,13 +151,11 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     }
 
     // ── 1.5 MÓDULO FINANCIERO ─────────────────────────────────────────────────
-    // Detectar y procesar gastos/ingresos en lenguaje natural
     const respuestaFinanciera = await finanzas.procesarComandoFinanciero(normalized);
     if (respuestaFinanciera) {
       await sendText(from, respuestaFinanciera);
       return;
     }
-    // ─────────────────────────────────────────────────────────────────────────
 
     // 2. Intentar outbound (patrones directos)
     const respuestaOutbound = await outbound.procesarComandoOutbound(normalized);
@@ -186,19 +176,16 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     console.log(`🧠 Admin interpret: ${JSON.stringify(interpretacion)}`);
 
     if (interpretacion.accion === "outbound" && interpretacion.destino && interpretacion.mensaje) {
-      // Claude detectó que quiere enviar un mensaje
       const telefono = await outbound.resolverTelefono(interpretacion.destino);
       if (!telefono) {
         await sendText(from, `❌ No encontré a *"${interpretacion.destino}"* en los clientes.\nIntentá con el número: _enviar a +506XXXXXXXX: [instrucción]_`);
       } else {
-        // Obtener nombre del cliente para personalizar
         let clientName = interpretacion.destino;
         try {
           const crmRows = await memoria.buscarClienteEnCRM(interpretacion.destino);
           if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
         } catch { /* no critical */ }
 
-        // Redactar mensaje profesional
         const mensajeProfesional = await outbound.componerMensajeProfesional(interpretacion.mensaje, clientName);
         const resultado = await outbound.enviarProactivo(telefono, mensajeProfesional);
 
@@ -315,7 +302,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     if (dayMentioned && dayMentioned !== session.slots_shown) {
       update(from, { slots_shown: dayMentioned });
 
-      // Días en que NUNCA hay visitas — bloqueo directo sin consultar Calendar
       const DIAS_NO_DISPONIBLES = ["miercoles", "jueves", "sabado", "domingo"];
 
       if (DIAS_NO_DISPONIBLES.includes(dayMentioned)) {
@@ -511,11 +497,9 @@ async function handleRRHHFlow(from, text, session, tipo) {
 }
 
 // ── Detectar día/fecha ────────────────────────────────────────────────────────
-// Resuelve nombres explícitos Y referencias relativas ("mañana", "hoy", etc.)
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-  // Días explícitos (incluir todos para poder bloquear miércoles/jueves)
   if (n.includes("lunes"))     return "lunes";
   if (n.includes("martes"))    return "martes";
   if (n.includes("miercoles")) return "miercoles";
@@ -524,13 +508,10 @@ function detectDayOrDate(text) {
   if (n.includes("sabado"))    return "sabado";
   if (n.includes("domingo"))   return "domingo";
 
-  // Referencias relativas → convertir al día real en hora Costa Rica (UTC-6)
   const DIAS = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
   const ahoraCR = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
 
-  if (n.includes("hoy")) {
-    return DIAS[ahoraCR.getDay()];
-  }
+  if (n.includes("hoy")) return DIAS[ahoraCR.getDay()];
 
   if (n.includes("pasado manana")) {
     const d = new Date(ahoraCR); d.setDate(d.getDate() + 2);
@@ -542,7 +523,6 @@ function detectDayOrDate(text) {
     return DIAS[d.getDay()];
   }
 
-  // Fechas numéricas (ej: "15 de mayo", "20/05")
   const MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
   for (const mes of MONTHS) {
     const re = new RegExp(`(\\d{1,2})\\s+(?:de\\s+)?${mes}`, "i");
@@ -567,10 +547,10 @@ function parseFlags(response) {
   const cleanMessage = response.replace(flagRegex, "").replace(sistemaRegex, "").trim();
   const fullFlag = match[1];
 
-  if (fullFlag === "ESCALAR")    return { cleanMessage, flag: "ESCALAR",    flagData: null };
+  if (fullFlag === "ESCALAR")     return { cleanMessage, flag: "ESCALAR",     flagData: null };
   if (fullFlag === "SOLICITANTE") return { cleanMessage, flag: "SOLICITANTE", flagData: null };
-  if (fullFlag === "PROVEEDOR")  return { cleanMessage, flag: "PROVEEDOR",  flagData: null };
-  if (fullFlag.startsWith("LEAD:"))  return { cleanMessage, flag: "LEAD",  flagData: fullFlag.slice(5) };
+  if (fullFlag === "PROVEEDOR")   return { cleanMessage, flag: "PROVEEDOR",   flagData: null };
+  if (fullFlag.startsWith("LEAD:"))   return { cleanMessage, flag: "LEAD",   flagData: fullFlag.slice(5) };
   if (fullFlag.startsWith("VISITA:")) return { cleanMessage, flag: "VISITA", flagData: fullFlag.slice(7) };
 
   return { cleanMessage, flag: null, flagData: null };
