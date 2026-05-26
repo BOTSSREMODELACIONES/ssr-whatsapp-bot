@@ -18,7 +18,9 @@ const PROYECTOS = [
   { codigo: "PROY 028/2026", nombre: "Fede",                   alias: ["fede", "federico"] },
   { codigo: "PROY 033/2026", nombre: "Jeannette 033",          alias: ["033"] },
   { codigo: "PROY 043/2026", nombre: "Miriam",                 alias: ["miriam"] },
+  { codigo: "PROY 044/2026", nombre: "Karim",                  alias: ["karim"] },
   { codigo: "PROY 045/2026", nombre: "Juan Diego",             alias: ["juan diego", "juan"] },
+  { codigo: "PROY 050/2026", nombre: "Maccaferri",             alias: ["maccaferri", "macaferri"] },
   { codigo: "PROY 001/2025", nombre: "César Adrián",           alias: ["cesar", "adrian"] },
   { codigo: "PROY 004/2025", nombre: "Franxi Solano",          alias: ["franxi", "solano"] },
   { codigo: "PROY 008/2025", nombre: "Jorge Córdoba",          alias: ["jorge", "cordoba"] },
@@ -63,7 +65,7 @@ const getMesActual = () => {
 const getDiaSemana = () => {
   const dias = ["","LUN","MAR","MIÉ","JUE","VIE","SÁB"];
   const cr = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
-  const d = cr.getDay(); // 0=Dom, 1=Lun...6=Sáb
+  const d = cr.getDay();
   return d === 0 ? "DOM" : dias[d];
 };
 
@@ -93,8 +95,9 @@ REGLAS DE INTERPRETACIÓN:
 - NÚMEROS COSTARRICENSES: punto = separador de miles → "4.500"=4500, "1.200.000"=1200000
 - "X mil" = X*1000. "medio millón" = 500000
 - Sin fecha = hoy: ${TODAY()}
-- Detectá proyecto por alias. Proyectos cerrados también reciben gastos
-- Gastos operativos sin proyecto → proyecto_codigo = "SSR"
+- Detectá proyecto por nombre o alias. Si el admin menciona un nombre de cliente (ej: "Karim", "Miriam", "Maccaferri"), buscalo en la lista de PROYECTOS de arriba y usá su código exacto.
+- Si no encontrás el proyecto por ningún alias → proyecto_codigo = "SSR"
+- Gastos operativos sin proyecto claro → proyecto_codigo = "SSR"
 - SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales (excepto planillas de horas)
 
 PESTAÑAS VÁLIDAS — SOLO ESTOS NOMBRES:
