@@ -30,7 +30,6 @@ const SUPERVISOR_NUMS = [
   "+50683091817",  // Darwin
   "+50670068477",  // Darwin (segundo número)
   "+50671981370",  // Melvin
-  "+50662052075",  // Jessy
 ];
 
 // ── Cron: recordatorios 8:00 AM Costa Rica ────────────────────────────────────
