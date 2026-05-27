@@ -19,7 +19,7 @@ const SUPERVISORES = [
 ];
 
 // URL del Apps Script para aprobación/rechazo de vales
-const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxpOjoxmar3WsfqwFS1EXJN4uYApUtXph08NSt_q35_6QIX-IP0SuFEqNFqhExRKIvx/exec";
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbztWIf5eBN2GQXCQCvw53EmBwMdoUz_ZTrIUSTyQupq_wul4I_T9Mo5sGMi1ooMA-kk/exec";
 
 // Números exactos a ignorar completamente
 const IGNORAR = [
