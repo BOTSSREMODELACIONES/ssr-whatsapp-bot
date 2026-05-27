@@ -18,6 +18,9 @@ const SUPERVISORES = [
   "+50671981370", // Melvin — Encargado de proyectos
 ];
 
+// URL del Apps Script para aprobación/rechazo de vales
+const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxpOjoxmar3WsfqwFS1EXJN4uYApUtXph08NSt_q35_6QIX-IP0SuFEqNFqhExRKIvx/exec";
+
 // Números exactos a ignorar completamente
 const IGNORAR = [
   "+5215571965946", // Estafador México
@@ -146,7 +149,33 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         " _me pagaron 500 mil de adelanto del proyecto 044_",
         " _le pagué a Melvin 80 mil de planilla_",
         " _compré tornillos para inventario 15 mil_",
+        "",
+        "💵 *Vales de trabajadores:*",
+        " _aprobar vale Darwin Guillon_",
+        " _rechazar vale Melvin_",
       ].join("\n"));
+      return;
+    }
+
+    // ── 1.3 APROBAR / RECHAZAR VALE ──────────────────────────────────────────
+    const _aprobarMatch = normalized.match(/^aprobar vale\s+(.+)$/i);
+    const _rechazarMatch = normalized.match(/^rechazar vale\s+(.+)$/i);
+
+    if (_aprobarMatch || _rechazarMatch) {
+      const accion = _aprobarMatch ? "aprobar" : "rechazar";
+      const nombre = (_aprobarMatch || _rechazarMatch)[1].trim();
+      try {
+        const urlReq = `${APPS_SCRIPT_URL}?action=${accion}&nombre=${encodeURIComponent(nombre)}`;
+        await httpGetWithRedirects(urlReq);
+        const emoji = accion === "aprobar" ? "✅" : "❌";
+        await sendText(from,
+          `${emoji} Vale de *${nombre}* ${accion === "aprobar" ? "aprobado" : "rechazado"} correctamente.\n\n` +
+          `La ganancia neta de la semana fue actualizada.`
+        );
+      } catch (err) {
+        console.error("❌ Error vale:", err.message);
+        await sendText(from, `❌ Error al ${accion} el vale. Verificá manualmente en la planilla VALES_APP.`);
+      }
       return;
     }
 
@@ -581,6 +610,23 @@ async function notifyAllSupervisors(from, session, lastMsg, tipo) {
   resultados.forEach((r, i) => {
     if (r.status === "fulfilled") console.log(`✅ Supervisor [${SUPERVISORES[i]}] notificado [${tipo}]`);
     else console.error(`❌ Error notificando ${SUPERVISORES[i]}: ${r.reason?.message}`);
+  });
+}
+
+// ── HTTP con seguimiento de redirecciones (para Apps Script) ─────────────────
+async function httpGetWithRedirects(url, depth = 0) {
+  if (depth > 5) throw new Error("Too many redirects");
+  const lib = url.startsWith("https") ? require("https") : require("http");
+  return new Promise((resolve, reject) => {
+    lib.get(url, { headers: { "User-Agent": "SSR-Bot/1.0" } }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        resolve(httpGetWithRedirects(res.headers.location, depth + 1));
+        return;
+      }
+      let body = "";
+      res.on("data", c => body += c);
+      res.on("end", () => resolve(body));
+    }).on("error", reject);
   });
 }
 
