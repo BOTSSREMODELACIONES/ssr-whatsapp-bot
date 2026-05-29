@@ -63,30 +63,43 @@ Tu trabajo es clasificar el mensaje del administrador y extraer los parámetros.
 
 ${contextoClientes}
 
+EQUIPO INTERNO DE SS REMODELACIONES (personal de confianza, no son clientes):
+ • Melvin Zúñiga / Melvin / Cuñis → Gerente de Proyectos
+ • Jessy Zúñiga / Jessy → Diseñadora de Interiores
+ • Fernando Cheves / Fernando / Fercho / Fer → Operario
+ • Mauricio / Chollina → Operario
+ • Maribel / Mari → Operaria
+
 REGLA IMPORTANTE — Referencias contextuales:
 Cuando el admin dice "ese cliente", "el cliente", "la señora", "el señor", "el de antes",
 "el que estaba agendando", "el último cliente", etc. — debés resolver a quién se refiere
 usando la lista de clientes recientes de arriba. Elegí el cliente con actividad más reciente.
 
 REGLA CRÍTICA — Comandos con número de teléfono explícito:
-Si el mensaje menciona un número de teléfono (ej: +50688950719, 88950719, del +506XXXXXXX)
-junto con una instrucción de qué decirle, SIEMPRE es accion="outbound".
-El destino debe ser ese número de teléfono EXACTAMENTE como aparece.
+Si el mensaje menciona un número de teléfono junto con una instrucción de qué decirle,
+SIEMPRE es accion="outbound". El destino debe ser ese número EXACTAMENTE.
 NUNCA clasifiques como "historial" un mensaje que pide enviarle algo a alguien.
+
+REGLA — Personal interno:
+Si el admin dice "dile a Melvin", "escríbele a Fercho", "mándale a Jessy", etc.,
+es accion="outbound" con el nombre/apodo exacto como destino.
+Sasha ya sabe sus números — no necesitás resolverlos vos.
 
 Respondé SOLO con un JSON válido (sin markdown, sin explicaciones):
 {
   "accion": "outbound" | "historial" | "info_cliente" | "listar" | "buscar" | "desconocido",
-  "destino": "nombre o número del cliente resuelto (para outbound)",
-  "mensaje": "instrucción de lo que hay que comunicarle al cliente (para outbound)",
+  "destino": "nombre o número del cliente/persona resuelto (para outbound)",
+  "mensaje": "instrucción de lo que hay que comunicarle (para outbound)",
   "busqueda": "término de búsqueda (para historial, info, buscar)"
 }
 
 Ejemplos:
 - "envíale a María que mañana es la visita" → outbound, destino=María
+- "mándale un mensaje a Melvin y preguntale cómo van en el proyecto" → outbound, destino=Melvin, mensaje=preguntale cómo van en el proyecto
+- "escríbele a Fercho que mañana empieza a las 7am" → outbound, destino=Fernando, mensaje=que mañana empieza a las 7am
+- "dile a Jessy que revise el diseño de la cocina de Juan Diego" → outbound, destino=Jessy, mensaje=que revise el diseño de la cocina de Juan Diego
 - "avísale a ese cliente que para mañana no hay, que para el viernes" → outbound, destino=cliente más reciente de la lista
 - "manda a 88887777: hola" → outbound, destino=88887777
-- "Sasha dile a este cliente Wendy Arce del +50688950719 que tenemos disponibilidad para el martes a las 9am" → outbound, destino=+50688950719, mensaje=que tenemos disponibilidad para el martes a las 9am
 - "dile al cliente del +50688950719 que..." → outbound, destino=+50688950719
 - "qué habló María González" → historial, busqueda=María González
 - "pasame los datos de Gustavo" → info_cliente, busqueda=Gustavo
@@ -257,13 +270,19 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     if (interpretacion.accion === "outbound" && interpretacion.destino && interpretacion.mensaje) {
       const telefono = await outbound.resolverTelefono(interpretacion.destino);
       if (!telefono) {
-        await sendText(from, `❌ No encontré a *"${interpretacion.destino}"* en los clientes.\nIntentá con el número: _enviar a +506XXXXXXXX: [instrucción]_`);
+        await sendText(from, `❌ No encontré a *"${interpretacion.destino}"* en los contactos.\nIntentá con el número: _enviar a +506XXXXXXXX: [instrucción]_`);
       } else {
+        // Resolver nombre: primero equipo SSR, luego CRM
         let clientName = interpretacion.destino;
-        try {
-          const crmRows = await memoria.buscarClienteEnCRM(interpretacion.destino);
-          if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
-        } catch { /* no critical */ }
+        const miembroSSR = outbound.buscarEnEquipoSSR(interpretacion.destino);
+        if (miembroSSR) {
+          clientName = miembroSSR.nombre;
+        } else {
+          try {
+            const crmRows = await memoria.buscarClienteEnCRM(interpretacion.destino);
+            if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
+          } catch { /* no critical */ }
+        }
 
         const mensajeProfesional = await outbound.componerMensajeProfesional(interpretacion.mensaje, clientName);
         const resultado = await outbound.enviarProactivo(telefono, mensajeProfesional);
