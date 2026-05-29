@@ -2,6 +2,9 @@ require("dotenv").config();
 const express = require("express");
 const cron    = require("node-cron");
 const path    = require("path");
+const https   = require("https");
+const fs      = require("fs");
+const os      = require("os");
 const { handleMessage }       = require("./bot/index");
 const { sendDailyReminders }  = require("./bot/reminders");
 
@@ -65,69 +68,121 @@ function addToBuffer(from, messageId, text, mediaId) {
   buffer.timer = setTimeout(() => flushBuffer(from), BATCH_WINDOW_MS);
 }
 
-// ── Transcribir audio de supervisor y procesar como comando ───────────────────
+// ── Transcribir audio con Whisper (OpenAI) ────────────────────────────────────
 /**
- * Cuando un admin manda un nota de voz:
- * 1. Descarga el audio desde Meta
- * 2. Transcribe con Claude
- * 3. Procesa el texto como comando admin
- * 4. Responde con confirmación
+ * Descarga el audio de WhatsApp y lo transcribe con Whisper.
+ * Whisper es la única API que realmente entiende audio — Claude no procesa audio nativo.
+ *
+ * @param {string} audioId   - Media ID del audio en WhatsApp
+ * @param {string} mimeType  - MIME type del audio (ej: audio/ogg, audio/mpeg)
+ * @returns {Promise<string>} texto transcrito
  */
-async function transcribirYEjecutarComando(from, audioId, messageId) {
+async function transcribirConWhisper(audioId, mimeType = "audio/ogg") {
   const { downloadMedia } = require("./bot/messenger");
-  const { sendText }      = require("./bot/messenger");
-  const Anthropic         = require("@anthropic-ai/sdk");
+
+  // 1. Descargar audio desde Meta en base64
+  const { base64, mimeType: detectedMime } = await downloadMedia(audioId);
+  const finalMime = detectedMime || mimeType;
+
+  // 2. Convertir base64 a buffer y guardar en archivo temporal
+  const buffer  = Buffer.from(base64, "base64");
+  const ext     = finalMime.includes("ogg") ? "ogg"
+                : finalMime.includes("mpeg") || finalMime.includes("mp3") ? "mp3"
+                : finalMime.includes("mp4") || finalMime.includes("m4a") ? "m4a"
+                : finalMime.includes("webm") ? "webm"
+                : "ogg";
+  const tmpFile = path.join(os.tmpdir(), `sasha_audio_${audioId}.${ext}`);
+  fs.writeFileSync(tmpFile, buffer);
+
+  console.log(`🎙️ Audio descargado: ${Math.round(buffer.length / 1024)}KB (${finalMime}) → ${tmpFile}`);
 
   try {
-    // Avisar que está procesando
-    await sendText("+" + from, "🎙️ _Procesando tu nota de voz..._");
+    // 3. Enviar a Whisper via multipart/form-data
+    const apiKey   = process.env.OPENAI_API_KEY;
+    if (!apiKey) throw new Error("OPENAI_API_KEY no configurada — no se puede transcribir audio");
 
-    // Descargar audio desde Meta
-    const { base64, mimeType } = await downloadMedia(audioId);
-    console.log(`🎙️ Audio de supervisor ${from}: ${mimeType}, ${Math.round(base64.length * 0.75 / 1024)}KB`);
+    const boundary = `----WhisperBoundary${Date.now()}`;
+    const fileData = fs.readFileSync(tmpFile);
+    const filename = `audio.${ext}`;
 
-    // Transcribir con Claude
-    const anthropic  = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response   = await anthropic.messages.create({
-      model:      "claude-sonnet-4-5",
-      max_tokens: 500,
-      system:     "Transcribí exactamente lo que dice el audio en español. Devolvé solo el texto transcrito, sin explicaciones ni formato extra. Si no podés transcribir el audio, respondé solo: [NO_AUDIO]",
-      messages:   [{
-        role:    "user",
-        content: [
-          {
-            type:   "document",
-            source: { type: "base64", media_type: mimeType || "audio/ogg", data: base64 },
-          },
-          { type: "text", text: "Transcribí este audio." },
-        ],
-      }],
+    // Construir body multipart manualmente (sin deps extra)
+    const parts = [
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\nes\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\njson\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${finalMime}\r\n\r\n`),
+      fileData,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ];
+    const body = Buffer.concat(parts);
+
+    const resultado = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: "api.openai.com",
+        path:     "/v1/audio/transcriptions",
+        method:   "POST",
+        headers:  {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type":  `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length,
+        },
+      }, (res) => {
+        let data = "";
+        res.on("data", c => data += c);
+        res.on("end", () => resolve(data));
+      });
+      req.on("error", reject);
+      req.write(body);
+      req.end();
     });
 
-    const texto = (response.content[0]?.text || "").trim();
+    const json = JSON.parse(resultado);
+    if (!json.text) throw new Error(`Whisper no retornó texto: ${resultado.slice(0, 200)}`);
 
-    if (!texto || texto === "[NO_AUDIO]" || texto.length < 2) {
-      await sendText("+" + from,
-        "❌ No pude transcribir el audio.\n\nPodés escribir el comando directamente:\n" +
-        "_envíale a [cliente]: [mensaje]_\n_listar clientes_\n_historial de [nombre]_"
+    console.log(`🎙️ Whisper transcribió: "${json.text.slice(0, 100)}"`);
+    return json.text.trim();
+
+  } finally {
+    // Limpiar archivo temporal siempre
+    try { fs.unlinkSync(tmpFile); } catch { /* ignorar */ }
+  }
+}
+
+// ── Procesar nota de voz de supervisor ───────────────────────────────────────
+/**
+ * Cuando un admin manda una nota de voz:
+ * 1. Transcribe con Whisper
+ * 2. Confirma al admin lo que escuchó
+ * 3. Procesa el texto como comando admin (finanzas, outbound, CRM, etc.)
+ */
+async function transcribirYEjecutarComando(from, audioId, messageId) {
+  const { sendText } = require("./bot/messenger");
+  const fromE164 = "+" + from;
+
+  try {
+    await sendText(fromE164, "🎙️ _Procesando tu nota de voz..._");
+
+    const texto = await transcribirConWhisper(audioId);
+
+    if (!texto || texto.length < 2) {
+      await sendText(fromE164,
+        "❌ No pude entender el audio.\n\nEscribí el comando directamente, por ejemplo:\n" +
+        "_pagué 50 mil de gasolina_\n_envíale a María que mañana es la visita_\n_listar clientes_"
       );
       return;
     }
 
-    console.log(`🎙️ Transcripción supervisor ${from}: "${texto}"`);
+    // Confirmar al admin lo que escuchó antes de ejecutar
+    await sendText(fromE164, `🎙️ _Escuché: "${texto}"_\n\nProcesando...`);
 
-    // Confirmar transcripción al admin
-    await sendText("+" + from, `🎙️ _Escuché: "${texto}"_\n\nProcesando...`);
-
-    // Procesar el texto transcripto como comando admin
-    await handleMessage("+" + from, texto, messageId, null);
+    // Procesar como comando admin normal
+    await handleMessage(fromE164, texto, messageId, null);
 
   } catch (err) {
     console.error("❌ Error transcribiendo voz de supervisor:", err.message);
-    const { sendText: st } = require("./bot/messenger");
-    st("+" + from,
-      "❌ Error al procesar el audio.\n\nEscribí el comando directamente:\n" +
-      "_envíale a [cliente]: [mensaje]_"
+    await sendText(fromE164,
+      "❌ Error al procesar el audio. Asegurate que la variable OPENAI_API_KEY esté configurada.\n\n" +
+      "Mientras tanto podés escribir el comando directamente."
     ).catch(() => {});
   }
 }
@@ -155,18 +210,16 @@ app.post("/webhook", async (req, res) => {
     if (body?.object === "page") {
       const { handleFBDM, handleFBComment } = require("./bot/social");
       for (const entry of (body.entry || [])) {
-        // DMs de Messenger
         for (const event of (entry.messaging || [])) {
-          const senderId   = event.sender?.id;
-          const pageId     = event.recipient?.id;
-          const fbPageId   = process.env.FB_PAGE_ID;
+          const senderId = event.sender?.id;
+          const pageId   = event.recipient?.id;
+          const fbPageId = process.env.FB_PAGE_ID;
           if (!senderId || senderId === pageId || senderId === fbPageId) continue;
           const text = event.message?.text;
           if (!text) continue;
           console.log(`💙 FB Messenger de ${senderId}: "${text.substring(0, 60)}"`);
           handleFBDM(senderId, text, null).catch(e => console.error("❌ handleFBDM:", e.message));
         }
-        // Comentarios en posts de la página
         for (const change of (entry.changes || [])) {
           if (change.field !== "feed") continue;
           const val = change.value;
@@ -176,7 +229,6 @@ app.post("/webhook", async (req, res) => {
           const userName  = val.from?.name || "Usuario";
           const postId    = val.post_id;
           if (!commentId || !texto) continue;
-          // No responder comentarios propios de la página
           if (val.from?.id === process.env.FB_PAGE_ID) continue;
           console.log(`💙 FB Comentario de ${userName}: "${texto.substring(0, 60)}"`);
           handleFBComment(commentId, texto, userName, postId).catch(e => console.error("❌ handleFBComment:", e.message));
@@ -190,7 +242,6 @@ app.post("/webhook", async (req, res) => {
       const { handleIGDM, handleIGComment } = require("./bot/social");
       const igAccountId = process.env.INSTAGRAM_ACCOUNT_ID;
       for (const entry of (body.entry || [])) {
-        // DMs de Instagram
         for (const event of (entry.messaging || [])) {
           const senderId = event.sender?.id;
           if (!senderId || senderId === igAccountId) continue;
@@ -199,7 +250,6 @@ app.post("/webhook", async (req, res) => {
           console.log(`🟣 IG DM de ${senderId}: "${text.substring(0, 60)}"`);
           handleIGDM(senderId, text, null).catch(e => console.error("❌ handleIGDM:", e.message));
         }
-        // Comentarios en posts de Instagram
         for (const change of (entry.changes || [])) {
           if (change.field !== "comments") continue;
           const val       = change.value;
@@ -208,7 +258,7 @@ app.post("/webhook", async (req, res) => {
           const userId    = val?.from?.id;
           const mediaId   = val?.media?.id || "unknown";
           if (!commentId || !texto || !userId) continue;
-          if (userId === igAccountId) continue; // no responder comentarios propios
+          if (userId === igAccountId) continue;
           console.log(`🟣 IG Comentario de ${userId}: "${texto.substring(0, 60)}"`);
           handleIGComment(commentId, texto, userId, mediaId).catch(e => console.error("❌ handleIGComment:", e.message));
         }
@@ -255,18 +305,19 @@ app.post("/webhook", async (req, res) => {
         addToBuffer(from, messageId, caption || null, mediaId);
 
       } else if (msg.type === "video") {
-        const caption     = msg.video?.caption || "";
+        const caption      = msg.video?.caption || "";
         const videoContext = caption
           ? `[El cliente envió un video con el mensaje: "${caption}"]`
           : "[El cliente envió un video de su proyecto]";
         addToBuffer(from, messageId, videoContext, null);
 
       } else if (msg.type === "audio") {
-        const audioId = msg.audio?.id;
+        const audioId    = msg.audio?.id;
+        const audioMime  = msg.audio?.mime_type || "audio/ogg";
 
         if (SUPERVISOR_NUMS.includes(fromE164)) {
-          // ── Admin mandó nota de voz → transcribir y ejecutar ───────────────
-          console.log(`🎙️ Nota de voz de ADMIN ${from} → transcribiendo...`);
+          // ── Admin mandó nota de voz → transcribir con Whisper y ejecutar ──
+          console.log(`🎙️ Nota de voz de ADMIN ${from} (${audioMime}) → transcribiendo con Whisper...`);
           if (audioId) {
             transcribirYEjecutarComando(from, audioId, messageId)
               .catch(err => console.error("❌ transcribirYEjecutarComando:", err.message));
@@ -279,10 +330,11 @@ app.post("/webhook", async (req, res) => {
           addToBuffer(from, messageId, "[El cliente envió un mensaje de voz]", null);
           if (audioId) {
             const { sendMediaById, sendText: st } = require("./bot/messenger");
+            const clientLabel = from;
             for (const sup of SUPERVISOR_NUMS) {
               sendMediaById(sup, audioId, "audio")
                 .catch(e => console.warn(`⚠️ No se pudo reenviar audio a ${sup}:`, e.message));
-              st(sup, `🎙️ *Audio de cliente +${from}*`).catch(() => {});
+              st(sup, `🎙️ *Audio de cliente +${clientLabel}*`).catch(() => {});
             }
           }
         }
@@ -432,7 +484,7 @@ app.get("/", (req, res) => res.json({
   bot:      "SS Remodelaciones ∙ Sasha",
   status:   "✅ operando",
   api:      "Meta WhatsApp Business API",
-  features: ["visión de fotos", "notas de voz admin", "outbound proactivo", "memoria CRM", "recordatorios", "Meta Lead Ads"],
+  features: ["visión de fotos", "notas de voz admin (Whisper)", "outbound proactivo", "memoria CRM", "recordatorios", "Meta Lead Ads"],
   ts:       new Date().toISOString(),
 }));
 
@@ -527,7 +579,6 @@ Formato de respuesta:
   ]
 }`;
 
-    const proyectoGrande = notas && notas.length > 2000;
     const content = [];
 
     if (fotos && fotos.length > 0) {
@@ -710,7 +761,6 @@ app.get("/api/crear-campana", async (req, res) => {
 });
 
 // ── CONTROL DE ASISTENCIA SSR REMODELACIONES (GLIDE + GOOGLE SHEETS) ──────────
-// Endpoint dedicado para recibir alertas desde Google Apps Script de forma segura.
 app.post("/webhook-asistencia", async (req, res) => {
   try {
     const { message } = req.body;
@@ -720,9 +770,8 @@ app.post("/webhook-asistencia", async (req, res) => {
 
     const { sendText } = require("./bot/messenger");
 
-    // Enviamos la notificación en bucle a todos los supervisores asignados
     for (const sup of SUPERVISOR_NUMS) {
-      await sendText(sup, message).catch(e => 
+      await sendText(sup, message).catch(e =>
         console.warn(`⚠️ No se pudo enviar reporte de asistencia a ${sup}:`, e.message)
       );
     }
@@ -740,7 +789,7 @@ app.listen(PORT, () => {
 ┌────────────────────────────────────────────────────────────┐
 │  🏗️  SS Remodelaciones ∙ WhatsApp Bot (Sasha)              │
 │  🤖  IA: Claude Sonnet                                     │
-│  🎙️  Notas de voz: admins pueden hablarle a Sasha         │
+│  🎙️  Notas de voz: Whisper (OpenAI) para admins           │
 │  ⏰  Recordatorios: 8:00 AM CR diario                      │
 │  🚀  Puerto: ${PORT}                                       │
 │  📌  Webhook WhatsApp: GET|POST /webhook                   │
