@@ -106,7 +106,8 @@ Ejemplos:
 async function handleMessage(from, text, messageId, mediaIds = null) {
   if (messageId) markRead(messageId).catch(() => {});
 
-  const normalized = (text || "").trim();
+  let normalized = (text || "").trim();
+
   const session = get(from);
   const fromE164 = from.startsWith("+") ? from : `+${from}`;
 
@@ -133,7 +134,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       await sendText(from, [
         "🤖 *Sasha — Panel Admin*",
         "",
-        "Podés escribirme en lenguaje natural, por ejemplo:",
+        "Podés escribirme en lenguaje natural o enviarme un *audio*, por ejemplo:",
         "",
         "📤 *Enviar mensajes:*",
         " _envíale a María González que mañana es la visita_",
@@ -152,12 +153,12 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         " _buscar remodelación cocina_",
         " _fotos de Carlos_",
         "",
-        "💰 *Registrar gastos e ingresos:*",
+        "💰 *Registrar gastos e ingresos (también por audio 🎙️):*",
         " _pagué 125 mil de gasolina para Sergio_",
         " _compré materiales en EPA por 340 mil para Karim_",
         " _me pagaron 500 mil de adelanto del proyecto 044_",
         " _le pagué a Melvin 80 mil de planilla_",
-        " _compré tornillos para inventario 15 mil_",
+        " _Marriot pagó el adelanto del 50%_",
         "",
         "💵 *Vales de trabajadores:*",
         " _aprobar vale Darwin Guillon_",
@@ -196,36 +197,27 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     }
 
     // ── DETECCIÓN RÁPIDA: comando outbound con número de teléfono explícito ──
-    // Si el mensaje del admin incluye un número de teléfono y palabras como
-    // "dile", "dísele", "avísale", "manda", "escríbele", etc., lo procesamos
-    // directamente como outbound sin pasar por procesarComandoOutbound (que
-    // a veces no reconoce este formato) ni interpretarComandoAdmin.
     const telefonoEnMensaje = normalized.match(/\+?506\d{8}|\+?\d{8,15}/);
     const esComandoOutboundDirecto = telefonoEnMensaje &&
       /dile|disele|avisale|avísale|dísele|manda|escríbele|escribele|enviале|enviale|comunícale|comunicale|informa|notifica/i.test(normalized);
 
     if (esComandoOutboundDirecto) {
-      // Extraer número limpio (asegurar formato E164 con +506)
       let telRaw = telefonoEnMensaje[0].replace(/\D/g, "");
       if (telRaw.length === 8) telRaw = "506" + telRaw;
       const telDestino = telRaw;
 
-      // Extraer el mensaje a enviar: todo lo que viene después del número
-      // o después de palabras clave como "que", "diciéndole", etc.
       const despuesDelNumero = normalized.replace(/\+?506\d{8}|\+?\d{10,15}/, "").trim();
       const instruccion = despuesDelNumero
         .replace(/^(sasha\s+)?(dile|avisale|avísale|manda|escríbele|escribele|enviale|enviале|comunícale|notifica)\s+(a\s+)?(este\s+cliente\s+)?(\w+\s+\w+\s+)?(del?\s+)?/i, "")
         .replace(/^que\s+/i, "")
         .trim();
 
-      // Buscar nombre del cliente en CRM para personalizar
       let clientName = telDestino;
       try {
         const crmRows = await memoria.buscarClienteEnCRM(telDestino);
         if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
       } catch { /* no crítico */ }
 
-      // También intentar extraer nombre del propio mensaje del admin
       const nombreEnMensaje = normalized.match(/(?:cliente\s+)([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)/);
       if (nombreEnMensaje) clientName = nombreEnMensaje[1];
 
@@ -395,8 +387,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero SS Remodelaciones NO realiza visitas los miércoles ni jueves (tampoco sábados ni domingos). Debes decirle claramente que ese día no hay disponibilidad y ofrecerle el próximo día hábil: lunes, martes o viernes. Sé amable y directo — NO digas que vas a "verificar", ya sabes la respuesta.]`;
 
       } else if (dayMentioned === "cualquiera") {
-        // ── FIX Bug 1: cliente acepta cualquier día ──────────────────────────
-        // Consultar los 3 días disponibles en paralelo y presentar de una vez
         const [slotsLunes, slotsMartes, slotsViernes] = await Promise.all([
           getAvailableSlots("lunes"),
           getAvailableSlots("martes"),
@@ -625,9 +615,7 @@ function detectDayOrDate(text) {
   if (n.includes("sabado"))    return "sabado";
   if (n.includes("domingo"))   return "domingo";
 
-  // ── FIX Bug 1: detectar "cualquier día" ──────────────────────────────────
-  // Cuando el cliente dice que acepta cualquier día de los ofrecidos,
-  // retornamos "cualquiera" para consultar todos los días disponibles de una.
+  // Detectar "cualquier día"
   if (/cualquier|cualquiera|los tres|los 3|me da igual|el que sea|lo que haya|indistinto|cualquiera de los/i.test(n)) {
     return "cualquiera";
   }
