@@ -4,19 +4,78 @@
  *
  * Sasha actúa como secretaria ejecutiva:
  * El admin da una instrucción → Sasha redacta el mensaje profesional → lo envía.
- *
- * EJEMPLOS:
- *  "envíale a María que mañana es la visita a las 9am que si puede confirmar"
- *   → Sasha redacta: "Estimada María, le contactamos de SS Remodelaciones para
- *     recordarle su visita técnica programada para mañana a las 9:00 a.m.
- *     ¿Le es posible confirmarnos su asistencia? Quedamos a sus órdenes."
- *
- *  "dile a Juan que la cotización está lista y que la revise"
- *   → Sasha redacta un mensaje formal informando que la cotización está disponible.
  */
 
 const { sendText, sendTemplate } = require("./messenger");
 const memoria                    = require("./memoria");
+
+// ── Directorio interno del equipo SSR ────────────────────────────────────────
+// Personal de confianza que Sasha conoce por nombre, apodo o alias.
+// Se consulta ANTES del CRM para que comandos como "dile a Melvin que..."
+// o "escríbele a Fercho" funcionen sin número explícito.
+const EQUIPO_SSR = [
+  {
+    nombre:   "Melvin Zúñiga",
+    telefono: "50671981370",
+    alias:    ["melvin", "cuñis", "cunnis", "zuñiga", "zuniga", "melvi", "cuniz"],
+    rol:      "Gerente de Proyectos",
+  },
+  {
+    nombre:   "Jessy Zúñiga",
+    telefono: "50662052075",
+    alias:    ["jessy", "jesy", "jessy zuñiga", "diseñadora", "disenadora", "jessi"],
+    rol:      "Diseñadora de Interiores",
+  },
+  {
+    nombre:   "Fernando Cheves",
+    telefono: "50661116467",
+    alias:    ["fernando", "fercho", "fer", "cheves", "chevez", "fernando cheves", "fernando chevez"],
+    rol:      "Operario",
+  },
+  {
+    nombre:   "Mauricio",
+    telefono: "50685734855",
+    alias:    ["mauricio", "chollina", "cholina", "mauri", "chollinas"],
+    rol:      "Operario",
+  },
+  {
+    nombre:   "Maribel",
+    telefono: "50662940617",
+    alias:    ["maribel", "mari"],
+    rol:      "Operaria",
+  },
+];
+
+/**
+ * Busca un miembro del equipo SSR por nombre o alias.
+ * Normaliza acentos y mayúsculas para comparación flexible.
+ * @param {string} busqueda
+ * @returns {{ nombre, telefono, rol } | null}
+ */
+function buscarEnEquipoSSR(busqueda) {
+  if (!busqueda) return null;
+  const norm = busqueda.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim();
+
+  for (const persona of EQUIPO_SSR) {
+    // Coincidencia en alias
+    if (persona.alias.some(a => {
+      const aNorm = a.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      return norm.includes(aNorm) || aNorm.includes(norm);
+    })) {
+      return persona;
+    }
+    // Coincidencia en nombre completo normalizado
+    const nombreNorm = persona.nombre.toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const primerNombre = nombreNorm.split(" ")[0];
+    if (nombreNorm.includes(norm) || norm.includes(primerNombre)) {
+      return persona;
+    }
+  }
+  return null;
+}
 
 // ── Registro de últimos mensajes entrantes por cliente ────────────────────────
 const _lastIncoming = new Map();
@@ -40,44 +99,36 @@ function limpiarTelefono(phone) {
 }
 
 // ── Redactar mensaje profesional ──────────────────────────────────────────────
-/**
- * Toma la instrucción del admin y redacta un mensaje profesional
- * como si viniera directamente de SS Remodelaciones.
- *
- * @param {string} instruccion - Lo que el admin quiere comunicar (en sus palabras)
- * @param {string} clientName  - Nombre del cliente (opcional, para personalizar)
- * @returns {Promise<string>} Mensaje profesional listo para enviar
- */
 async function componerMensajeProfesional(instruccion, clientName) {
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const response = await anthropic.messages.create({
+    response = await anthropic.messages.create({
       model:      "claude-sonnet-4-5",
       max_tokens: 300,
       system: `Sos Sasha, asistente ejecutiva de SS Remodelaciones, empresa de remodelaciones y construcción en Costa Rica.
 
-Tu tarea es redactar mensajes de WhatsApp profesionales para enviarle a clientes, basándote en la instrucción del supervisor.
+Tu tarea es redactar mensajes de WhatsApp profesionales para enviarle a personas (clientes o personal interno).
 
 REGLAS DE FORMATO:
 - Tono: formal, cálido, respetuoso. Español costarricense.
-- Si tenés el nombre del cliente, usalo al inicio (ej: "Estimada Wendy," o "Hola María,")
-- El mensaje debe sonar como si viniera directamente de la empresa
+- Si tenés el nombre de la persona, usalo al inicio (ej: "Hola Melvin," o "Estimada María,")
+- El mensaje debe sonar como si viniera directamente de la empresa o del gerente
 - Sé conciso: no más de 4-5 líneas
+- Para personal interno (operarios, gerentes) podés usar un tono más directo y menos formal
 - Siempre incluí al final: "Saludos, *SS Remodelaciones*"
 - SOLO devolvé el mensaje final, sin explicaciones ni notas
 
 REGLA CRÍTICA — FIDELIDAD A LOS DATOS:
 - Reproducí EXACTAMENTE los horarios, fechas, nombres y datos que menciona la instrucción
 - NUNCA agregues, cambies ni inventes horas, días, precios u otros datos
-- Si la instrucción dice "4:00 o 4:30", el mensaje debe decir exactamente "4:00 o 4:30" — NO agregues "3:00" ni ningún otro horario
-- Si la instrucción dice "martes", el mensaje dice "martes" — no "lunes" ni ningún otro día
+- Si la instrucción dice "4:00 o 4:30", el mensaje debe decir exactamente "4:00 o 4:30"
 - Tu único trabajo es ajustar el tono y redacción, NO los datos concretos
 - En caso de duda: copiá el dato exacto como lo dio el supervisor`,
       messages: [{
         role: "user",
-        content: `${clientName && clientName.replace(/\D/g, "").length < 4 ? `Nombre del cliente: ${clientName}\n` : ""}Instrucción del supervisor: "${instruccion}"\n\nRedactá el mensaje WhatsApp profesional respetando EXACTAMENTE los datos mencionados.`,
+        content: `${clientName && clientName.replace(/\D/g, "").length < 4 ? `Nombre de la persona: ${clientName}\n` : ""}Instrucción del supervisor: "${instruccion}"\n\nRedactá el mensaje WhatsApp profesional respetando EXACTAMENTE los datos mencionados.`,
       }],
     });
 
@@ -86,10 +137,10 @@ REGLA CRÍTICA — FIDELIDAD A LOS DATOS:
       console.log(`✍️ Mensaje redactado por Sasha: "${mensaje.slice(0, 80)}..."`);
       return mensaje;
     }
-    return instruccion; // fallback si Claude falla
+    return instruccion;
   } catch (err) {
     console.warn("⚠️ Outbound: error redactando mensaje:", err.message);
-    return instruccion; // fallback al mensaje original
+    return instruccion;
   }
 }
 
@@ -131,8 +182,18 @@ async function enviarProactivo(to, message) {
 async function resolverTelefono(nombreOTelefono) {
   const clean       = (nombreOTelefono || "").trim();
   const soloDigitos = clean.replace(/\D/g, "");
+
+  // 1. Si ya es un número, retornarlo limpio
   if (soloDigitos.length >= 8) return limpiarTelefono(clean);
 
+  // 2. Buscar primero en el equipo SSR (personal interno)
+  const miembro = buscarEnEquipoSSR(clean);
+  if (miembro) {
+    console.log(`👤 Equipo SSR: "${clean}" → ${miembro.nombre} (${miembro.telefono})`);
+    return miembro.telefono;
+  }
+
+  // 3. Buscar en memoria/CRM (clientes)
   try {
     const rows = await memoria.buscarPorNombre(clean, 5);
     if (rows && rows.length > 0 && rows[0][1]) {
@@ -172,7 +233,7 @@ function parsearComandoOutbound(text) {
   }
 
   const conQue = [
-    /^(?:env[ií]ale?\s+(?:un\s+mensaje\s+)?a|d[ií]le?\s+a|av[ií]sale?\s+a|mand(?:ar?\s+a|ale?\s+a))\s+(.+?)\s+que\s+(.+)/is,
+    /^(?:env[ií]ale?\s+(?:un\s+mensaje\s+)?a|d[ií]le?\s+a|av[ií]sale?\s+a|mand(?:ar?\s+a|ale?\s+a)|escr[ií]bele?\s+a|escr[ií]bele?\s+(?:un\s+(?:mensaje\s+)?)?a)\s+(.+?)\s+(?:y\s+)?(?:pre[gq]untale?\s+)?(?:que\s+)?(.+)/is,
   ];
   for (const p of conQue) {
     const m = t.match(p);
@@ -198,24 +259,31 @@ async function procesarComandoOutbound(commandText) {
   const telefono = await resolverTelefono(destino);
 
   if (!telefono) {
+    // Verificar si es personal SSR para dar mensaje de error más útil
+    const esEquipoSSR = EQUIPO_SSR.some(p =>
+      p.alias.some(a => destino.toLowerCase().includes(a))
+    );
     return (
-      `❌ No encontré a *"${destino}"* en los clientes.\n\n` +
+      `❌ No encontré a *"${destino}"* en los ${esEquipoSSR ? "contactos" : "clientes"}.\n\n` +
       `Intentá con el número directo:\n` +
       `_enviar a +506XXXXXXXX: [instrucción]_`
     );
   }
 
-  // Obtener nombre del cliente para personalizar el mensaje
+  // Obtener nombre para personalizar el mensaje
   let clientName = destino;
   try {
-    const crmRows = await memoria.buscarClienteEnCRM(destino);
-    if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
+    // Primero buscar en equipo SSR
+    const miembro = buscarEnEquipoSSR(destino);
+    if (miembro) {
+      clientName = miembro.nombre;
+    } else {
+      const crmRows = await memoria.buscarClienteEnCRM(destino);
+      if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
+    }
   } catch { /* no critical */ }
 
-  // Redactar mensaje profesional
   const mensajeProfesional = await componerMensajeProfesional(instruccion, clientName);
-
-  // Enviar
   const resultado = await enviarProactivo(telefono, mensajeProfesional);
 
   if (resultado.ok) {
@@ -250,4 +318,6 @@ module.exports = {
   procesarComandoOutbound,
   registrarMensajeEntrante,
   dentroDeVentana,
+  EQUIPO_SSR,
+  buscarEnEquipoSSR,
 };
