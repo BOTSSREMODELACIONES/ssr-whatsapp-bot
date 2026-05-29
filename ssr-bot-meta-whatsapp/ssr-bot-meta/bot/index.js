@@ -68,6 +68,12 @@ Cuando el admin dice "ese cliente", "el cliente", "la señora", "el señor", "el
 "el que estaba agendando", "el último cliente", etc. — debés resolver a quién se refiere
 usando la lista de clientes recientes de arriba. Elegí el cliente con actividad más reciente.
 
+REGLA CRÍTICA — Comandos con número de teléfono explícito:
+Si el mensaje menciona un número de teléfono (ej: +50688950719, 88950719, del +506XXXXXXX)
+junto con una instrucción de qué decirle, SIEMPRE es accion="outbound".
+El destino debe ser ese número de teléfono EXACTAMENTE como aparece.
+NUNCA clasifiques como "historial" un mensaje que pide enviarle algo a alguien.
+
 Respondé SOLO con un JSON válido (sin markdown, sin explicaciones):
 {
   "accion": "outbound" | "historial" | "info_cliente" | "listar" | "buscar" | "desconocido",
@@ -80,8 +86,10 @@ Ejemplos:
 - "envíale a María que mañana es la visita" → outbound, destino=María
 - "avísale a ese cliente que para mañana no hay, que para el viernes" → outbound, destino=cliente más reciente de la lista
 - "manda a 88887777: hola" → outbound, destino=88887777
-- "qué conversaste con Juan" → historial, busqueda=Juan
-- "pasame los datos de Ana" → info_cliente, busqueda=Ana
+- "Sasha dile a este cliente Wendy Arce del +50688950719 que tenemos disponibilidad para el martes a las 9am" → outbound, destino=+50688950719, mensaje=que tenemos disponibilidad para el martes a las 9am
+- "dile al cliente del +50688950719 que..." → outbound, destino=+50688950719
+- "qué habló María González" → historial, busqueda=María González
+- "pasame los datos de Gustavo" → info_cliente, busqueda=Gustavo
 - "listar clientes" → listar`,
       messages: [{ role: "user", content: text }],
     });
@@ -131,6 +139,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         " _envíale a María González que mañana es la visita_",
         " _manda a +50688887777: confirmamos cita_",
         " _escríbele a Juan Pérez, dile que la cotización está lista_",
+        " _Sasha dile a Wendy del +50688950719 que tenemos disponibilidad el martes_",
         "",
         "📋 *Consultar clientes:*",
         " _listar clientes_",
@@ -183,6 +192,55 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     const respuestaFinanciera = await finanzas.procesarComandoFinanciero(normalized);
     if (respuestaFinanciera) {
       await sendText(from, respuestaFinanciera);
+      return;
+    }
+
+    // ── DETECCIÓN RÁPIDA: comando outbound con número de teléfono explícito ──
+    // Si el mensaje del admin incluye un número de teléfono y palabras como
+    // "dile", "dísele", "avísale", "manda", "escríbele", etc., lo procesamos
+    // directamente como outbound sin pasar por procesarComandoOutbound (que
+    // a veces no reconoce este formato) ni interpretarComandoAdmin.
+    const telefonoEnMensaje = normalized.match(/\+?506\d{8}|\+?\d{8,15}/);
+    const esComandoOutboundDirecto = telefonoEnMensaje &&
+      /dile|disele|avisale|avísale|dísele|manda|escríbele|escribele|enviале|enviale|comunícale|comunicale|informa|notifica/i.test(normalized);
+
+    if (esComandoOutboundDirecto) {
+      // Extraer número limpio (asegurar formato E164 con +506)
+      let telRaw = telefonoEnMensaje[0].replace(/\D/g, "");
+      if (telRaw.length === 8) telRaw = "506" + telRaw;
+      const telDestino = telRaw;
+
+      // Extraer el mensaje a enviar: todo lo que viene después del número
+      // o después de palabras clave como "que", "diciéndole", etc.
+      const despuesDelNumero = normalized.replace(/\+?506\d{8}|\+?\d{10,15}/, "").trim();
+      const instruccion = despuesDelNumero
+        .replace(/^(sasha\s+)?(dile|avisale|avísale|manda|escríbele|escribele|enviale|enviале|comunícale|notifica)\s+(a\s+)?(este\s+cliente\s+)?(\w+\s+\w+\s+)?(del?\s+)?/i, "")
+        .replace(/^que\s+/i, "")
+        .trim();
+
+      // Buscar nombre del cliente en CRM para personalizar
+      let clientName = telDestino;
+      try {
+        const crmRows = await memoria.buscarClienteEnCRM(telDestino);
+        if (crmRows && crmRows.length > 0 && crmRows[0][2]) clientName = crmRows[0][2];
+      } catch { /* no crítico */ }
+
+      // También intentar extraer nombre del propio mensaje del admin
+      const nombreEnMensaje = normalized.match(/(?:cliente\s+)([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+)/);
+      if (nombreEnMensaje) clientName = nombreEnMensaje[1];
+
+      const mensajeProfesional = await outbound.componerMensajeProfesional(instruccion || normalized, clientName);
+      const resultado = await outbound.enviarProactivo(telDestino, mensajeProfesional);
+
+      if (resultado.ok) {
+        memoria.guardarMensaje({ phone: "+" + telDestino, clientName, direction: "out", type: "text", content: `[OUTBOUND] ${mensajeProfesional}` }).catch(() => {});
+        await sendText(from,
+          `✅ *Mensaje enviado*\n📱 +${telDestino}\n\n` +
+          `📝 *Sasha redactó:*\n${mensajeProfesional}`
+        );
+      } else {
+        await sendText(from, `❌ Error al enviar a +${telDestino}: ${resultado.error}`);
+      }
       return;
     }
 
@@ -335,6 +393,36 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
       if (DIAS_NO_DISPONIBLES.includes(dayMentioned)) {
         availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero SS Remodelaciones NO realiza visitas los miércoles ni jueves (tampoco sábados ni domingos). Debes decirle claramente que ese día no hay disponibilidad y ofrecerle el próximo día hábil: lunes, martes o viernes. Sé amable y directo — NO digas que vas a "verificar", ya sabes la respuesta.]`;
+
+      } else if (dayMentioned === "cualquiera") {
+        // ── FIX Bug 1: cliente acepta cualquier día ──────────────────────────
+        // Consultar los 3 días disponibles en paralelo y presentar de una vez
+        const [slotsLunes, slotsMartes, slotsViernes] = await Promise.all([
+          getAvailableSlots("lunes"),
+          getAvailableSlots("martes"),
+          getAvailableSlots("viernes"),
+        ]);
+
+        const diasConSlots = [];
+        if (slotsLunes.length)   diasConSlots.push({ dia: "lunes",   slots: slotsLunes });
+        if (slotsMartes.length)  diasConSlots.push({ dia: "martes",  slots: slotsMartes });
+        if (slotsViernes.length) diasConSlots.push({ dia: "viernes", slots: slotsViernes });
+
+        if (diasConSlots.length === 0) {
+          availabilityContext = `\n\n[SISTEMA: El cliente acepta cualquier día pero no hay disponibilidad esta semana en lunes, martes ni viernes. Informa amablemente y ofrécele coordinar para la próxima semana.]`;
+        } else {
+          const resumen = diasConSlots.map(d => {
+            const slotsText = d.slots.map(s => {
+              const [h, m] = s.split(":");
+              const hNum = parseInt(h);
+              const h12 = hNum > 12 ? hNum - 12 : hNum;
+              return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
+            }).join(", ");
+            return `${d.dia}: ${slotsText}`;
+          }).join(" | ");
+          availabilityContext = `\n\n[SISTEMA: El cliente acepta cualquier día disponible. Disponibilidad verificada — NO digas que vas a verificar, ya tienes los datos: ${resumen}. Preséntale estos horarios directamente y que elija el que prefiera.]`;
+        }
+
       } else {
         const slots = await getAvailableSlots(dayMentioned);
         if (slots.length === 0) {
@@ -536,6 +624,13 @@ function detectDayOrDate(text) {
   if (n.includes("viernes"))   return "viernes";
   if (n.includes("sabado"))    return "sabado";
   if (n.includes("domingo"))   return "domingo";
+
+  // ── FIX Bug 1: detectar "cualquier día" ──────────────────────────────────
+  // Cuando el cliente dice que acepta cualquier día de los ofrecidos,
+  // retornamos "cualquiera" para consultar todos los días disponibles de una.
+  if (/cualquier|cualquiera|los tres|los 3|me da igual|el que sea|lo que haya|indistinto|cualquiera de los/i.test(n)) {
+    return "cualquiera";
+  }
 
   const DIAS = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
   const ahoraCR = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
