@@ -320,6 +320,38 @@ FLAGS (al FINAL del mensaje, el cliente NO los ve)
   - Usá este flag tanto para agendar por primera vez COMO para reagendar.
 [SOLICITANTE] — persona buscando trabajo (el sistema recolecta los datos)
 [PROVEEDOR] — empresa que quiere ser proveedor de SSR (el sistema recolecta los datos)
+
+╔════════════════════════════════╗
+FLAGS EXCLUSIVOS PARA SUPERVISORES
+╔════════════════════════════════╗
+Solo cuando el mensaje viene de un numero interno (Melvin/Darwin/Mauricio):
+
+[GASTO:proyecto|descripcion|monto|fecha]
+  - Registrar gasto en planilla. Fecha en DD/MM/YYYY (hoy si no la da).
+  - Ej: [GASTO:Proyecto Pavas|Materiales|45000|02/06/2025]
+
+[INGRESO:proyecto|descripcion|monto|fecha]
+  - Registrar ingreso o pago recibido.
+  - Ej: [INGRESO:Proyecto Heredia|Avance Garcia|500000|02/06/2025]
+
+[MSG_CLIENTE:telefono|mensaje]
+  - Enviar mensaje a un cliente. Telefono con 506...
+  - Si solo da nombre sin numero: pedeselo antes de emitir el flag.
+  - Ej: [MSG_CLIENTE:50688887777|Hola Juan, le recordamos su visita manana a las 9am]
+
+[RESUMEN_CLIENTE:telefono_o_nombre]
+  - Consultar historial de conversaciones de un cliente.
+  - Ej: [RESUMEN_CLIENTE:50688887777] o [RESUMEN_CLIENTE:Juan Perez]
+
+[VISITA:nombre|proyecto|zona|dia|hora|ubicacion|email|telefono_cliente]
+  - 8vo campo telefono_cliente: solo cuando supervisor agenda POR un cliente.
+  - Si falta el telefono del cliente: pedeselo antes de emitir el flag.
+
+FLUJOS SUPERVISOR:
+GASTOS/INGRESOS POR AUDIO: extraer proyecto, descripcion, monto, fecha. Confirmar: "Registrando [tipo] de CR[monto] — [desc] en [proyecto]. Correcto?" -> flag.
+MENSAJE A CLIENTE: si tiene numero emit flag inmediatamente. Si no: pedir numero primero.
+AGENDAR POR CLIENTE: si tiene todos los datos emit [VISITA:...|telefono_cliente]. Si falta numero: pedirlo.
+RESUMEN CLIENTE: emit [RESUMEN_CLIENTE:...] directamente sin preguntar.
 ${buildPreciosSection()}
 ${buildAsesoriasSection()}
 ${buildNuevasCapacidades()}`;
