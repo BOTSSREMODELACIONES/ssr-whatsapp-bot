@@ -53,7 +53,7 @@ function getNextAvailableDate(dayName, hourStr) {
 
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
 
-  // ── NUEVO: manejar fechas específicas ────────────────────────────────────────
+  // ── Manejar fechas específicas ───────────────────────────────────────────
   const specificDate = parseSpecificDate(dayName);
   if (specificDate) {
     specificDate.setHours(hour, minute, 0, 0);
@@ -68,7 +68,7 @@ function getNextAvailableDate(dayName, hourStr) {
     return specificDate;
   }
 
-  // ── Lógica original para nombres de días ────────────────────────────────────
+  // ── Lógica para nombres de días ──────────────────────────────────────────
   const normalized = (dayName || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const targetDay  = DAY_MAP[normalized];
 
@@ -103,6 +103,10 @@ async function getCalendarClient() {
   return google.calendar({ version: "v3", auth });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// getAvailableSlots — verifica disponibilidad real incluyendo eventos manuales
+// y eventos de todo el día
+// ─────────────────────────────────────────────────────────────────────────────
 async function getAvailableSlots(dayName) {
   const SLOTS = ["09:00", "11:30", "14:00"];
 
@@ -123,19 +127,38 @@ async function getAvailableSlots(dayName) {
 
     const events = response.data.items || [];
 
+    // ── Mapear eventos a rangos {start, end, allDay} ─────────────────────
     const occupiedRanges = events.map(event => {
-      const start = event.start.dateTime || event.start.date;
-      return new Date(start).getTime();
+      // Evento de todo el día (date sin dateTime)
+      if (event.start.date && !event.start.dateTime) {
+        const allDayStart = new Date(event.start.date + "T00:00:00-06:00");
+        const allDayEnd   = new Date(event.end.date   + "T00:00:00-06:00");
+        console.log(`🔒 Evento día completo: "${event.summary}" — bloquea todo el día`);
+        return { start: allDayStart.getTime(), end: allDayEnd.getTime(), allDay: true };
+      }
+      // Evento con hora específica
+      const start = new Date(event.start.dateTime).getTime();
+      const end   = new Date(event.end.dateTime).getTime();
+      console.log(`🔒 Evento con hora: "${event.summary}" ${event.start.dateTime} → ${event.end.dateTime}`);
+      return { start, end, allDay: false };
     });
 
+    // ── Filtrar slots que NO se solapan con ningún evento ────────────────
     const available = SLOTS.filter(slot => {
       const [h, m] = slot.split(":");
       const slotDate = new Date(dayStart);
       slotDate.setHours(parseInt(h), parseInt(m), 0, 0);
-      const slotTime = slotDate.getTime();
-      return !occupiedRanges.some(occupied =>
-        Math.abs(occupied - slotTime) < 2.5 * 60 * 60 * 1000
-      );
+      const slotStart = slotDate.getTime();
+      const slotEnd   = slotStart + (2.5 * 60 * 60 * 1000); // visita dura ~2.5h
+
+      const bloqueado = occupiedRanges.some(({ start, end, allDay }) => {
+        if (allDay) return true; // día bloqueado completo → todos los slots caen
+        // Solapamiento real: el slot empieza antes de que termine el evento
+        // Y termina después de que empieza el evento
+        return slotStart < end && slotEnd > start;
+      });
+
+      return !bloqueado;
     });
 
     console.log(`📅 Slots disponibles para ${dayName}: ${available.join(", ") || "ninguno"}`);
