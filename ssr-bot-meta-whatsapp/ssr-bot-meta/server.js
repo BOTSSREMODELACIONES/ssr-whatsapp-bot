@@ -616,6 +616,26 @@ app.post("/api/transcribir-voz", async (req, res) => {
 app.use(express.static(path.join(__dirname, "public")));
 
 // ── Start ─────────────────────────────────────────────────────────────────────
+// ── Endpoint: Enviar mensaje outbound desde Make ──────────────────────────────
+app.post("/send-message", async (req, res) => {
+  try {
+    const { telefono, mensaje } = req.body;
+    if (!telefono || !mensaje) {
+      return res.status(400).json({ ok: false, error: "Faltan telefono y mensaje" });
+    }
+    let telefonoNorm = telefono.replace(/\D/g, "");
+    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
+      telefonoNorm = "506" + telefonoNorm;
+    }
+    const { sendText } = require("./bot/messenger");
+    await sendText("+" + telefonoNorm, mensaje);
+    console.log(`📤 /send-message → +${telefonoNorm}: "${mensaje.substring(0, 60)}"`);
+    res.json({ ok: true, telefono: "+" + telefonoNorm });
+  } catch (err) {
+    console.error("❌ /send-message error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
 app.listen(PORT, () => {
   console.log(`
 ┌────────────────────────────────────────────────────────────┐
