@@ -484,14 +484,42 @@ function logLead(from, session, tipo = "lead") {
   }));
 }
 
-// Detecta día de la semana O fecha específica en el texto
+// ─────────────────────────────────────────────────────────────────────────────
+// detectDayOrDate — resuelve "mañana", "hoy", "pasado mañana" con fecha real
+// ─────────────────────────────────────────────────────────────────────────────
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-  if (n.includes("lunes"))   return "lunes";
-  if (n.includes("martes"))  return "martes";
-  if (n.includes("viernes")) return "viernes";
+  // ── Calcular fecha actual en zona horaria de Costa Rica ──────────────────
+  const ahora = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  const diasSemana = ["domingo", "lunes", "martes", "miercoles", "jueves", "viernes", "sabado"];
 
+  // ── Relativos temporales ─────────────────────────────────────────────────
+  if (/pasado\s+ma[nñ]ana/.test(n)) {
+    const pasado = new Date(ahora);
+    pasado.setDate(pasado.getDate() + 2);
+    return diasSemana[pasado.getDay()];
+  }
+
+  if (/\bma[nñ]ana\b/.test(n)) {
+    const manana = new Date(ahora);
+    manana.setDate(manana.getDate() + 1);
+    return diasSemana[manana.getDay()];
+  }
+
+  if (/\bhoy\b|\bahorita\b|\bahora\b/.test(n)) {
+    return diasSemana[ahora.getDay()];
+  }
+
+  // ── Días nombrados explícitamente ────────────────────────────────────────
+  if (n.includes("lunes"))     return "lunes";
+  if (n.includes("martes"))    return "martes";
+  if (n.includes("miercoles")) return "miercoles";
+  if (n.includes("jueves"))    return "jueves";
+  if (n.includes("viernes"))   return "viernes";
+  if (n.includes("sabado"))    return "sabado";
+
+  // ── Fechas con nombre de mes ─────────────────────────────────────────────
   const MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto",
                   "septiembre","octubre","noviembre","diciembre"];
   for (const mes of MONTHS) {
@@ -500,6 +528,7 @@ function detectDayOrDate(text) {
     if (m) return `${m[1]} de ${mes}`;
   }
 
+  // ── Fechas numéricas dd/mm ───────────────────────────────────────────────
   const m2 = n.match(/\b(\d{1,2})\/(\d{1,2})\b/);
   if (m2) return `${m2[1]}/${m2[2]}`;
 
