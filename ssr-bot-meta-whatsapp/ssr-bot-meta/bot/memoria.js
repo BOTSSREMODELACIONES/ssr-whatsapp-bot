@@ -1,46 +1,32 @@
 /**
  * memoria.js — Sistema de Memoria Persistente para Sasha
  * SSR Remodelaciones
- *
- * Guarda TODOS los mensajes en Google Sheets y los medias en Drive.
- * Permite a Darwin preguntar por historial de cualquier cliente.
- *
- * FUENTES DE DATOS:
- *  - SSR_Memoria_Chats  → historial de conversaciones de WhatsApp
- *  - CRM_Sasha_SSR      → lista de clientes, proyectos, visitas (fuente principal)
- *
- * Comandos disponibles:
- *  - "listar clientes"           → lista del CRM
- *  - "historial [nombre/número]" → conversaciones de WhatsApp
- *  - "qué habló [nombre]"        → conversaciones de WhatsApp
- *  - "fotos de [nombre]"         → fotos enviadas por el cliente
- *  - "buscar [palabra]"          → buscar en conversaciones
- *  - "info [nombre/número]"      → ficha completa del cliente desde CRM
  */
 
 const { google } = require("googleapis");
 const { Readable } = require("stream");
 
 // ── Constantes ────────────────────────────────────────────────────────────────
-const DARWIN_EMAIL   = "proyectos@ssremodelaciones.com";
-const SHEET_TITLE    = "SSR_Memoria_Chats";
-const TZ             = "America/Costa_Rica";
-
-// ID del CRM principal (ya existe y tiene todos los clientes)
-const CRM_SHEET_ID   = "1LOUDwOe8W5pAF0QV0lTqC9uCcQ0fc_JaIMcGu2f5aZ4";
-
+const DARWIN_EMAIL    = "proyectos@ssremodelaciones.com";
+const SHEET_TITLE     = "SSR_Memoria_Chats";
+const TZ              = "America/Costa_Rica";
+const CRM_SHEET_ID    = "1LOUDwOe8W5pAF0QV0lTqC9uCcQ0fc_JaIMcGu2f5aZ4";
 const MEDIA_PARENT_ID = process.env.MEDIA_FOLDER_ID || null;
 
-let _sheetId     = process.env.MEMORY_SHEET_ID || null;
+let _sheetId = process.env.MEMORY_SHEET_ID || null;
 const _folderCache = {};
+
+// Cache de nombres ya conocidos por teléfono (en memoria RAM, se pierde al reiniciar)
+// Sirve para no hacer batch updates innecesarios
+const _nombreCache = {};
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function getAuth() {
   const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   return new google.auth.JWT({
-    email:   creds.client_email,
-    key:     creds.private_key,
-    scopes:  [
+    email:  creds.client_email,
+    key:    creds.private_key,
+    scopes: [
       "https://www.googleapis.com/auth/spreadsheets",
       "https://www.googleapis.com/auth/drive",
     ],
@@ -55,7 +41,7 @@ async function getDriveClient() {
   return google.drive({ version: "v3", auth: await getAuth() });
 }
 
-// ── Obtener o crear el Google Sheet de memoria (conversaciones) ───────────────
+// ── Obtener o crear el Google Sheet de memoria ────────────────────────────────
 async function getOrCreateSheetId() {
   if (_sheetId) return _sheetId;
 
@@ -116,7 +102,6 @@ async function getOrCreateSheetId() {
       fileId: _sheetId,
       requestBody: { role: "writer", type: "user", emailAddress: DARWIN_EMAIL },
     });
-    console.log(`✅ Memoria: sheet compartido con ${DARWIN_EMAIL}`);
   } catch (e) {
     console.warn("⚠️ Memoria: no se pudo compartir el sheet:", e.message);
   }
@@ -135,6 +120,7 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
     const zona      = session?.zone || "";
     const nombre    = clientName || session?.name || "";
 
+    // Guardar fila nueva
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
       range: "MENSAJES!A:J",
@@ -144,11 +130,73 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
       },
     });
 
+    // ── NUEVO: si acabamos de capturar un nombre que antes no teníamos,
+    // actualizar retroactivamente todas las filas anteriores de este número
+    // que tengan la columna NOMBRE_CLIENTE vacía.
+    if (nombre && nombre.trim() && nombre !== _nombreCache[phone]) {
+      _nombreCache[phone] = nombre;
+      // No esperamos — es operación secundaria
+      rellenarNombresAnteriores(sheetId, sheets, phone, nombre)
+        .catch(e => console.warn("⚠️ Memoria: error rellenando nombres anteriores:", e.message));
+    }
+
+    // Actualizar resumen CLIENTES
     actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona, session?.visit_confirmed || false)
       .catch(e => console.warn("⚠️ Memoria: no se actualizó CLIENTES:", e.message));
 
   } catch (err) {
     console.error("❌ Memoria: error guardando mensaje:", err.message);
+  }
+}
+
+// ── Rellenar nombres vacíos en filas anteriores ───────────────────────────────
+/**
+ * Cuando Sasha captura el nombre de un cliente, busca todas las filas
+ * anteriores de ese número en MENSAJES que tengan columna C vacía
+ * y las actualiza con el nombre recién obtenido.
+ * Usa batchUpdate para hacerlo en una sola llamada a la API.
+ */
+async function rellenarNombresAnteriores(sheetId, sheets, phone, nombre) {
+  try {
+    // Leer todas las filas de MENSAJES
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: "MENSAJES!A:C",  // solo necesitamos timestamp, teléfono, nombre
+    });
+
+    const rows = res.data.values || [];
+    if (rows.length < 2) return;
+
+    const cleanPhone = phone.replace(/\D/g, "");
+
+    // Encontrar filas que coincidan con el número y tengan nombre vacío
+    const data = [];
+    for (let i = 1; i < rows.length; i++) {
+      const rowPhone = (rows[i][1] || "").replace(/\D/g, "");
+      const rowNombre = rows[i][2] || "";
+      if (rowPhone.endsWith(cleanPhone.slice(-8)) && !rowNombre.trim()) {
+        // Fila i+1 en Sheets (1-indexed, fila 1 es header)
+        data.push({
+          range: `MENSAJES!C${i + 1}`,
+          values: [[nombre]],
+        });
+      }
+    }
+
+    if (data.length === 0) return;
+
+    // Batch update: actualizar todas en una sola llamada
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: {
+        valueInputOption: "RAW",
+        data,
+      },
+    });
+
+    console.log(`✅ Memoria: nombre "${nombre}" aplicado a ${data.length} filas anteriores de ${phone}`);
+  } catch (err) {
+    console.error("❌ Memoria: error en rellenarNombresAnteriores:", err.message);
   }
 }
 
@@ -167,7 +215,7 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
       requestBody: { values: [[phone, nombre, proyecto, zona, now, now, "1", visitaAgendada ? "Sí" : "No"]] },
     });
   } else {
-    const prev = rows[idx];
+    const prev   = rows[idx];
     const rowNum = idx + 1;
     const nuevoTotal = (parseInt(prev[6] || "0") + 1).toString();
     await sheets.spreadsheets.values.update({
@@ -177,10 +225,10 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
       requestBody: {
         values: [[
           phone,
-          nombre    || prev[1] || "",
-          proyecto  || prev[2] || "",
-          zona      || prev[3] || "",
-          prev[4]   || now,
+          nombre   || prev[1] || "",
+          proyecto || prev[2] || "",
+          zona     || prev[3] || "",
+          prev[4]  || now,
           now,
           nuevoTotal,
           visitaAgendada ? "Sí" : (prev[7] || "No"),
@@ -191,10 +239,6 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
 }
 
 // ── Leer clientes del CRM principal ──────────────────────────────────────────
-/**
- * Lee la hoja "CRM Clientes" del CRM principal (CRM_Sasha_SSR).
- * Esta es la fuente de verdad de todos los clientes.
- */
 async function listarClientesCRM(limit = 30) {
   try {
     const sheets = await getSheetsClient();
@@ -202,7 +246,7 @@ async function listarClientesCRM(limit = 30) {
       spreadsheetId: CRM_SHEET_ID,
       range: "'CRM Clientes'!A:S",
     });
-    const rows = (res.data.values || []).slice(2); // saltar encabezados (fila 1 y 2)
+    const rows = (res.data.values || []).slice(2);
     return rows.filter(r => r[1] && r[1].toString().trim() !== "").slice(-limit);
   } catch (err) {
     console.error("❌ Memoria: error leyendo CRM:", err.message);
@@ -210,9 +254,6 @@ async function listarClientesCRM(limit = 30) {
   }
 }
 
-/**
- * Buscar un cliente específico en el CRM por nombre o teléfono.
- */
 async function buscarClienteEnCRM(query) {
   try {
     const sheets = await getSheetsClient();
@@ -220,12 +261,12 @@ async function buscarClienteEnCRM(query) {
       spreadsheetId: CRM_SHEET_ID,
       range: "'CRM Clientes'!A:S",
     });
-    const rows = (res.data.values || []).slice(2);
-    const kw   = normalizar(query);
+    const rows       = (res.data.values || []).slice(2);
+    const kw         = normalizar(query);
     const soloDigitos = query.replace(/\D/g, "");
 
     return rows.filter(r => {
-      const nombre  = normalizar(r[2] || "");
+      const nombre   = normalizar(r[2] || "");
       const telefono = (r[1] || "").replace(/\D/g, "");
       return nombre.includes(kw) || (soloDigitos.length >= 6 && telefono.endsWith(soloDigitos));
     });
@@ -240,10 +281,9 @@ async function guardarMedia(buffer, mimeType, phone, name) {
   try {
     const drive    = await getDriveClient();
     const folderId = await getOrCreateMediaFolder(drive, phone, name);
-
-    const ext  = (mimeType.split("/")[1] || "jpg").replace("jpeg", "jpg");
-    const ts   = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const file = await drive.files.create({
+    const ext      = (mimeType.split("/")[1] || "jpg").replace("jpeg", "jpg");
+    const ts       = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const file     = await drive.files.create({
       requestBody: { name: `${phone}_${ts}.${ext}`, parents: [folderId] },
       media: { mimeType, body: Readable.from(buffer) },
       fields: "id, webViewLink",
@@ -262,15 +302,12 @@ async function guardarMedia(buffer, mimeType, phone, name) {
   }
 }
 
-// ── Obtener o crear carpeta de media por cliente ──────────────────────────────
 async function getOrCreateMediaFolder(drive, phone, clientName) {
   if (_folderCache[phone]) return _folderCache[phone];
-
   const safeName   = (clientName || "").replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s]/g, "").trim().slice(0, 25);
   const folderName = `Chats_${phone}${safeName ? `_${safeName}` : ""}`;
-
-  const q      = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-  const search = await drive.files.list({ q, fields: "files(id)", spaces: "drive" });
+  const q          = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const search     = await drive.files.list({ q, fields: "files(id)", spaces: "drive" });
 
   if (search.data.files.length > 0) {
     _folderCache[phone] = search.data.files[0].id;
@@ -295,7 +332,7 @@ async function getOrCreateMediaFolder(drive, phone, clientName) {
   return _folderCache[phone];
 }
 
-// ── Funciones de búsqueda en conversaciones ───────────────────────────────────
+// ── Funciones de búsqueda ─────────────────────────────────────────────────────
 async function buscarPorTelefono(phone, limit = 60) {
   const sheetId = await getOrCreateSheetId();
   const sheets  = await getSheetsClient();
@@ -339,14 +376,12 @@ async function obtenerFotos(query) {
 // ── Formatear historial ───────────────────────────────────────────────────────
 function formatearMensajes(rows, titulo = "Historial") {
   if (!rows || rows.length === 0) return null;
-
   const groups = {};
   for (const r of rows) {
     const fecha = new Date(r[0]).toLocaleDateString("es-CR", { timeZone: TZ, dateStyle: "full" });
     if (!groups[fecha]) groups[fecha] = [];
     groups[fecha].push(r);
   }
-
   const lines = [`📋 *${titulo}* (${rows.length} mensajes)\n`];
   for (const [fecha, msgs] of Object.entries(groups)) {
     lines.push(`\n📅 *${fecha}*`);
@@ -361,60 +396,41 @@ function formatearMensajes(rows, titulo = "Historial") {
   return lines.join("\n");
 }
 
-// ── Formatear ficha de cliente desde CRM ─────────────────────────────────────
 function formatearFichaCRM(row) {
-  // Columnas CRM: FECHA_REG, TELEFONO, NOMBRE, EMAIL, UBICACION, ZONA,
-  // PROYECTO, FECHA_VISITA, HORA_VISITA, ESTADO, VISITA_REALIZADA,
-  // COT_ENVIADA, MONTO_COTIZADO, MONTO_CONTRATADO, EXTRAS, TOTAL,
-  // FECHA_ULT_CONT, RESPONSABLE, NOTAS
   const [fechaReg, tel, nombre, email, ubicacion, zona,
          proyecto, fechaVisita, horaVisita, estado, visitaReal,
          cotEnviada, montoCot, montoContrat, extras, total,
          fechaUlt, responsable, notas] = row;
-
-  const lines = [
+  return [
     `👤 *${nombre || "Sin nombre"}*`,
     `📱 ${tel || "—"}`,
-    email       && `📧 ${email}`,
-    zona        && `📍 Zona: ${zona}`,
-    proyecto    && `🏗️ Proyecto: ${proyecto}`,
-    estado      && `📊 Estado: ${estado}`,
-    fechaVisita && `📅 Visita: ${fechaVisita}${horaVisita ? ` a las ${horaVisita}` : ""}`,
-    ubicacion   && `🗺️ Ubicación: ${ubicacion}`,
-    montoCot    && `💰 Cotización: ${montoCot}`,
+    email        && `📧 ${email}`,
+    zona         && `📍 Zona: ${zona}`,
+    proyecto     && `🏗️ Proyecto: ${proyecto}`,
+    estado       && `📊 Estado: ${estado}`,
+    fechaVisita  && `📅 Visita: ${fechaVisita}${horaVisita ? ` a las ${horaVisita}` : ""}`,
+    ubicacion    && `🗺️ Ubicación: ${ubicacion}`,
+    montoCot     && `💰 Cotización: ${montoCot}`,
     montoContrat && `✅ Contratado: ${montoContrat}`,
-    notas       && `📝 Notas: ${notas}`,
+    notas        && `📝 Notas: ${notas}`,
   ].filter(Boolean).join("\n");
-
-  return lines;
 }
 
-// ── Resumir conversación con IA ──────────────────────────────────────────────
-/**
- * Usa Claude para generar un resumen inteligente de la conversación
- * incluyendo fotos, videos y estado actual del cliente.
- */
 async function resumirConversacion(rows, clientName, phone) {
   if (!rows || rows.length === 0) return null;
-
   try {
     const Anthropic = require("@anthropic-ai/sdk");
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    // Preparar texto de conversación para el resumen
     const mensajesTexto = rows.slice(-50).map(r => {
-      const hora    = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" });
-      const quien   = r[3] === "in" ? "Cliente" : "Sasha";
-      const tipo    = r[4] === "image" ? "[Foto enviada]" : (r[5] || "");
+      const hora  = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" });
+      const quien = r[3] === "in" ? "Cliente" : "Sasha";
+      const tipo  = r[4] === "image" ? "[Foto enviada]" : (r[5] || "");
       return `[${hora}] ${quien}: ${tipo.slice(0, 300)}`;
     }).join("\n");
-
-    // Separar fotos y videos
-    const fotos  = rows.filter(r => r[4] === "image"  && r[7]);
-    const videos = rows.filter(r => r[4] === "video"  && r[7]);
-
+    const fotos  = rows.filter(r => r[4] === "image" && r[7]);
+    const videos = rows.filter(r => r[4] === "video" && r[7]);
     const response = await anthropic.messages.create({
-      model:      "claude-sonnet-4-5",
+      model: "claude-sonnet-4-6",
       max_tokens: 500,
       system: `Sos asistente de SS Remodelaciones. Resumí esta conversación de WhatsApp entre Sasha y un cliente.
 Formato de respuesta (WhatsApp, conciso):
@@ -424,17 +440,8 @@ Formato de respuesta (WhatsApp, conciso):
 - NO incluyas los mensajes literales, solo el resumen`,
       messages: [{ role: "user", content: `Cliente: ${clientName || phone}\n\nConversación:\n${mensajesTexto}` }],
     });
-
     const resumen = response.content[0]?.text?.trim() || "";
-
-    // Construir respuesta con resumen + multimedia
-    const lines = [
-      `📋 *Resumen — ${clientName || phone}*`,
-      `📱 ${phone}`,
-      "",
-      resumen,
-    ];
-
+    const lines = [`📋 *Resumen — ${clientName || phone}*`, `📱 ${phone}`, "", resumen];
     if (fotos.length > 0) {
       lines.push("", `📷 *Fotos enviadas (${fotos.length}):*`);
       fotos.slice(-10).forEach(r => {
@@ -442,7 +449,6 @@ Formato de respuesta (WhatsApp, conciso):
         lines.push(`  • ${hora}: ${r[7]}`);
       });
     }
-
     if (videos.length > 0) {
       lines.push("", `🎥 *Videos enviados (${videos.length}):*`);
       videos.slice(-5).forEach(r => {
@@ -450,12 +456,9 @@ Formato de respuesta (WhatsApp, conciso):
         lines.push(`  • ${hora}: ${r[7]}`);
       });
     }
-
     return lines.join("\n");
-
   } catch (err) {
     console.warn("⚠️ Memoria: error resumiendo:", err.message);
-    // Fallback: historial simple
     return formatearMensajes(rows, `Historial de ${clientName || phone}`);
   }
 }
@@ -491,39 +494,30 @@ function esConsultaMemoria(text) {
 // ── Procesar consulta ─────────────────────────────────────────────────────────
 async function procesarConsultaMemoria(text) {
   if (!esConsultaMemoria(text)) return null;
-
   const normalText = normalizar(text);
 
   try {
-
-    // ── Listar clientes → desde CRM ─────────────────────────────────────────
     if (/listar?.*(clientes?|activos?)/.test(normalText)) {
       const clientes = await listarClientesCRM(30);
       if (!clientes.length) return "📭 No hay clientes en el CRM aún.";
-
       const lines = clientes.map(r => {
-        const nombre  = r[2] || r[1] || "—";
-        const tel     = r[1] || "—";
-        const estado  = r[9] || "—";
-        const zona    = r[5] || "—";
+        const nombre = r[2] || r[1] || "—";
+        const tel    = r[1] || "—";
+        const estado = r[9] || "—";
+        const zona   = r[5] || "—";
         return `📱 ${tel} — *${nombre}* | ${zona} | ${estado}`;
       });
-
       return `👥 *Clientes en CRM (${clientes.length}):*\n\n${lines.join("\n")}`;
     }
 
-    // ── Info/Ficha de cliente → desde CRM ───────────────────────────────────
     const infoMatch = text.match(/(?:info|ficha|datos)\s+(?:de\s+)?(.+)/i);
     if (infoMatch) {
       const query    = infoMatch[1].replace(/[?.!].*$/, "").trim();
       const clientes = await buscarClienteEnCRM(query);
       if (!clientes.length) return `📭 No encontré a "${query}" en el CRM.`;
-
-      const fichas = clientes.slice(0, 3).map(r => formatearFichaCRM(r));
-      return fichas.join("\n\n─────────────\n\n");
+      return clientes.slice(0, 3).map(r => formatearFichaCRM(r)).join("\n\n─────────────\n\n");
     }
 
-    // ── Fotos de cliente ─────────────────────────────────────────────────────
     const fotosMatch = text.match(/fotos?\s+de\s+(.+)/i);
     if (fotosMatch) {
       const query = fotosMatch[1].replace(/[?.!].*$/, "").trim();
@@ -536,7 +530,6 @@ async function procesarConsultaMemoria(text) {
       return `📷 *Fotos de ${query}* (${fotos.length}):\n\n${lines.join("\n")}`;
     }
 
-    // ── Buscar por contenido ─────────────────────────────────────────────────
     const buscarMatch = text.match(/buscar?\s+(.+)/i);
     if (buscarMatch) {
       const keyword = buscarMatch[1].replace(/[?.!].*$/, "").trim();
@@ -545,25 +538,19 @@ async function procesarConsultaMemoria(text) {
       return formatearMensajes(rows, `Resultados: "${keyword}"`) || `📭 Sin resultados para "${keyword}".`;
     }
 
-    // ── Historial por teléfono ───────────────────────────────────────────────
     const phoneMatch = text.match(/[+]?506\s*(\d{4}[\s-]?\d{4})/);
     if (phoneMatch) {
       const phone = "506" + phoneMatch[1].replace(/\D/g, "");
       const rows  = await buscarPorTelefono(phone);
       if (!rows.length) {
-        // Intentar buscar en CRM igualmente
         const crmRows = await buscarClienteEnCRM(phone);
-        if (crmRows.length) {
-          return `📭 No hay conversaciones de +${phone} en WhatsApp aún.\n\n` + formatearFichaCRM(crmRows[0]);
-        }
+        if (crmRows.length) return `📭 No hay conversaciones de +${phone} en WhatsApp aún.\n\n` + formatearFichaCRM(crmRows[0]);
         return `📭 No encontré conversaciones de +${phone}.`;
       }
       const clientName = rows[0][2] || phone;
       return formatearMensajes(rows, `Historial de ${clientName} (+${phone})`) || `📭 Sin mensajes de +${phone}.`;
     }
 
-    // ── Resumen con IA ───────────────────────────────────────────────────────
-    // "dime qué hablaste con X", "resúmeme la conversación de X", "qué pasó con X"
     const resumenPatterns = [
       /(?:d[ií]me|cu[eé]ntame)\s+(?:qu[eé]|c[oó]mo)\s+(?:hab[ló]|fue|anda|est[aá])\s+(?:con\s+)?(.+)/i,
       /res[uú]me(?:n|me)?\s+(?:la\s+)?conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,
@@ -576,23 +563,18 @@ async function procesarConsultaMemoria(text) {
       if (match) {
         const nombre = match[1].replace(/[?.!].*$/, "").trim();
         if (nombre.length < 3) continue;
-
         const rows = await buscarPorNombre(nombre);
         if (!rows.length) {
           const crmRows = await buscarClienteEnCRM(nombre);
-          if (crmRows.length) {
-            return `📭 No hay conversaciones de "${nombre}" en WhatsApp aún.\n\n*Ficha CRM:*\n` + formatearFichaCRM(crmRows[0]);
-          }
+          if (crmRows.length) return `📭 No hay conversaciones de "${nombre}" en WhatsApp aún.\n\n*Ficha CRM:*\n` + formatearFichaCRM(crmRows[0]);
           return `📭 No encontré conversaciones de "${nombre}".`;
         }
-
         const phone      = rows[0][1];
         const clientName = rows[0][2] || nombre;
         return await resumirConversacion(rows, clientName, phone) || `📭 Sin mensajes de "${nombre}".`;
       }
     }
 
-    // ── Historial por nombre (detalle completo) ──────────────────────────────
     const nombrePatterns = [
       /historial\s+(?:de\s+)?(.+)/i,
       /qu[eé]\s+(?:hab[ló]|dij[oi]|mand[oó]|hablaste|conversaste)\s+(?:con\s+)?(.+)/i,
@@ -607,20 +589,14 @@ async function procesarConsultaMemoria(text) {
       if (match) {
         const nombre = match[1].replace(/[?.!].*$/, "").trim();
         if (nombre.length < 3) continue;
-
         const rows = await buscarPorNombre(nombre);
         if (!rows.length) {
           const crmRows = await buscarClienteEnCRM(nombre);
-          if (crmRows.length) {
-            return `📭 No hay conversaciones de "${nombre}" en WhatsApp aún.\n\n*Ficha CRM:*\n` + formatearFichaCRM(crmRows[0]);
-          }
+          if (crmRows.length) return `📭 No hay conversaciones de "${nombre}" en WhatsApp aún.\n\n*Ficha CRM:*\n` + formatearFichaCRM(crmRows[0]);
           return `📭 No encontré conversaciones de "${nombre}".`;
         }
-
         const phone      = rows[0][1];
         const clientName = rows[0][2] || nombre;
-
-        // Si pide fotos/videos/archivos, mostrar solo multimedia
         if (/fotos?|videos?|medios?|archivos?|im[aá]genes?/i.test(text)) {
           const fotos  = rows.filter(r => r[4] === "image" && r[7]);
           const videos = rows.filter(r => r[4] === "video" && r[7]);
@@ -630,20 +606,16 @@ async function procesarConsultaMemoria(text) {
           if (videos.length) lines.push("", `🎥 *Videos (${videos.length}):*`, ...videos.slice(-10).map(r => `  • ${new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ })} → ${r[7]}`));
           return lines.join("\n");
         }
-
         return formatearMensajes(rows, `Historial de ${clientName} (${phone})`) || `📭 Sin mensajes de "${nombre}".`;
       }
     }
 
-    // ── Fallback ─────────────────────────────────────────────────────────────
     return [
-      "🧠 *Comandos disponibles:*",
-      "",
+      "🧠 *Comandos disponibles:*", "",
       "📋 *Clientes y datos (CRM):*",
       "  • `listar clientes`",
       "  • `info [nombre]` — ficha completa del cliente",
-      "  • `datos de [nombre o número]`",
-      "",
+      "  • `datos de [nombre o número]`", "",
       "💬 *Conversaciones WhatsApp:*",
       "  • `historial [nombre o número]`",
       "  • `qué habló [nombre]`",
