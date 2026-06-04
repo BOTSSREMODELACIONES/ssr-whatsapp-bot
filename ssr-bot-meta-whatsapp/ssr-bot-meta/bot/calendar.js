@@ -34,18 +34,16 @@ function parseSpecificDate(str) {
 }
 
 // ── Convertir cualquier dateTime a minutos desde medianoche en hora CR ────────
-// Esto es el núcleo del fix: no importa cómo venga el evento (UTC, -06:00, etc.)
+// Fix de zona horaria: no importa si Google devuelve UTC o -06:00,
 // siempre extraemos la hora local en Costa Rica antes de comparar.
 function toCRMinutes(dateTimeStr) {
   const d = new Date(dateTimeStr);
-  // Extraer hora y minuto en zona Costa Rica explícitamente
   const crStr = d.toLocaleString("en-US", {
     timeZone: "America/Costa_Rica",
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
   });
-  // crStr viene como "09:00" o "14:30"
   const [h, m] = crStr.split(":").map(Number);
   return h * 60 + m;
 }
@@ -113,11 +111,10 @@ async function getCalendarClient() {
 // getAvailableSlots — verifica disponibilidad real incluyendo eventos manuales
 // ─────────────────────────────────────────────────────────────────────────────
 async function getAvailableSlots(dayName) {
-  // Slots disponibles en minutos desde medianoche (hora CR)
   const SLOTS = [
-    { label: "09:00", startMin: 9 * 60,       endMin: 10 * 60 },       // 9:00–10:00
-    { label: "11:30", startMin: 11 * 60 + 30,  endMin: 12 * 60 + 30 }, // 11:30–12:30
-    { label: "14:00", startMin: 14 * 60,       endMin: 15 * 60 },       // 14:00–15:00
+    { label: "09:00", startMin: 9 * 60,      endMin: 10 * 60 },
+    { label: "11:30", startMin: 11 * 60 + 30, endMin: 12 * 60 + 30 },
+    { label: "14:00", startMin: 14 * 60,      endMin: 15 * 60 },
   ];
 
   try {
@@ -147,11 +144,9 @@ async function getAvailableSlots(dayName) {
         return { startMin: 0, endMin: 24 * 60, allDay: true };
       }
 
-      // FIX PRINCIPAL: convertir a hora CR usando toCRMinutes, no timestamps crudos
+      // FIX: convertir a hora CR usando toCRMinutes, no timestamps crudos
       const startMin = toCRMinutes(event.start.dateTime);
       const endMin   = toCRMinutes(event.end.dateTime);
-
-      // Guardia: si end < start (cambio de día), extender hasta 23:59
       const safeEndMin = endMin < startMin ? 23 * 60 + 59 : endMin;
 
       console.log(`🔒 Evento: "${event.summary}" → ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} – ${Math.floor(safeEndMin/60)}:${String(safeEndMin%60).padStart(2,'0')} (hora CR)`);
@@ -162,15 +157,11 @@ async function getAvailableSlots(dayName) {
     const available = SLOTS.filter(slot => {
       const bloqueado = occupiedRanges.some(({ startMin, endMin, allDay }) => {
         if (allDay) return true;
-        // Solapamiento: el slot empieza antes de que termine el evento
-        // Y el slot termina después de que empieza el evento
-        // Margen extra de 30 min antes y después para no agendar encima
+        // Solapamiento con margen de 30 min antes y después
         return (slot.startMin - 30) < endMin && (slot.endMin + 30) > startMin;
       });
 
-      if (bloqueado) {
-        console.log(`⛔ Slot ${slot.label} bloqueado por evento existente`);
-      }
+      if (bloqueado) console.log(`⛔ Slot ${slot.label} bloqueado`);
       return !bloqueado;
     });
 
@@ -181,7 +172,6 @@ async function getAvailableSlots(dayName) {
   } catch (err) {
     console.error("❌ Error consultando disponibilidad:", err.message);
     // SEGURIDAD: si falla el calendario, NO ofrecer slots a ciegas
-    // Es mejor decirle al cliente que verifiquemos, que agendar encima de Melvin
     return [];
   }
 }
@@ -223,6 +213,115 @@ async function cancelClientEvents(calendar, phone) {
     return 0;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cancelEventByNameAndDate
+// Busca y elimina eventos por nombre de cliente y/o fecha.
+// Usado por supervisores (Darwin / Melvin) via WhatsApp.
+// ─────────────────────────────────────────────────────────────────────────────
+async function cancelEventByNameAndDate({ nameHint, dateHint }) {
+  const calendar = await getCalendarClient();
+
+  const now    = new Date();
+  const future = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
+
+  let timeMin = now.toISOString();
+  let timeMax = future.toISOString();
+
+  if (dateHint) {
+    const targetDate = resolveDateHint(dateHint);
+    if (targetDate) {
+      const dayStart = new Date(targetDate);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(targetDate);
+      dayEnd.setHours(23, 59, 59, 999);
+      timeMin = dayStart.toISOString();
+      timeMax = dayEnd.toISOString();
+      console.log(`🗓️ Buscando eventos el ${dayStart.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica" })}`);
+    }
+  }
+
+  const response = await calendar.events.list({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    timeMin,
+    timeMax,
+    singleEvents: true,
+    orderBy: "startTime",
+    ...(nameHint ? { q: nameHint } : {}),
+  });
+
+  const events = (response.data.items || []).filter(e => e.status !== "cancelled");
+
+  if (events.length === 0) {
+    return { deleted: 0, events: [] };
+  }
+
+  // Filtro adicional por nombre en summary y description
+  const normalizeStr = s => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const hintNorm = normalizeStr(nameHint || "");
+
+  const matched = nameHint
+    ? events.filter(e =>
+        normalizeStr(e.summary).includes(hintNorm) ||
+        normalizeStr(e.description || "").includes(hintNorm)
+      )
+    : events;
+
+  if (matched.length === 0) {
+    return { deleted: 0, events: [] };
+  }
+
+  const deleted = [];
+  for (const event of matched) {
+    const startRaw = event.start.dateTime || event.start.date;
+    const dateStr  = new Date(startRaw).toLocaleString("es-CR", {
+      timeZone: "America/Costa_Rica",
+      weekday: "long", day: "numeric", month: "long",
+      hour: "2-digit", minute: "2-digit",
+    });
+
+    await calendar.events.delete({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      eventId: event.id,
+      sendUpdates: "none",
+    });
+
+    console.log(`🗑️ Evento cancelado por supervisor: "${event.summary}" (${dateStr})`);
+    deleted.push({ summary: event.summary, dateStr });
+  }
+
+  return { deleted: deleted.length, events: deleted };
+}
+
+// ── Resolver referencia de fecha en lenguaje natural ────────────────────────
+function resolveDateHint(hint) {
+  if (!hint) return null;
+
+  const s = hint.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+
+  if (s === "hoy") return now;
+  if (s === "manana" || s === "mañana") {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 1);
+    return d;
+  }
+
+  const DAY_MAP = { lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6, domingo: 0 };
+  if (DAY_MAP[s] !== undefined) {
+    const target = DAY_MAP[s];
+    const d = new Date(now);
+    let diff = (target - d.getDay() + 7) % 7;
+    if (diff === 0) diff = 7;
+    d.setDate(d.getDate() + diff);
+    return d;
+  }
+
+  // Fecha específica ("5 de junio", "5/06", etc.) — reusar parseSpecificDate
+  return parseSpecificDate(s);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail }) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
@@ -286,4 +385,4 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   };
 }
 
-module.exports = { createVisitEvent, getAvailableSlots };
+module.exports = { createVisitEvent, getAvailableSlots, cancelEventByNameAndDate };
