@@ -1,7 +1,6 @@
 const { google } = require("googleapis");
 
 // ── Parsear fecha específica (ej: "19 de mayo", "19/05", "2026-05-19") ────────
-// Devuelve un objeto Date si se reconoce el formato, o null si no
 function parseSpecificDate(str) {
   if (!str) return null;
   const s = str.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -11,7 +10,6 @@ function parseSpecificDate(str) {
     julio:6, agosto:7, septiembre:8, octubre:9, noviembre:10, diciembre:11,
   };
 
-  // "19 de mayo" / "19 mayo"
   const m1 = s.match(/^(\d{1,2})\s+(?:de\s+)?([a-z]+)(?:\s+(\d{4}))?$/);
   if (m1) {
     const month = MONTHS[m1[2]];
@@ -21,14 +19,12 @@ function parseSpecificDate(str) {
     }
   }
 
-  // "19/05" / "19/05/2026"
   const m2 = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/);
   if (m2) {
     const year = m2[3] ? parseInt(m2[3]) : new Date().getFullYear();
     return new Date(year, parseInt(m2[2]) - 1, parseInt(m2[1]));
   }
 
-  // "2026-05-19"
   const m3 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m3) {
     return new Date(parseInt(m3[1]), parseInt(m3[2]) - 1, parseInt(m3[3]));
@@ -37,8 +33,24 @@ function parseSpecificDate(str) {
   return null;
 }
 
+// ── Convertir cualquier dateTime a minutos desde medianoche en hora CR ────────
+// Esto es el núcleo del fix: no importa cómo venga el evento (UTC, -06:00, etc.)
+// siempre extraemos la hora local en Costa Rica antes de comparar.
+function toCRMinutes(dateTimeStr) {
+  const d = new Date(dateTimeStr);
+  // Extraer hora y minuto en zona Costa Rica explícitamente
+  const crStr = d.toLocaleString("en-US", {
+    timeZone: "America/Costa_Rica",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  // crStr viene como "09:00" o "14:30"
+  const [h, m] = crStr.split(":").map(Number);
+  return h * 60 + m;
+}
+
 // ── Obtener fecha agendable ───────────────────────────────────────────────────
-// dayName: puede ser "lunes"/"martes"/"viernes" O una fecha específica
 function getNextAvailableDate(dayName, hourStr) {
   const DAY_MAP = { lunes: 1, martes: 2, viernes: 5 };
 
@@ -53,22 +65,17 @@ function getNextAvailableDate(dayName, hourStr) {
 
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
 
-  // ── Manejar fechas específicas ───────────────────────────────────────────
   const specificDate = parseSpecificDate(dayName);
   if (specificDate) {
     specificDate.setHours(hour, minute, 0, 0);
-
-    // Si la fecha ya pasó (o es hoy pero la hora ya pasó), agregar 7 días como fallback
     if (specificDate <= now) {
       console.warn(`⚠️ Calendar: fecha "${dayName}" ya pasó o es hoy, usando siguiente semana.`);
       specificDate.setDate(specificDate.getDate() + 7);
     }
-
     console.log(`📅 Calendar: fecha específica "${dayName}" → ${specificDate.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday:"long", day:"numeric", month:"long" })}`);
     return specificDate;
   }
 
-  // ── Lógica para nombres de días ──────────────────────────────────────────
   const normalized = (dayName || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const targetDay  = DAY_MAP[normalized];
 
@@ -76,7 +83,6 @@ function getNextAvailableDate(dayName, hourStr) {
   result.setHours(hour, minute, 0, 0);
 
   if (targetDay === undefined) {
-    // Fallback: próximo lunes
     const daysUntilMonday = (8 - result.getDay()) % 7 || 7;
     result.setDate(result.getDate() + daysUntilMonday);
     return result;
@@ -105,10 +111,14 @@ async function getCalendarClient() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // getAvailableSlots — verifica disponibilidad real incluyendo eventos manuales
-// y eventos de todo el día
 // ─────────────────────────────────────────────────────────────────────────────
 async function getAvailableSlots(dayName) {
-  const SLOTS = ["09:00", "11:30", "14:00"];
+  // Slots disponibles en minutos desde medianoche (hora CR)
+  const SLOTS = [
+    { label: "09:00", startMin: 9 * 60,       endMin: 10 * 60 },       // 9:00–10:00
+    { label: "11:30", startMin: 11 * 60 + 30,  endMin: 12 * 60 + 30 }, // 11:30–12:30
+    { label: "14:00", startMin: 14 * 60,       endMin: 15 * 60 },       // 14:00–15:00
+  ];
 
   try {
     const calendar = await getCalendarClient();
@@ -125,48 +135,54 @@ async function getAvailableSlots(dayName) {
       orderBy: "startTime",
     });
 
-    const events = response.data.items || [];
+    const events = (response.data.items || []).filter(e => e.status !== "cancelled");
 
-    // ── Mapear eventos a rangos {start, end, allDay} ─────────────────────
+    console.log(`📅 Eventos encontrados para ${dayName}: ${events.length}`);
+
+    // Convertir cada evento a rango en minutos CR (zona horaria correcta)
     const occupiedRanges = events.map(event => {
-      // Evento de todo el día (date sin dateTime)
+      // Evento de todo el día → bloquea todo
       if (event.start.date && !event.start.dateTime) {
-        const allDayStart = new Date(event.start.date + "T00:00:00-06:00");
-        const allDayEnd   = new Date(event.end.date   + "T00:00:00-06:00");
-        console.log(`🔒 Evento día completo: "${event.summary}" — bloquea todo el día`);
-        return { start: allDayStart.getTime(), end: allDayEnd.getTime(), allDay: true };
+        console.log(`🔒 Día completo bloqueado: "${event.summary}"`);
+        return { startMin: 0, endMin: 24 * 60, allDay: true };
       }
-      // Evento con hora específica
-      const start = new Date(event.start.dateTime).getTime();
-      const end   = new Date(event.end.dateTime).getTime();
-      console.log(`🔒 Evento con hora: "${event.summary}" ${event.start.dateTime} → ${event.end.dateTime}`);
-      return { start, end, allDay: false };
+
+      // FIX PRINCIPAL: convertir a hora CR usando toCRMinutes, no timestamps crudos
+      const startMin = toCRMinutes(event.start.dateTime);
+      const endMin   = toCRMinutes(event.end.dateTime);
+
+      // Guardia: si end < start (cambio de día), extender hasta 23:59
+      const safeEndMin = endMin < startMin ? 23 * 60 + 59 : endMin;
+
+      console.log(`🔒 Evento: "${event.summary}" → ${Math.floor(startMin/60)}:${String(startMin%60).padStart(2,'0')} – ${Math.floor(safeEndMin/60)}:${String(safeEndMin%60).padStart(2,'0')} (hora CR)`);
+      return { startMin, endMin: safeEndMin, allDay: false };
     });
 
-    // ── Filtrar slots que NO se solapan con ningún evento ────────────────
+    // Filtrar slots que NO se solapan con ningún evento
     const available = SLOTS.filter(slot => {
-      const [h, m] = slot.split(":");
-      const slotDate = new Date(dayStart);
-      slotDate.setHours(parseInt(h), parseInt(m), 0, 0);
-      const slotStart = slotDate.getTime();
-      const slotEnd   = slotStart + (2.5 * 60 * 60 * 1000); // visita dura ~2.5h
-
-      const bloqueado = occupiedRanges.some(({ start, end, allDay }) => {
-        if (allDay) return true; // día bloqueado completo → todos los slots caen
-        // Solapamiento real: el slot empieza antes de que termine el evento
-        // Y termina después de que empieza el evento
-        return slotStart < end && slotEnd > start;
+      const bloqueado = occupiedRanges.some(({ startMin, endMin, allDay }) => {
+        if (allDay) return true;
+        // Solapamiento: el slot empieza antes de que termine el evento
+        // Y el slot termina después de que empieza el evento
+        // Margen extra de 30 min antes y después para no agendar encima
+        return (slot.startMin - 30) < endMin && (slot.endMin + 30) > startMin;
       });
 
+      if (bloqueado) {
+        console.log(`⛔ Slot ${slot.label} bloqueado por evento existente`);
+      }
       return !bloqueado;
     });
 
-    console.log(`📅 Slots disponibles para ${dayName}: ${available.join(", ") || "ninguno"}`);
-    return available;
+    const labels = available.map(s => s.label);
+    console.log(`✅ Slots disponibles para ${dayName}: ${labels.join(", ") || "ninguno"}`);
+    return labels;
 
   } catch (err) {
     console.error("❌ Error consultando disponibilidad:", err.message);
-    return ["09:00", "11:30", "14:00"];
+    // SEGURIDAD: si falla el calendario, NO ofrecer slots a ciegas
+    // Es mejor decirle al cliente que verifiquemos, que agendar encima de Melvin
+    return [];
   }
 }
 
@@ -222,8 +238,8 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   const startDate = getNextAvailableDate(day, hour);
   const endDate   = new Date(startDate.getTime() + 60 * 60 * 1000);
 
-  const hoursUntilEvent   = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
-  const reminderMinutes   = hoursUntilEvent > 24 ? 1440 : 180;
+  const hoursUntilEvent = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
+  const reminderMinutes = hoursUntilEvent > 24 ? 1440 : 180;
 
   const description = [
     `👤 Cliente: ${name || "Sin nombre"}`,
