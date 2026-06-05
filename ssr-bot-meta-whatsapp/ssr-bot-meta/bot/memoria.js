@@ -671,6 +671,71 @@ async function procesarConsultaMemoria(text) {
   }
 }
 
+// ── Registrar nombre inmediatamente al detectarlo ─────────────────────────────
+/**
+ * Llamar desde index.js en cuanto Sasha obtiene el nombre del cliente
+ * (al parsear flag LEAD o VISITA, o cuando session.name cambia).
+ * Actualiza:
+ *   1. La fila de CLIENTES (o la crea si no existe aún)
+ *   2. Todas las filas de MENSAJES de ese número que tengan columna C vacía
+ */
+async function actualizarNombreInmediato(phone, nombre, { proyecto = "", zona = "", visitaAgendada = false } = {}) {
+  if (!nombre || !nombre.trim()) return;
+  if (_nombreCache[phone] === nombre) return; // ya lo tenemos, no hacer trabajo duplicado
+
+  try {
+    const sheetId = await getOrCreateSheetId();
+    const sheets  = await getSheetsClient();
+    const now     = new Date().toISOString();
+
+    // 1. Actualizar / crear fila en CLIENTES
+    const res  = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "CLIENTES!A:H" });
+    const rows = res.data.values || [];
+    const idx  = rows.findIndex((r, i) => i > 0 && r[0] === phone);
+
+    if (idx === -1) {
+      // Cliente nuevo — crear fila
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: sheetId,
+        range: "CLIENTES!A:H",
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [[phone, nombre, proyecto, zona, now, now, "0", visitaAgendada ? "Sí" : "No"]],
+        },
+      });
+    } else {
+      // Cliente existente — actualizar nombre (y proyecto/zona si los tenemos)
+      const prev   = rows[idx];
+      const rowNum = idx + 1;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: sheetId,
+        range: `CLIENTES!A${rowNum}:H${rowNum}`,
+        valueInputOption: "RAW",
+        requestBody: {
+          values: [[
+            phone,
+            nombre,                                       // Nombre: siempre actualizar
+            proyecto || prev[2] || "",
+            zona     || prev[3] || "",
+            prev[4]  || now,                              // Primera actividad: preservar
+            prev[5]  || now,                              // Última actividad: preservar
+            prev[6]  || "0",
+            visitaAgendada ? "Sí" : (prev[7] || "No"),
+          ]],
+        },
+      });
+    }
+
+    // 2. Rellenar filas de MENSAJES que tenían columna C vacía
+    _nombreCache[phone] = nombre;
+    await rellenarNombresAnteriores(sheetId, sheets, phone, nombre);
+
+    console.log(`✅ Memoria: nombre "${nombre}" registrado inmediatamente para ${phone}`);
+  } catch (err) {
+    console.error("❌ Memoria: error en actualizarNombreInmediato:", err.message);
+  }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function normalizar(str) {
   return (str || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -679,6 +744,7 @@ function normalizar(str) {
 module.exports = {
   guardarMensaje,
   guardarMedia,
+  actualizarNombreInmediato,
   buscarPorTelefono,
   buscarPorNombre,
   buscarPorContenido,
