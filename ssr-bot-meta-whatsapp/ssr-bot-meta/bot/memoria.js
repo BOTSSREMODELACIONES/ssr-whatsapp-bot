@@ -1,6 +1,24 @@
 /**
  * memoria.js — Sistema de Memoria Persistente para Sasha
  * SSR Remodelaciones
+ *
+ * COLUMNAS MENSAJES (A:F):
+ *   A = Fecha y Hora
+ *   B = Número de Teléfono
+ *   C = Nombre de Contacto
+ *   D = Entrada / Salida  (in / out)
+ *   E = Tipo              (text / image / audio / video)
+ *   F = Mensaje
+ *
+ * COLUMNAS CLIENTES (A:H):
+ *   A = Teléfono
+ *   B = Nombre
+ *   C = Proyecto
+ *   D = Zona
+ *   E = Primera Actividad
+ *   F = Última Actividad
+ *   G = Total Mensajes
+ *   H = Visita Agendada
  */
 
 const { google } = require("googleapis");
@@ -16,8 +34,7 @@ const MEDIA_PARENT_ID = process.env.MEDIA_FOLDER_ID || null;
 let _sheetId = process.env.MEMORY_SHEET_ID || null;
 const _folderCache = {};
 
-// Cache de nombres ya conocidos por teléfono (en memoria RAM, se pierde al reiniciar)
-// Sirve para no hacer batch updates innecesarios
+// Cache de nombres ya conocidos por teléfono (en memoria RAM)
 const _nombreCache = {};
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -60,6 +77,7 @@ async function getOrCreateSheetId() {
     return _sheetId;
   }
 
+  // Crear sheet con headers correctos
   const created = await sheets.spreadsheets.create({
     requestBody: {
       properties: { title: SHEET_TITLE },
@@ -70,10 +88,16 @@ async function getOrCreateSheetId() {
             startRow: 0, startColumn: 0,
             rowData: [{
               values: [
-                "TIMESTAMP", "TELÉFONO", "NOMBRE_CLIENTE",
-                "DIRECCIÓN", "TIPO", "CONTENIDO",
-                "MEDIA_ID", "DRIVE_URL", "PROYECTO", "ZONA",
-              ].map(v => ({ userEnteredValue: { stringValue: v }, userEnteredFormat: { textFormat: { bold: true } } })),
+                "Fecha y Hora",
+                "Número de Teléfono",
+                "Nombre de Contacto",
+                "Entrada / Salida",
+                "Tipo",
+                "Mensaje",
+              ].map(v => ({
+                userEnteredValue: { stringValue: v },
+                userEnteredFormat: { textFormat: { bold: true } },
+              })),
             }],
           }],
         },
@@ -83,10 +107,18 @@ async function getOrCreateSheetId() {
             startRow: 0, startColumn: 0,
             rowData: [{
               values: [
-                "TELÉFONO", "NOMBRE", "PROYECTO", "ZONA",
-                "PRIMERA_ACTIVIDAD", "ÚLTIMA_ACTIVIDAD",
-                "TOTAL_MENSAJES", "VISITA_AGENDADA",
-              ].map(v => ({ userEnteredValue: { stringValue: v }, userEnteredFormat: { textFormat: { bold: true } } })),
+                "Teléfono",
+                "Nombre",
+                "Proyecto",
+                "Zona",
+                "Primera Actividad",
+                "Última Actividad",
+                "Total Mensajes",
+                "Visita Agendada",
+              ].map(v => ({
+                userEnteredValue: { stringValue: v },
+                userEnteredFormat: { textFormat: { bold: true } },
+              })),
             }],
           }],
         },
@@ -110,37 +142,47 @@ async function getOrCreateSheetId() {
 }
 
 // ── Guardar mensaje en Google Sheets ─────────────────────────────────────────
+// MENSAJES tiene 6 columnas: Fecha|Teléfono|Nombre|Dirección|Tipo|Mensaje
 async function guardarMensaje({ phone, clientName, direction, type, content, mediaId = "", driveUrl = "", session = null }) {
   try {
     const sheetId = await getOrCreateSheetId();
     const sheets  = await getSheetsClient();
 
     const timestamp = new Date().toISOString();
-    const proyecto  = session?.project_desc || "";
-    const zona      = session?.zone || "";
     const nombre    = clientName || session?.name || "";
 
-    // Guardar fila nueva
+    // Construir el contenido del mensaje incluyendo mediaId/driveUrl si aplica
+    let mensajeCol = content || "";
+    if (type === "image") {
+      if (driveUrl) {
+        mensajeCol = `[Foto enviada por el cliente] ${driveUrl}`;
+      } else if (mediaId) {
+        mensajeCol = `[Foto enviada por el cliente] ID:${mediaId}`;
+      } else {
+        mensajeCol = "[Foto enviada por el cliente]";
+      }
+    }
+
+    // ── Escribir fila en MENSAJES (6 columnas A:F) ────────────────────────────
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
-      range: "MENSAJES!A:J",
+      range: "MENSAJES!A:F",
       valueInputOption: "RAW",
       requestBody: {
-        values: [[timestamp, phone, nombre, direction, type, content, mediaId, driveUrl, proyecto, zona]],
+        values: [[timestamp, phone, nombre, direction, type, mensajeCol]],
       },
     });
 
-    // ── NUEVO: si acabamos de capturar un nombre que antes no teníamos,
-    // actualizar retroactivamente todas las filas anteriores de este número
-    // que tengan la columna NOMBRE_CLIENTE vacía.
+    // ── Si obtuvimos un nombre nuevo, rellenar filas anteriores vacías ────────
     if (nombre && nombre.trim() && nombre !== _nombreCache[phone]) {
       _nombreCache[phone] = nombre;
-      // No esperamos — es operación secundaria
       rellenarNombresAnteriores(sheetId, sheets, phone, nombre)
         .catch(e => console.warn("⚠️ Memoria: error rellenando nombres anteriores:", e.message));
     }
 
-    // Actualizar resumen CLIENTES
+    // ── Actualizar resumen CLIENTES ───────────────────────────────────────────
+    const proyecto = session?.project_desc || "";
+    const zona     = session?.zone || "";
     actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona, session?.visit_confirmed || false)
       .catch(e => console.warn("⚠️ Memoria: no se actualizó CLIENTES:", e.message));
 
@@ -150,32 +192,23 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
 }
 
 // ── Rellenar nombres vacíos en filas anteriores ───────────────────────────────
-/**
- * Cuando Sasha captura el nombre de un cliente, busca todas las filas
- * anteriores de ese número en MENSAJES que tengan columna C vacía
- * y las actualiza con el nombre recién obtenido.
- * Usa batchUpdate para hacerlo en una sola llamada a la API.
- */
 async function rellenarNombresAnteriores(sheetId, sheets, phone, nombre) {
   try {
-    // Leer todas las filas de MENSAJES
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: sheetId,
-      range: "MENSAJES!A:C",  // solo necesitamos timestamp, teléfono, nombre
+      range: "MENSAJES!A:C",
     });
 
     const rows = res.data.values || [];
     if (rows.length < 2) return;
 
     const cleanPhone = phone.replace(/\D/g, "");
-
-    // Encontrar filas que coincidan con el número y tengan nombre vacío
     const data = [];
+
     for (let i = 1; i < rows.length; i++) {
-      const rowPhone = (rows[i][1] || "").replace(/\D/g, "");
+      const rowPhone  = (rows[i][1] || "").replace(/\D/g, "");
       const rowNombre = rows[i][2] || "";
       if (rowPhone.endsWith(cleanPhone.slice(-8)) && !rowNombre.trim()) {
-        // Fila i+1 en Sheets (1-indexed, fila 1 es header)
         data.push({
           range: `MENSAJES!C${i + 1}`,
           values: [[nombre]],
@@ -185,13 +218,9 @@ async function rellenarNombresAnteriores(sheetId, sheets, phone, nombre) {
 
     if (data.length === 0) return;
 
-    // Batch update: actualizar todas en una sola llamada
     await sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: sheetId,
-      requestBody: {
-        valueInputOption: "RAW",
-        data,
-      },
+      requestBody: { valueInputOption: "RAW", data },
     });
 
     console.log(`✅ Memoria: nombre "${nombre}" aplicado a ${data.length} filas anteriores de ${phone}`);
@@ -200,24 +229,40 @@ async function rellenarNombresAnteriores(sheetId, sheets, phone, nombre) {
   }
 }
 
-// ── Actualizar resumen de cliente en SSR_Memoria_Chats ────────────────────────
+// ── Actualizar resumen de cliente en CLIENTES (A:H) ───────────────────────────
 async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona, visitaAgendada) {
   const res  = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "CLIENTES!A:H" });
   const rows = res.data.values || [];
   const now  = new Date().toISOString();
-  const idx  = rows.findIndex((r, i) => i > 0 && r[0] === phone);
+
+  // Buscar fila existente (saltar header en fila 1)
+  const idx = rows.findIndex((r, i) => i > 0 && r[0] === phone);
 
   if (idx === -1) {
+    // Cliente nuevo — agregar fila
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
       range: "CLIENTES!A:H",
       valueInputOption: "RAW",
-      requestBody: { values: [[phone, nombre, proyecto, zona, now, now, "1", visitaAgendada ? "Sí" : "No"]] },
+      requestBody: {
+        values: [[
+          phone,
+          nombre,
+          proyecto,
+          zona,
+          now,   // Primera actividad
+          now,   // Última actividad
+          "1",   // Total mensajes
+          visitaAgendada ? "Sí" : "No",
+        ]],
+      },
     });
   } else {
-    const prev   = rows[idx];
-    const rowNum = idx + 1;
+    // Cliente existente — actualizar
+    const prev      = rows[idx];
+    const rowNum    = idx + 1;
     const nuevoTotal = (parseInt(prev[6] || "0") + 1).toString();
+
     await sheets.spreadsheets.values.update({
       spreadsheetId: sheetId,
       range: `CLIENTES!A${rowNum}:H${rowNum}`,
@@ -225,12 +270,12 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
       requestBody: {
         values: [[
           phone,
-          nombre   || prev[1] || "",
-          proyecto || prev[2] || "",
-          zona     || prev[3] || "",
-          prev[4]  || now,
-          now,
-          nuevoTotal,
+          nombre   || prev[1] || "",   // Nombre: usar el nuevo si existe
+          proyecto || prev[2] || "",   // Proyecto
+          zona     || prev[3] || "",   // Zona
+          prev[4]  || now,             // Primera actividad (preservar)
+          now,                         // Última actividad
+          nuevoTotal,                  // Total mensajes
           visitaAgendada ? "Sí" : (prev[7] || "No"),
         ]],
       },
@@ -261,8 +306,8 @@ async function buscarClienteEnCRM(query) {
       spreadsheetId: CRM_SHEET_ID,
       range: "'CRM Clientes'!A:S",
     });
-    const rows       = (res.data.values || []).slice(2);
-    const kw         = normalizar(query);
+    const rows        = (res.data.values || []).slice(2);
+    const kw          = normalizar(query);
     const soloDigitos = query.replace(/\D/g, "");
 
     return rows.filter(r => {
@@ -333,10 +378,11 @@ async function getOrCreateMediaFolder(drive, phone, clientName) {
 }
 
 // ── Funciones de búsqueda ─────────────────────────────────────────────────────
+// MENSAJES col index: 0=fecha, 1=tel, 2=nombre, 3=dir, 4=tipo, 5=mensaje
 async function buscarPorTelefono(phone, limit = 60) {
   const sheetId = await getOrCreateSheetId();
   const sheets  = await getSheetsClient();
-  const res     = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:J" });
+  const res     = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:F" });
   const rows    = (res.data.values || []).slice(1);
   const clean   = phone.replace(/\D/g, "");
   return rows.filter(r => (r[1] || "").replace(/\D/g, "").endsWith(clean)).slice(-limit);
@@ -345,16 +391,16 @@ async function buscarPorTelefono(phone, limit = 60) {
 async function buscarPorNombre(nombre, limit = 60) {
   const sheetId = await getOrCreateSheetId();
   const sheets  = await getSheetsClient();
-  const res     = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:J" });
+  const res     = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:F" });
   const rows    = (res.data.values || []).slice(1);
   const kw      = normalizar(nombre);
-  return rows.filter(r => normalizar(r[2] || "").includes(kw) || normalizar(r[8] || "").includes(kw)).slice(-limit);
+  return rows.filter(r => normalizar(r[2] || "").includes(kw) || normalizar(r[5] || "").includes(kw)).slice(-limit);
 }
 
 async function buscarPorContenido(keyword, limit = 30) {
   const sheetId = await getOrCreateSheetId();
   const sheets  = await getSheetsClient();
-  const res     = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:J" });
+  const res     = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:F" });
   const rows    = (res.data.values || []).slice(1);
   const kw      = normalizar(keyword);
   return rows.filter(r => normalizar(r[5] || "").includes(kw)).slice(-limit);
@@ -370,10 +416,12 @@ async function listarClientes() {
 async function obtenerFotos(query) {
   const clean = query.replace(/\D/g, "");
   const rows  = clean.length >= 8 ? await buscarPorTelefono(query, 200) : await buscarPorNombre(query, 200);
-  return rows.filter(r => r[4] === "image" && r[7]);
+  // Las fotos están en tipo (col 4) y el link en mensaje (col 5)
+  return rows.filter(r => r[4] === "image" && (r[5] || "").includes("http"));
 }
 
 // ── Formatear historial ───────────────────────────────────────────────────────
+// col: 0=fecha, 1=tel, 2=nombre, 3=dir(in/out), 4=tipo, 5=mensaje
 function formatearMensajes(rows, titulo = "Historial") {
   if (!rows || rows.length === 0) return null;
   const groups = {};
@@ -388,8 +436,7 @@ function formatearMensajes(rows, titulo = "Historial") {
     for (const r of msgs) {
       const hora      = new Date(r[0]).toLocaleTimeString("es-CR", { timeZone: TZ, timeStyle: "short" });
       const quien     = r[3] === "in" ? "🧑 *Cliente*" : "🤖 *Sasha*";
-      const isMedia   = r[4] === "image";
-      const contenido = isMedia ? `[📷 Foto${r[7] ? `: ${r[7]}` : ""}]` : (r[5] || "").slice(0, 200);
+      const contenido = (r[5] || "").slice(0, 200);
       lines.push(`${hora} ${quien}: ${contenido}`);
     }
   }
@@ -424,11 +471,12 @@ async function resumirConversacion(rows, clientName, phone) {
     const mensajesTexto = rows.slice(-50).map(r => {
       const hora  = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short", timeStyle: "short" });
       const quien = r[3] === "in" ? "Cliente" : "Sasha";
-      const tipo  = r[4] === "image" ? "[Foto enviada]" : (r[5] || "");
-      return `[${hora}] ${quien}: ${tipo.slice(0, 300)}`;
+      const msg   = r[4] === "image" ? "[Foto enviada]" : (r[5] || "");
+      return `[${hora}] ${quien}: ${msg.slice(0, 300)}`;
     }).join("\n");
-    const fotos  = rows.filter(r => r[4] === "image" && r[7]);
-    const videos = rows.filter(r => r[4] === "video" && r[7]);
+
+    const fotos = rows.filter(r => r[4] === "image" && (r[5] || "").includes("http"));
+
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 500,
@@ -446,14 +494,7 @@ Formato de respuesta (WhatsApp, conciso):
       lines.push("", `📷 *Fotos enviadas (${fotos.length}):*`);
       fotos.slice(-10).forEach(r => {
         const hora = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short" });
-        lines.push(`  • ${hora}: ${r[7]}`);
-      });
-    }
-    if (videos.length > 0) {
-      lines.push("", `🎥 *Videos enviados (${videos.length}):*`);
-      videos.slice(-5).forEach(r => {
-        const hora = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short" });
-        lines.push(`  • ${hora}: ${r[7]}`);
+        lines.push(`  • ${hora}: ${r[5]}`);
       });
     }
     return lines.join("\n");
@@ -525,7 +566,7 @@ async function procesarConsultaMemoria(text) {
       if (!fotos.length) return `📭 No encontré fotos de "${query}".`;
       const lines = fotos.slice(-20).map(r => {
         const hora = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ });
-        return `📷 ${hora}: ${r[7]}`;
+        return `📷 ${hora}: ${r[5]}`;
       });
       return `📷 *Fotos de ${query}* (${fotos.length}):\n\n${lines.join("\n")}`;
     }
@@ -597,13 +638,14 @@ async function procesarConsultaMemoria(text) {
         }
         const phone      = rows[0][1];
         const clientName = rows[0][2] || nombre;
-        if (/fotos?|videos?|medios?|archivos?|im[aá]genes?/i.test(text)) {
-          const fotos  = rows.filter(r => r[4] === "image" && r[7]);
-          const videos = rows.filter(r => r[4] === "video" && r[7]);
-          if (!fotos.length && !videos.length) return `📭 No encontré fotos ni videos de "${nombre}".`;
-          const lines = [`📎 *Archivos de ${clientName}:*`, ""];
-          if (fotos.length)  lines.push(`📷 *Fotos (${fotos.length}):*`, ...fotos.slice(-15).map(r => `  • ${new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ })} → ${r[7]}`));
-          if (videos.length) lines.push("", `🎥 *Videos (${videos.length}):*`, ...videos.slice(-10).map(r => `  • ${new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ })} → ${r[7]}`));
+        if (/fotos?|medios?|archivos?|im[aá]genes?/i.test(text)) {
+          const fotos = rows.filter(r => r[4] === "image" && (r[5] || "").includes("http"));
+          if (!fotos.length) return `📭 No encontré fotos de "${nombre}".`;
+          const lines = [`📎 *Fotos de ${clientName}:*`, ""];
+          fotos.slice(-15).forEach(r => {
+            const hora = new Date(r[0]).toLocaleString("es-CR", { timeZone: TZ, dateStyle: "short" });
+            lines.push(`  • ${hora} → ${r[5]}`);
+          });
           return lines.join("\n");
         }
         return formatearMensajes(rows, `Historial de ${clientName} (${phone})`) || `📭 Sin mensajes de "${nombre}".`;
