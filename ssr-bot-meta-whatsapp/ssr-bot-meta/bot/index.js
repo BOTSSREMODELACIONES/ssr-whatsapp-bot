@@ -10,31 +10,21 @@ const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR
 
 const SUPERVISORES = ["+50683091817", "+50671981370"];
 
-// Números exactos a ignorar completamente
 const IGNORAR = [];
-
-// Prefijos de país a bloquear por seguridad
-// +57 Colombia: números que buscan agendar visitas para extorsionar empleados
 const IGNORAR_PREFIJOS = ["+57"];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // detectarYCancelarCita
-// Detecta si el mensaje del supervisor es una orden de cancelar una cita.
-// Si lo es, ejecuta la cancelación y retorna el mensaje de respuesta (string).
-// Si NO es una orden de cancelación, retorna null.
 // ─────────────────────────────────────────────────────────────────────────────
 async function detectarYCancelarCita(text) {
   const n = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
-  // Detectar intención de cancelar / borrar / eliminar cita / visita
   const esCancelacion = /\b(cancel|borr[ae]|elimin|quit)\w*\b/.test(n) &&
                         /\b(cita|visita|evento|reuni[on]|agend)\w*\b/.test(n);
 
   if (!esCancelacion) return null;
 
-  // ── Extraer fecha ──────────────────────────────────────────────────────────
   let dateHint = null;
-
   const fechaPatterns = [
     /\b(ma[nñ]ana)\b/,
     /\b(hoy)\b/,
@@ -42,18 +32,12 @@ async function detectarYCancelarCita(text) {
     /(\d{1,2})\s+de\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)/,
     /\b(\d{1,2})\/(\d{1,2})\b/,
   ];
-
   for (const re of fechaPatterns) {
     const m = n.match(re);
     if (m) { dateHint = m[0].trim(); break; }
   }
 
-  // ── Extraer nombre del cliente ─────────────────────────────────────────────
-  // Buscar después de "con", "de", "a"
-  // Ej: "cancela la cita de mañana con Gabriela"
-  //     "borra la visita de Roxana del viernes"
   let nameHint = null;
-
   const conMatch = text.match(/\bcon\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i);
   const deMatch  = text.match(/\bde\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i);
   const aMatch   = text.match(/\ba\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i);
@@ -62,7 +46,6 @@ async function detectarYCancelarCita(text) {
   else if (deMatch) nameHint = deMatch[1].trim();
   else if (aMatch)  nameHint = aMatch[1].trim();
 
-  // Excluir palabras que no son nombres propios
   const EXCLUDE = ["manana", "mañana", "hoy", "la", "el", "los", "las", "una", "un",
                    "cita", "visita", "evento", "lunes", "martes", "miercoles",
                    "jueves", "viernes", "sabado", "domingo"];
@@ -77,17 +60,14 @@ async function detectarYCancelarCita(text) {
 
   try {
     const result = await cancelEventByNameAndDate({ nameHint, dateHint });
-
     if (result.deleted === 0) {
       const quien  = nameHint ? ` de *${nameHint}*` : "";
       const cuando = dateHint ? ` para el *${dateHint}*` : "";
       return `📭 No encontré ninguna cita${quien}${cuando}.\n\nVerificá el nombre o la fecha e intentá de nuevo.`;
     }
-
     const lineas = result.events.map(e => `• ${e.summary} — ${e.dateStr}`).join("\n");
     const plural = result.deleted > 1;
     return `✅ *${plural ? `${result.deleted} citas canceladas` : "Cita cancelada"}* y eliminada${plural ? "s" : ""} del calendario:\n\n${lineas}`;
-
   } catch (err) {
     console.error("❌ Error cancelando cita:", err.message);
     return `❌ Error al cancelar la cita: ${err.message}`;
@@ -111,7 +91,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   if (IGNORAR.includes(fromE164) || IGNORAR.includes(from)) return;
 
-  // Bloquear prefijos de países peligrosos (+57 Colombia - extorsión)
   if (IGNORAR_PREFIJOS.some(p => fromE164.startsWith(p) || from.startsWith(p))) {
     console.log(`🚫 Mensaje bloqueado de país restringido: ${from}`);
     return;
@@ -120,15 +99,11 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
   if (esSupervisor && normalized) {
-
-    // 1. Comando de cancelación de cita (NUEVO)
     const cancelResult = await detectarYCancelarCita(normalized);
     if (cancelResult !== null) {
       await sendText(from, cancelResult);
       return;
     }
-
-    // 2. Consulta de memoria (flujo existente)
     const respuestaMemoria = await memoria.procesarConsultaMemoria(normalized);
     if (respuestaMemoria) {
       await sendText(from, respuestaMemoria);
@@ -138,13 +113,11 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   if (session.escalated) return;
 
-  // ── MODO SOLICITANTE DE TRABAJO ──────────────────────────────────────────────
   if (session.modo === "solicitante") {
     await handleRRHHFlow(from, normalized, session, "solicitante");
     return;
   }
 
-  // ── MODO PROVEEDOR ───────────────────────────────────────────────────────────
   if (session.modo === "proveedor") {
     await handleRRHHFlow(from, normalized, session, "proveedor");
     return;
@@ -180,7 +153,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
     addMsg(from, "user", historyText);
 
-    // ── Memoria ───────────────────────────────────────────────────────────────
+    // ── Guardar en memoria ────────────────────────────────────────────────────
     if (!esSupervisor) {
       const clientName = session.name || null;
       if (normalized) {
@@ -210,8 +183,8 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       } else {
         const slotsText = slots.map(s => {
           const [h, m] = s.split(":");
-          const hNum = parseInt(h);
-          const h12  = hNum > 12 ? hNum - 12 : hNum;
+          const hNum   = parseInt(h);
+          const h12    = hNum > 12 ? hNum - 12 : hNum;
           return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
         }).join(", ");
         availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.]`;
@@ -230,7 +203,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     }
 
     // ── Monitor supervisores ──────────────────────────────────────────────────
-    const clientLabel = session.name ? `${session.name} (${from})` : from;
+    const clientLabel    = session.name ? `${session.name} (${from})` : from;
     const clientMsgLabel = imageDataArray.length > 0
       ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
       : normalized;
@@ -262,6 +235,16 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         project_desc: project?.trim() || session.project_desc,
         zone:         zone?.trim()    || session.zone,
       });
+
+      // ── Registrar nombre inmediatamente en el sheet ───────────────────────
+      const nombreDetectado = updated.name || name?.trim();
+      if (nombreDetectado) {
+        memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
+          proyecto: updated.project_desc || "",
+          zona:     updated.zone || "",
+        }).catch(() => {});
+      }
+
       if (!session.lead_saved) {
         update(from, { lead_saved: true });
         logLead(from, updated);
@@ -281,6 +264,16 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         visit_confirmed: true,
         lead_saved:      true,
       });
+
+      // ── Registrar nombre inmediatamente en el sheet ───────────────────────
+      const nombreDetectado = updated.name || name?.trim();
+      if (nombreDetectado) {
+        memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
+          proyecto:       updated.project_desc || "",
+          zona:           updated.zone || "",
+          visitaAgendada: true,
+        }).catch(() => {});
+      }
 
       const visitHour = updated.visit_hour || "09:00";
       const [hh, mm]  = visitHour.split(":");
@@ -327,13 +320,11 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
     } else if (flag === "SOLICITANTE") {
       update(from, { modo: "solicitante", rrhh_paso: 0, rrhh_data: {} });
-      const msg = `Gracias por su interés en trabajar con *SS Remodelaciones* 👷\n\nPara registrar su información en Recursos Humanos, le haré unas preguntas.`;
-      await sendText(from, msg);
+      await sendText(from, `Gracias por su interés en trabajar con *SS Remodelaciones* 👷\n\nPara registrar su información en Recursos Humanos, le haré unas preguntas.`);
 
     } else if (flag === "PROVEEDOR") {
       update(from, { modo: "proveedor", rrhh_paso: 0, rrhh_data: {} });
-      const msg = `Gracias por su interés en ser proveedor de *SS Remodelaciones* 🏗️\n\nVoy a registrar los datos de su empresa.`;
-      await sendText(from, msg);
+      await sendText(from, `Gracias por su interés en ser proveedor de *SS Remodelaciones* 🏗️\n\nVoy a registrar los datos de su empresa.`);
     }
 
   } catch (err) {
@@ -354,7 +345,6 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
       data[campo] = normalized;
       update(from, { rrhh_data: data });
     }
-
     const nextPaso = paso + 1;
     if (nextPaso <= PASOS.length) {
       update(from, { rrhh_paso: nextPaso });
@@ -366,34 +356,30 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
     }
   }
 
-  // Último paso — guardar
   const lastCampo = PASOS[PASOS.length - 1]?.campo;
   if (lastCampo && normalized) {
     data[lastCampo] = normalized;
     update(from, { rrhh_data: data });
   }
 
+  const fromE164 = from.startsWith("+") ? from : `+${from}`;
+
   if (tipo === "solicitante") {
-    const ok = await guardarSolicitante({
+    await guardarSolicitante({
       phone: from, nombre: data.nombre, cedula: data.cedula,
       telefono: data.telefono, direccion: data.direccion,
       habilidad: data.habilidad, curriculum: data.curriculum,
     });
-    const msg = `✅ *¡Gracias ${data.nombre || ""}!*\n\nSu información quedó registrada en nuestro sistema de Recursos Humanos 📋\n\nCuando tengamos proyectos disponibles, lo contactaremos. ¡Mucho éxito! 🏗️\n\n_Sasha — Bot SS Remodelaciones_`;
-    await sendText(from, msg);
-
+    await sendText(from, `✅ *¡Gracias ${data.nombre || ""}!*\n\nSu información quedó registrada en nuestro sistema de Recursos Humanos 📋\n\nCuando tengamos proyectos disponibles, lo contactaremos. ¡Mucho éxito! 🏗️\n\n_Sasha — Bot SS Remodelaciones_`);
     for (const sup of SUPERVISORES) {
       sendText(sup, `👷 *Nuevo solicitante de trabajo*\n\n📱 ${from}\n👤 ${data.nombre||"—"}\n🪪 Cédula: ${data.cedula||"—"}\n📞 ${data.telefono||"—"}\n📍 ${data.direccion||"—"}\n🔧 ${data.habilidad||"—"}\n📋 ${data.curriculum||"—"}\n\n_Sasha — Bot SSR_`).catch(() => {});
     }
-
   } else {
-    const ok = await guardarProveedor({
+    await guardarProveedor({
       phone: from, empresa: data.empresa, contacto: data.contacto,
       email: data.email, telefono: data.telefono, sector: data.sector,
     });
-    const msg = `✅ ¡Perfecto! Registramos la información de *${data.empresa||"su empresa"}* en nuestra base de proveedores.\n\nCuando tengamos necesidades en su área, los contactaremos. ¡Gracias! 🏗️`;
-    await sendText(from, msg);
-
+    await sendText(from, `✅ ¡Perfecto! Registramos la información de *${data.empresa||"su empresa"}* en nuestra base de proveedores.\n\nCuando tengamos necesidades en su área, los contactaremos. ¡Gracias! 🏗️`);
     for (const sup of SUPERVISORES) {
       sendText(sup, `🏭 *Nuevo proveedor registrado*\n\n📱 ${from}\n🏢 ${data.empresa||"—"}\n👤 ${data.contacto||"—"}\n📧 ${data.email||"—"}\n📞 ${data.telefono||"—"}\n🏗️ ${data.sector||"—"}\n\n_Sasha — Bot SSR_`).catch(() => {});
     }
@@ -403,7 +389,6 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
 // ── Detectar nombre de día O fecha específica ─────────────────────────────────
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-
   if (n.includes("lunes"))   return "lunes";
   if (n.includes("martes"))  return "martes";
   if (n.includes("viernes")) return "viernes";
@@ -414,10 +399,8 @@ function detectDayOrDate(text) {
     const m  = n.match(re);
     if (m) return `${m[1]} de ${mes}`;
   }
-
   const m2 = n.match(/\b(\d{1,2})\/(\d{1,2})\b/);
   if (m2) return `${m2[1]}/${m2[2]}`;
-
   return null;
 }
 
