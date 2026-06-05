@@ -4,6 +4,7 @@ const cron    = require("node-cron");
 const path    = require("path");
 const { handleMessage }       = require("./bot/index");
 const { sendDailyReminders }  = require("./bot/reminders");
+const memoria                 = require("./bot/memoria");
 
 const app = express();
 
@@ -33,8 +34,6 @@ cron.schedule("0 8 * * *", async () => {
 console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
 
 // ── Números internos (supervisores / Melvin) ──────────────────────────────────
-// Cuando uno de estos números envía un audio, Sasha lo trata como instrucción
-// interna en lugar de mensaje de cliente.
 const NUMEROS_INTERNOS = new Set([
   "50683091817",  // Darwin
   "50671981370",  // Melvin
@@ -42,8 +41,6 @@ const NUMEROS_INTERNOS = new Set([
 ]);
 
 // ── Transcripción de audio vía Claude ────────────────────────────────────────
-// Descarga el audio de Meta, lo transcribe con Claude y devuelve el texto.
-// Si falla, devuelve null para que el caller use un fallback seguro.
 async function transcribirAudio(audioId, esInterno) {
   try {
     const { downloadMedia } = require("./bot/messenger");
@@ -143,14 +140,12 @@ app.post("/webhook", async (req, res) => {
       const from      = msg.from;
       const messageId = msg.id;
 
-      // ── Texto ───────────────────────────────────────────────────────────────
       if (msg.type === "text") {
         const text = msg.text?.body;
         if (!text) continue;
         console.log(`📨 Texto de +${from}: "${text.substring(0, 80)}"`);
         addToBuffer(from, messageId, text, null);
 
-      // ── Botones interactivos ────────────────────────────────────────────────
       } else if (msg.type === "interactive") {
         const text =
           msg.interactive?.button_reply?.id   ||
@@ -159,7 +154,6 @@ app.post("/webhook", async (req, res) => {
         if (!text) continue;
         addToBuffer(from, messageId, text, null);
 
-      // ── Ubicación ──────────────────────────────────────────────────────────
       } else if (msg.type === "location") {
         const { latitude, longitude, name, address } = msg.location;
         const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
@@ -169,14 +163,12 @@ app.post("/webhook", async (req, res) => {
         console.log(`📍 Ubicación de +${from}: ${text}`);
         addToBuffer(from, messageId, text, null);
 
-      // ── Imagen ─────────────────────────────────────────────────────────────
       } else if (msg.type === "image") {
         const mediaId = msg.image?.id;
         const caption = msg.image?.caption || "";
         console.log(`🖼️  Imagen de +${from} (mediaId: ${mediaId})`);
         addToBuffer(from, messageId, caption || null, mediaId);
 
-      // ── Video ──────────────────────────────────────────────────────────────
       } else if (msg.type === "video") {
         const caption = msg.video?.caption || "";
         const videoContext = caption
@@ -184,49 +176,31 @@ app.post("/webhook", async (req, res) => {
           : "[El cliente envió un video de su proyecto]";
         addToBuffer(from, messageId, videoContext, null);
 
-      // ── Audio / Voz ────────────────────────────────────────────────────────
-      // CAMBIO PRINCIPAL: transcribimos el audio antes de meterlo al buffer.
-      // Si es un número interno (Melvin/supervisores), el texto se formatea
-      // como instrucción interna para que Sasha lo procese correctamente.
-      // Si falla la transcripción, cae al placeholder seguro como antes.
       } else if (msg.type === "audio") {
         const audioId   = msg.audio?.id;
         const esInterno = NUMEROS_INTERNOS.has(from);
 
         if (audioId) {
           console.log(`🎙️  Audio de +${from} (interno: ${esInterno}) — transcribiendo...`);
-
-          // Transcripción asíncrona: no bloquea el webhook (ya respondimos 200)
           (async () => {
             const transcripcion = await transcribirAudio(audioId, esInterno);
-
             if (transcripcion) {
               console.log(`✅ Transcripción +${from}: "${transcripcion.slice(0, 100)}"`);
-
-              // Si es interno, envolver el texto con el prefijo de instrucción
-              // para que Sasha entienda que viene de un supervisor
               const textoFinal = esInterno
                 ? `[Instrucción de voz de supervisor (${from}): "${transcripcion}"]`
                 : transcripcion;
-
               addToBuffer(from, messageId, textoFinal, null);
-
-              // Si es interno, confirmarle a Melvin/supervisor que se entendió
               if (esInterno) {
                 const { sendText } = require("./bot/messenger");
                 sendText("+" + from, `🎙️ Entendido. Procesando: _"${transcripcion.slice(0, 120)}"_`)
                   .catch(e => console.warn("⚠️ No se pudo confirmar transcripción a interno:", e.message));
               }
-
             } else {
-              // Fallback: transcripción falló
               console.warn(`⚠️ Transcripción falló para +${from}, usando fallback`);
               const fallback = esInterno
                 ? `[Audio de supervisor ${from} — no se pudo transcribir. Por favor enviá el mensaje como texto.]`
                 : "[El cliente envió un mensaje de voz]";
               addToBuffer(from, messageId, fallback, null);
-
-              // Avisar al interno que reenvíe como texto
               if (esInterno) {
                 const { sendText } = require("./bot/messenger");
                 sendText("+" + from, "⚠️ No pude transcribir ese audio. ¿Podés enviar la instrucción como texto?")
@@ -234,13 +208,10 @@ app.post("/webhook", async (req, res) => {
               }
             }
           })();
-
         } else {
-          // Sin audioId — raro, pero manejado
           addToBuffer(from, messageId, "[El cliente envió un mensaje de voz]", null);
         }
 
-      // ── Tipo desconocido ───────────────────────────────────────────────────
       } else {
         console.log(`⚠️  Tipo ignorado: ${msg.type} de +${from}`);
       }
@@ -306,6 +277,16 @@ app.post("/meta-lead", async (req, res) => {
 
     await sendText("+" + telefonoNorm, mensaje);
     console.log(`✅ WhatsApp enviado a +${telefonoNorm}`);
+
+    // Guardar en memoria
+    memoria.guardarMensaje({
+      phone: "+" + telefonoNorm,
+      clientName: nombre !== "Cliente" ? nombre : null,
+      direction: "out",
+      type: "text",
+      content: mensaje,
+      session: { project_desc: interes, zone: zona },
+    }).catch(e => console.warn("⚠️ No se pudo guardar lead en memoria:", e.message));
 
     const SUPS = ["+50683091817", "+50671981370", "+50670068477"];
     const notifSup =
@@ -570,8 +551,6 @@ app.post("/api/cotizacion", async (req, res) => {
 });
 
 // ── Transcripción de voz (endpoint manual para apps externas) ─────────────────
-// Endpoint separado para uso desde el cotizador u otras apps.
-// El flujo interno del webhook usa la función transcribirAudio() directamente.
 app.post("/api/transcribir-voz", async (req, res) => {
   try {
     const { audio, mimeType } = req.body;
@@ -615,27 +594,41 @@ app.post("/api/transcribir-voz", async (req, res) => {
 // ── Servir archivos estáticos (cotizador y otros) ─────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
 
-// ── Start ─────────────────────────────────────────────────────────────────────
-// ── Endpoint: Enviar mensaje outbound desde Make ──────────────────────────────
+// ── Endpoint: Enviar mensaje outbound desde CRM o Make ───────────────────────
 app.post("/send-message", async (req, res) => {
   try {
     const { telefono, mensaje } = req.body;
     if (!telefono || !mensaje) {
       return res.status(400).json({ ok: false, error: "Faltan telefono y mensaje" });
     }
+
     let telefonoNorm = telefono.replace(/\D/g, "");
     if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
       telefonoNorm = "506" + telefonoNorm;
     }
+
     const { sendText } = require("./bot/messenger");
     await sendText("+" + telefonoNorm, mensaje);
     console.log(`📤 /send-message → +${telefonoNorm}: "${mensaje.substring(0, 60)}"`);
+
+    // ── Guardar en memoria para que aparezca en el CRM al refrescar ──────────
+    memoria.guardarMensaje({
+      phone: "+" + telefonoNorm,
+      clientName: null,
+      direction: "out",
+      type: "text",
+      content: mensaje,
+      session: null,
+    }).catch(e => console.warn("⚠️ No se pudo guardar en memoria:", e.message));
+
     res.json({ ok: true, telefono: "+" + telefonoNorm });
   } catch (err) {
     console.error("❌ /send-message error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
+
+// ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`
 ┌────────────────────────────────────────────────────────────┐
