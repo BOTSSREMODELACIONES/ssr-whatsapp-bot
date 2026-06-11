@@ -661,11 +661,13 @@ function detectarComandoVoz(text) {
 
   // ── RESUMEN_CLIENTE ────────────────────────────────────────────────────────
   // Patrones: "resumen de X", "dame el resumen de X", "qué pasó con X"
+  // Alternativa explícita "de la conversación con" antes de "de" simple,
+  // para evitar que (.+) capture "la conversacion con Teresita" en lugar de "Teresita"
   const resumenVozRe = [
-    /(?:dame|deme|mu[eé]strame)\s+(?:el\s+)?resumen\s+(?:de\s+|con\s+)?(.+)/i,
+    /(?:dame|deme|mu[eé]strame)\s+(?:el\s+)?resumen\s+(?:de\s+la\s+conversaci[oó]n\s+(?:de\s+|con\s+)?|de\s+|con\s+)?(.+)/i,
     /(?:c[oó]mo)\s+(?:est[aá]|va|anda)\s+(.+)/i,
     /(?:qu[eé])\s+(?:pas[oó]|dijo|hab[ló]|mand[oó])\s+(?:con\s+)?(.+)/i,
-    /resumen\s+(?:de\s+|con\s+)?(.+)/i,
+    /resumen\s+(?:de\s+la\s+conversaci[oó]n\s+(?:de\s+|con\s+)?|de\s+|con\s+)?(.+)/i,
   ];
   for (const re of resumenVozRe) {
     const rm = t.match(re);
