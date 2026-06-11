@@ -19,6 +19,20 @@
  *   F = Última Actividad
  *   G = Total Mensajes
  *   H = Visita Agendada
+ *
+ * ── CAMBIOS v2 ────────────────────────────────────────────────────────────────
+ * BUGS CORREGIDOS:
+ *   - "resumen de la conversación con X" ahora captura "X" (no "con X")
+ *   - Patrón conversacion ahora maneja preposición "con" además de "de"
+ *   - MEMORY_TRIGGERS simplificado: /resumen/i cubre todos los casos
+ *
+ * NUEVO — SOPORTE AUDIO/VOZ:
+ *   - detectarComandoVoz(text): parsea lenguaje natural transcrito de audios
+ *     para GASTO, INGRESO, MSG_CLIENTE y RESUMEN desde Darwin
+ *   - parsearMontoEspanol(texto): convierte "cincuenta mil", "15 mil",
+ *     "cien mil quinientos" → número entero
+ *   - MEMORY_TRIGGERS y patrones de nombre ampliados para voz natural
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 
 const { google } = require("googleapis");
@@ -33,8 +47,6 @@ const MEDIA_PARENT_ID = process.env.MEDIA_FOLDER_ID || null;
 
 let _sheetId = process.env.MEMORY_SHEET_ID || null;
 const _folderCache = {};
-
-// Cache de nombres ya conocidos por teléfono (en memoria RAM)
 const _nombreCache = {};
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
@@ -77,7 +89,6 @@ async function getOrCreateSheetId() {
     return _sheetId;
   }
 
-  // Crear sheet con headers correctos
   const created = await sheets.spreadsheets.create({
     requestBody: {
       properties: { title: SHEET_TITLE },
@@ -142,7 +153,6 @@ async function getOrCreateSheetId() {
 }
 
 // ── Guardar mensaje en Google Sheets ─────────────────────────────────────────
-// MENSAJES tiene 6 columnas: Fecha|Teléfono|Nombre|Dirección|Tipo|Mensaje
 async function guardarMensaje({ phone, clientName, direction, type, content, mediaId = "", driveUrl = "", session = null }) {
   try {
     const sheetId = await getOrCreateSheetId();
@@ -151,19 +161,13 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
     const timestamp = new Date().toISOString();
     const nombre    = clientName || session?.name || "";
 
-    // Construir el contenido del mensaje incluyendo mediaId/driveUrl si aplica
     let mensajeCol = content || "";
     if (type === "image") {
-      if (driveUrl) {
-        mensajeCol = `[Foto enviada por el cliente] ${driveUrl}`;
-      } else if (mediaId) {
-        mensajeCol = `[Foto enviada por el cliente] ID:${mediaId}`;
-      } else {
-        mensajeCol = "[Foto enviada por el cliente]";
-      }
+      if (driveUrl)      mensajeCol = `[Foto enviada por el cliente] ${driveUrl}`;
+      else if (mediaId)  mensajeCol = `[Foto enviada por el cliente] ID:${mediaId}`;
+      else               mensajeCol = "[Foto enviada por el cliente]";
     }
 
-    // ── Escribir fila en MENSAJES (6 columnas A:F) ────────────────────────────
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
       range: "MENSAJES!A:F",
@@ -173,14 +177,12 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
       },
     });
 
-    // ── Si obtuvimos un nombre nuevo, rellenar filas anteriores vacías ────────
     if (nombre && nombre.trim() && nombre !== _nombreCache[phone]) {
       _nombreCache[phone] = nombre;
       rellenarNombresAnteriores(sheetId, sheets, phone, nombre)
         .catch(e => console.warn("⚠️ Memoria: error rellenando nombres anteriores:", e.message));
     }
 
-    // ── Actualizar resumen CLIENTES ───────────────────────────────────────────
     const proyecto = session?.project_desc || "";
     const zona     = session?.zone || "";
     actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona, session?.visit_confirmed || false)
@@ -209,10 +211,7 @@ async function rellenarNombresAnteriores(sheetId, sheets, phone, nombre) {
       const rowPhone  = (rows[i][1] || "").replace(/\D/g, "");
       const rowNombre = rows[i][2] || "";
       if (rowPhone.endsWith(cleanPhone.slice(-8)) && !rowNombre.trim()) {
-        data.push({
-          range: `MENSAJES!C${i + 1}`,
-          values: [[nombre]],
-        });
+        data.push({ range: `MENSAJES!C${i + 1}`, values: [[nombre]] });
       }
     }
 
@@ -235,32 +234,20 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
   const rows = res.data.values || [];
   const now  = new Date().toISOString();
 
-  // Buscar fila existente (saltar header en fila 1)
   const idx = rows.findIndex((r, i) => i > 0 && r[0] === phone);
 
   if (idx === -1) {
-    // Cliente nuevo — agregar fila
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
       range: "CLIENTES!A:H",
       valueInputOption: "RAW",
       requestBody: {
-        values: [[
-          phone,
-          nombre,
-          proyecto,
-          zona,
-          now,   // Primera actividad
-          now,   // Última actividad
-          "1",   // Total mensajes
-          visitaAgendada ? "Sí" : "No",
-        ]],
+        values: [[phone, nombre, proyecto, zona, now, now, "1", visitaAgendada ? "Sí" : "No"]],
       },
     });
   } else {
-    // Cliente existente — actualizar
-    const prev      = rows[idx];
-    const rowNum    = idx + 1;
+    const prev       = rows[idx];
+    const rowNum     = idx + 1;
     const nuevoTotal = (parseInt(prev[6] || "0") + 1).toString();
 
     await sheets.spreadsheets.values.update({
@@ -270,12 +257,12 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
       requestBody: {
         values: [[
           phone,
-          nombre   || prev[1] || "",   // Nombre: usar el nuevo si existe
-          proyecto || prev[2] || "",   // Proyecto
-          zona     || prev[3] || "",   // Zona
-          prev[4]  || now,             // Primera actividad (preservar)
-          now,                         // Última actividad
-          nuevoTotal,                  // Total mensajes
+          nombre   || prev[1] || "",
+          proyecto || prev[2] || "",
+          zona     || prev[3] || "",
+          prev[4]  || now,
+          now,
+          nuevoTotal,
           visitaAgendada ? "Sí" : (prev[7] || "No"),
         ]],
       },
@@ -378,7 +365,6 @@ async function getOrCreateMediaFolder(drive, phone, clientName) {
 }
 
 // ── Funciones de búsqueda ─────────────────────────────────────────────────────
-// MENSAJES col index: 0=fecha, 1=tel, 2=nombre, 3=dir, 4=tipo, 5=mensaje
 async function buscarPorTelefono(phone, limit = 60) {
   const sheetId = await getOrCreateSheetId();
   const sheets  = await getSheetsClient();
@@ -416,12 +402,10 @@ async function listarClientes() {
 async function obtenerFotos(query) {
   const clean = query.replace(/\D/g, "");
   const rows  = clean.length >= 8 ? await buscarPorTelefono(query, 200) : await buscarPorNombre(query, 200);
-  // Las fotos están en tipo (col 4) y el link en mensaje (col 5)
   return rows.filter(r => r[4] === "image" && (r[5] || "").includes("http"));
 }
 
 // ── Formatear historial ───────────────────────────────────────────────────────
-// col: 0=fecha, 1=tel, 2=nombre, 3=dir(in/out), 4=tipo, 5=mensaje
 function formatearMensajes(rows, titulo = "Historial") {
   if (!rows || rows.length === 0) return null;
   const groups = {};
@@ -504,11 +488,243 @@ Formato de respuesta (WhatsApp, conciso):
   }
 }
 
-// ── Triggers de memoria ───────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARSEO DE MONTOS EN ESPAÑOL COSTARRICENSE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const NUMEROS_ES = {
+  cero: 0, un: 1, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5,
+  seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10, once: 11, doce: 12,
+  trece: 13, catorce: 14, quince: 15, dieciseis: 16, diecisiete: 17,
+  dieciocho: 18, diecinueve: 19, veinte: 20, veintiuno: 21, veintidos: 22,
+  veintitres: 23, veinticuatro: 24, veinticinco: 25, veintiseis: 26,
+  veintisiete: 27, veintiocho: 28, veintinueve: 29, treinta: 30, cuarenta: 40,
+  cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90,
+  cien: 100, ciento: 100, doscientos: 200, doscientas: 200,
+  trescientos: 300, trescientas: 300, cuatrocientos: 400, cuatrocientas: 400,
+  quinientos: 500, quinientas: 500, seiscientos: 600, seiscientas: 600,
+  setecientos: 700, setecientas: 700, ochocientos: 800, ochocientas: 800,
+  novecientos: 900, novecientas: 900, medio: 500,
+};
+
+/**
+ * Convierte texto numérico en español a número entero.
+ * Ejemplos:
+ *   "cincuenta mil"        → 50000
+ *   "15 mil"               → 15000
+ *   "ciento veinte mil"    → 120000
+ *   "un millon"            → 1000000
+ *   "medio millon"         → 500000
+ *   "15,000"               → 15000
+ *   "₡50.000"              → 50000
+ *   "15000"                → 15000
+ */
+function parsearMontoEspanol(texto) {
+  if (!texto) return null;
+
+  // Limpiar símbolo de colón y espacios
+  let t = texto.toLowerCase()
+    .replace(/[₡$]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Número directo con puntos o comas como separadores de miles: "50.000", "50,000"
+  const numPuntos = t.match(/^(\d{1,3}(?:[.,]\d{3})+)$/);
+  if (numPuntos) return parseInt(t.replace(/[.,]/g, ""));
+
+  // Número directo simple: "50000"
+  const numSimple = t.match(/^(\d+)$/);
+  if (numSimple) return parseInt(t);
+
+  // "X.Y mil" o "X,Y mil" → fraccional: "1.5 mil" → 1500
+  const fracMil = t.match(/^(\d+)[.,](\d+)\s*mil(?:es)?$/);
+  if (fracMil) return Math.round(parseFloat(`${fracMil[1]}.${fracMil[2]}`) * 1000);
+
+  // Normalizar para palabras
+  const norm = t
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/\bde\s+(mil|millon)/g, "$1")
+    .replace(/\s+y\s+/g, " ");
+
+  // Detectar millones
+  const millonesMatch = norm.match(/^(.+?)\s+millon(?:es)?(.*)$/);
+  if (millonesMatch) {
+    const baseMillon   = calcularValorPalabras(millonesMatch[1].trim());
+    const resto        = millonesMatch[2].trim();
+    const restoValor   = resto ? calcularValorPalabras(resto.replace(/^\s*(?:y\s+)?/, "").trim()) : 0;
+    if (baseMillon !== null) return (baseMillon === 500 ? 500000 : baseMillon * 1000000) + (restoValor || 0);
+  }
+
+  // Detectar miles
+  const milesMatch = norm.match(/^(.+?)\s+mil(?:es)?(.*)$/);
+  if (milesMatch) {
+    const baseMil  = calcularValorPalabras(milesMatch[1].trim());
+    const restoMil = milesMatch[2].trim();
+    const restoVal = restoMil ? calcularValorPalabras(restoMil.replace(/^\s*(?:y\s+)?/, "").trim()) : 0;
+    if (baseMil !== null) return baseMil * 1000 + (restoVal || 0);
+  }
+
+  // Solo palabras sin "mil"
+  const soloWords = calcularValorPalabras(norm);
+  return soloWords;
+}
+
+/** Suma palabras numéricas españolas: "ciento veinte" → 120 */
+function calcularValorPalabras(texto) {
+  if (!texto) return 0;
+  const partes = texto.split(/\s+/);
+  let total = 0;
+  let found = false;
+  for (const p of partes) {
+    const v = NUMEROS_ES[p.replace(/[\u0300-\u036f]/g, "").normalize("NFD")];
+    if (v !== undefined) { total += v; found = true; }
+    else {
+      const n = parseInt(p);
+      if (!isNaN(n)) { total += n; found = true; }
+    }
+  }
+  return found ? total : null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DETECCIÓN DE COMANDOS POR VOZ (AUDIOS TRANSCRITOS)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Detecta si un texto transcrito de audio de Darwin contiene un comando
+ * de supervisor: GASTO, INGRESO, MSG_CLIENTE o RESUMEN_CLIENTE.
+ *
+ * Retorna { tipo, payload } o null si no detecta ningún comando.
+ *
+ * tipo puede ser: "GASTO" | "INGRESO" | "MSG_CLIENTE" | "RESUMEN_CLIENTE"
+ *
+ * Ejemplos de entrada → salida:
+ *   "anota un gasto de cincuenta mil en materiales"
+ *     → { tipo: "GASTO", payload: "50000 | materiales" }
+ *
+ *   "registra un ingreso de 80 mil por la visita de Juan"
+ *     → { tipo: "INGRESO", payload: "80000 | visita de Juan" }
+ *
+ *   "mándale a teresita que su presupuesto ya está listo"
+ *     → { tipo: "MSG_CLIENTE", payload: "teresita | su presupuesto ya está listo" }
+ *
+ *   "dame el resumen de teresita"
+ *     → { tipo: "RESUMEN_CLIENTE", payload: "teresita" }
+ *
+ * En index.js, después de transcribir el audio del supervisor:
+ *   const cmdVoz = memoria.detectarComandoVoz(textoTranscrito);
+ *   if (cmdVoz) {
+ *     // Construir comando estructurado y procesar igual que si Darwin lo hubiera escrito
+ *     const estructurado = `[${cmdVoz.tipo}: ${cmdVoz.payload}]`;
+ *     // ... llama al handler de ese comando
+ *   }
+ */
+function detectarComandoVoz(text) {
+  if (!text || !text.trim()) return null;
+  const t = text.trim();
+
+  // ── GASTO ──────────────────────────────────────────────────────────────────
+  // Patrones: "gasto de X en Y", "anota un gasto de X", "gasto X colones Y"
+  const gastoRe = /(?:anota?r?|registra?r?|agrega?r?|escrib(?:e|ir))?\s*(?:un\s+)?gasto\s+(?:de\s+)?(.+)/i;
+  const gm = t.match(gastoRe);
+  if (gm) {
+    const { monto, descripcion } = _separarMontoDesc(gm[1].trim());
+    if (monto || descripcion) {
+      const partes = [monto, descripcion].filter(Boolean);
+      return { tipo: "GASTO", payload: partes.join(" | ") };
+    }
+  }
+
+  // ── INGRESO ────────────────────────────────────────────────────────────────
+  // Patrones: "ingreso de X por Y", "anota un ingreso de X"
+  const ingresoRe = /(?:anota?r?|registra?r?|agrega?r?|escrib(?:e|ir))?\s*(?:un\s+)?ingreso\s+(?:de\s+)?(.+)/i;
+  const im = t.match(ingresoRe);
+  if (im) {
+    const { monto, descripcion } = _separarMontoDesc(im[1].trim());
+    if (monto || descripcion) {
+      const partes = [monto, descripcion].filter(Boolean);
+      return { tipo: "INGRESO", payload: partes.join(" | ") };
+    }
+  }
+
+  // ── MSG_CLIENTE ────────────────────────────────────────────────────────────
+  // Patrones: "mándale a [nombre] que [mensaje]", "enviále a [nombre] [mensaje]"
+  const msgRe = /(?:m[aá]ndale|envi[aá]le|dec[íi]le|av[íi]sale|escr[íi]bele)\s+a\s+(.+?)\s+que\s+(.+)/i;
+  const mm = t.match(msgRe);
+  if (mm) {
+    const nombre  = mm[1].replace(/[?.!].*$/, "").trim();
+    const mensaje = mm[2].trim();
+    if (nombre && mensaje) {
+      return { tipo: "MSG_CLIENTE", payload: `${nombre} | ${mensaje}` };
+    }
+  }
+
+  // ── RESUMEN_CLIENTE ────────────────────────────────────────────────────────
+  // Patrones: "resumen de X", "dame el resumen de X", "qué pasó con X"
+  const resumenVozRe = [
+    /(?:dame|deme|mu[eé]strame)\s+(?:el\s+)?resumen\s+(?:de\s+|con\s+)?(.+)/i,
+    /(?:c[oó]mo)\s+(?:est[aá]|va|anda)\s+(.+)/i,
+    /(?:qu[eé])\s+(?:pas[oó]|dijo|hab[ló]|mand[oó])\s+(?:con\s+)?(.+)/i,
+    /resumen\s+(?:de\s+|con\s+)?(.+)/i,
+  ];
+  for (const re of resumenVozRe) {
+    const rm = t.match(re);
+    if (rm) {
+      const nombre = rm[1].replace(/[?.!].*$/, "").trim();
+      if (nombre.length >= 3) {
+        return { tipo: "RESUMEN_CLIENTE", payload: nombre };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Separa "50 mil en materiales" → { monto: "50000", descripcion: "materiales" }
+ * Separadores reconocidos: "en", "para", "por", "de"
+ */
+function _separarMontoDesc(texto) {
+  // Intentar separar por preposición: "X mil en Y"
+  const sepRe = /^(.+?)\s+(?:en|para|por)\s+(.+)$/i;
+  const sep   = texto.match(sepRe);
+  if (sep) {
+    const monto = parsearMontoEspanol(sep[1].trim());
+    return {
+      monto:       monto !== null ? String(monto) : sep[1].trim(),
+      descripcion: sep[2].trim(),
+    };
+  }
+
+  // Sin separador — intentar extraer número al inicio seguido de descripción
+  // "50000 materiales" o "cincuenta mil materiales"
+  const numInicioRe = /^((?:\d[\d.,]*(?:\s*mil(?:lones?)?)?|(?:[a-záéíóúñ]+\s+)*(?:mil(?:lones?)?|ciento[s]?|cien)))\s+(.+)$/i;
+  const ni = texto.match(numInicioRe);
+  if (ni) {
+    const monto = parsearMontoEspanol(ni[1].trim());
+    return {
+      monto:       monto !== null ? String(monto) : ni[1].trim(),
+      descripcion: ni[2].trim(),
+    };
+  }
+
+  // Solo hay monto, sin descripción
+  const monto = parsearMontoEspanol(texto);
+  if (monto !== null) return { monto: String(monto), descripcion: "" };
+
+  // No es número → todo es descripción
+  return { monto: null, descripcion: texto };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRIGGERS DE MEMORIA
+// ═══════════════════════════════════════════════════════════════════════════════
+
 const MEMORY_TRIGGERS = [
   /historial/i,
   /qu[eé]\s+(hab[ló]|dij[oi]|mand[oó]|escrib|hablaste|conversaste)/i,
   /conversaci[oó]n/i,
+  /resumen/i,                    // FIX: simplificado — cubre "resumen de la conversación", "dame el resumen", etc.
   /fotos?\s+de/i,
   /videos?\s+de/i,
   /listar?\s+clientes?/i,
@@ -520,24 +736,34 @@ const MEMORY_TRIGGERS = [
   /info\s+(de\s+)?/i,
   /ficha\s+(de\s+)?/i,
   /datos\s+(de\s+)?/i,
-  /res[uú]me(n|[nm]e)\s+(la\s+)?conversaci[oó]n/i,
   /d[ií]me\s+(qu[eé]|c[oó]mo)/i,
   /cu[eé]ntame\s+(qu[eé]|c[oó]mo)/i,
   /qu[eé]\s+pas[oó]\s+(con|de)/i,
   /medios?\s+de/i,
   /archivos?\s+de/i,
+  // Patrones para voz natural (audios transcritos)
+  /c[oó]mo\s+va\s+/i,
+  /c[oó]mo\s+est[aá]\s+/i,
+  /qu[eé]\s+anda\s+(con|haciendo|pasando)/i,
+  /mu[eé]strame\s+(el|la|los|las)/i,
+  /dame\s+(el|la|los|las)\s+/i,
+  /qu[eé]\s+(?:fue|dijo|hab[ló]|pas[oó]|mand[oó])\s+.{2,}/i,
 ];
 
 function esConsultaMemoria(text) {
   return MEMORY_TRIGGERS.some(re => re.test(text));
 }
 
-// ── Procesar consulta ─────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROCESADOR DE CONSULTAS DE MEMORIA
+// ═══════════════════════════════════════════════════════════════════════════════
+
 async function procesarConsultaMemoria(text) {
   if (!esConsultaMemoria(text)) return null;
   const normalText = normalizar(text);
 
   try {
+    // ── Listar clientes ──────────────────────────────────────────────────────
     if (/listar?.*(clientes?|activos?)/.test(normalText)) {
       const clientes = await listarClientesCRM(30);
       if (!clientes.length) return "📭 No hay clientes en el CRM aún.";
@@ -551,6 +777,7 @@ async function procesarConsultaMemoria(text) {
       return `👥 *Clientes en CRM (${clientes.length}):*\n\n${lines.join("\n")}`;
     }
 
+    // ── Ficha/info/datos de cliente ──────────────────────────────────────────
     const infoMatch = text.match(/(?:info|ficha|datos)\s+(?:de\s+)?(.+)/i);
     if (infoMatch) {
       const query    = infoMatch[1].replace(/[?.!].*$/, "").trim();
@@ -559,6 +786,7 @@ async function procesarConsultaMemoria(text) {
       return clientes.slice(0, 3).map(r => formatearFichaCRM(r)).join("\n\n─────────────\n\n");
     }
 
+    // ── Fotos de cliente ─────────────────────────────────────────────────────
     const fotosMatch = text.match(/fotos?\s+de\s+(.+)/i);
     if (fotosMatch) {
       const query = fotosMatch[1].replace(/[?.!].*$/, "").trim();
@@ -571,6 +799,7 @@ async function procesarConsultaMemoria(text) {
       return `📷 *Fotos de ${query}* (${fotos.length}):\n\n${lines.join("\n")}`;
     }
 
+    // ── Buscar por contenido ─────────────────────────────────────────────────
     const buscarMatch = text.match(/buscar?\s+(.+)/i);
     if (buscarMatch) {
       const keyword = buscarMatch[1].replace(/[?.!].*$/, "").trim();
@@ -579,6 +808,7 @@ async function procesarConsultaMemoria(text) {
       return formatearMensajes(rows, `Resultados: "${keyword}"`) || `📭 Sin resultados para "${keyword}".`;
     }
 
+    // ── Historial por número de teléfono ─────────────────────────────────────
     const phoneMatch = text.match(/[+]?506\s*(\d{4}[\s-]?\d{4})/);
     if (phoneMatch) {
       const phone = "506" + phoneMatch[1].replace(/\D/g, "");
@@ -592,18 +822,33 @@ async function procesarConsultaMemoria(text) {
       return formatearMensajes(rows, `Historial de ${clientName} (+${phone})`) || `📭 Sin mensajes de +${phone}.`;
     }
 
+    // ── PATRONES DE RESUMEN (IA) ─────────────────────────────────────────────
+    // FIX: agrega "de" antes de "la" en el patrón de conversación
+    // NUEVO: patrones de voz natural incluidos
     const resumenPatterns = [
-      /(?:d[ií]me|cu[eé]ntame)\s+(?:qu[eé]|c[oó]mo)\s+(?:hab[ló]|fue|anda|est[aá])\s+(?:con\s+)?(.+)/i,
-      /res[uú]me(?:n|me)?\s+(?:la\s+)?conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,
+      // Texto escrito: "resúmeme la conversación con X" / "resumen de la conversación con X"
+      /res[uú]me(?:n|me|nos?)?\s+(?:de\s+)?(?:la\s+)?conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,
+      // Voz: "dame el resumen de X" / "deme el resumen con X"
+      /(?:dame|deme)\s+(?:el\s+)?resumen\s+(?:de\s+(?:la\s+)?(?:conversaci[oó]n\s+)?(?:de\s+|con\s+)?)?(.+)/i,
+      // Voz: "muéstrame el resumen de X"
+      /mu[eé]strame\s+(?:el\s+)?(?:resumen|historial|conversaci[oó]n)\s+(?:de\s+|con\s+)?(.+)/i,
+      // Texto: "dime qué habló X" / "cuéntame cómo va X"
+      /(?:d[ií]me|cu[eé]ntame)\s+(?:qu[eé]|c[oó]mo)\s+(?:hab[ló]|fue|anda|est[aá]|va)\s+(?:con\s+)?(.+)/i,
+      // Texto: "qué pasó con X"
       /qu[eé]\s+pas[oó]\s+(?:con|de)\s+(.+)/i,
-      /c[oó]mo\s+va\s+(?:el\s+|la\s+)?(?:cliente\s+)?(.+)/i,
+      // Voz: "cómo va / cómo está [el cliente] X"
+      /c[oó]mo\s+(?:va|est[aá]|anda)\s+(?:el\s+|la\s+)?(?:cliente\s+|caso\s+)?(.+)/i,
+      // Voz: "qué anda pasando con X"
+      /qu[eé]\s+anda\s+(?:pasando\s+)?(?:con\s+)?(.+)/i,
+      // Voz: "qué dijo / qué habló / qué mandó X"
+      /qu[eé]\s+(?:dijo|hab[ló]|mand[oó])\s+(.+)/i,
     ];
 
     for (const pattern of resumenPatterns) {
       const match = text.match(pattern);
       if (match) {
-        const nombre = match[1].replace(/[?.!].*$/, "").trim();
-        if (nombre.length < 3) continue;
+        const nombre = match[1].replace(/[?.!\s]+$/, "").trim();
+        if (nombre.length < 2) continue;
         const rows = await buscarPorNombre(nombre);
         if (!rows.length) {
           const crmRows = await buscarClienteEnCRM(nombre);
@@ -616,10 +861,12 @@ async function procesarConsultaMemoria(text) {
       }
     }
 
+    // ── PATRONES DE HISTORIAL (raw) ──────────────────────────────────────────
+    // FIX: conversacion ahora acepta "con" además de "de"
     const nombrePatterns = [
       /historial\s+(?:de\s+)?(.+)/i,
       /qu[eé]\s+(?:hab[ló]|dij[oi]|mand[oó]|hablaste|conversaste)\s+(?:con\s+)?(.+)/i,
-      /conversaci[oó]n\s+(?:de\s+)?(.+)/i,
+      /conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,           // FIX: agrega "con"
       /cu[aá]ntos?\s+mensajes?\s+(?:de\s+|tiene\s+)?(.+)/i,
       /medios?\s+(?:de|enviados?\s+(?:por|de))\s+(.+)/i,
       /archivos?\s+(?:de|enviados?\s+(?:por|de))\s+(.+)/i,
@@ -628,8 +875,8 @@ async function procesarConsultaMemoria(text) {
     for (const pattern of nombrePatterns) {
       const match = text.match(pattern);
       if (match) {
-        const nombre = match[1].replace(/[?.!].*$/, "").trim();
-        if (nombre.length < 3) continue;
+        const nombre = match[1].replace(/[?.!\s]+$/, "").trim();
+        if (nombre.length < 2) continue;
         const rows = await buscarPorNombre(nombre);
         if (!rows.length) {
           const crmRows = await buscarClienteEnCRM(nombre);
@@ -652,6 +899,7 @@ async function procesarConsultaMemoria(text) {
       }
     }
 
+    // ── Fallback: ayuda ──────────────────────────────────────────────────────
     return [
       "🧠 *Comandos disponibles:*", "",
       "📋 *Clientes y datos (CRM):*",
@@ -661,8 +909,14 @@ async function procesarConsultaMemoria(text) {
       "💬 *Conversaciones WhatsApp:*",
       "  • `historial [nombre o número]`",
       "  • `qué habló [nombre]`",
+      "  • `resumen de [nombre]` o `dame el resumen de [nombre]`",
       "  • `fotos de [nombre]`",
-      "  • `buscar [palabra clave]`",
+      "  • `buscar [palabra clave]`", "",
+      "🎙️ *Por audio podés decir:*",
+      "  • \"dame el resumen de Teresita\"",
+      "  • \"cómo va Juan Pérez\"",
+      "  • \"gasto de cincuenta mil en materiales\"",
+      "  • \"ingreso de cien mil por la visita\"",
     ].join("\n");
 
   } catch (err) {
@@ -672,29 +926,20 @@ async function procesarConsultaMemoria(text) {
 }
 
 // ── Registrar nombre inmediatamente al detectarlo ─────────────────────────────
-/**
- * Llamar desde index.js en cuanto Sasha obtiene el nombre del cliente
- * (al parsear flag LEAD o VISITA, o cuando session.name cambia).
- * Actualiza:
- *   1. La fila de CLIENTES (o la crea si no existe aún)
- *   2. Todas las filas de MENSAJES de ese número que tengan columna C vacía
- */
 async function actualizarNombreInmediato(phone, nombre, { proyecto = "", zona = "", visitaAgendada = false } = {}) {
   if (!nombre || !nombre.trim()) return;
-  if (_nombreCache[phone] === nombre) return; // ya lo tenemos, no hacer trabajo duplicado
+  if (_nombreCache[phone] === nombre) return;
 
   try {
     const sheetId = await getOrCreateSheetId();
     const sheets  = await getSheetsClient();
     const now     = new Date().toISOString();
 
-    // 1. Actualizar / crear fila en CLIENTES
     const res  = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "CLIENTES!A:H" });
     const rows = res.data.values || [];
     const idx  = rows.findIndex((r, i) => i > 0 && r[0] === phone);
 
     if (idx === -1) {
-      // Cliente nuevo — crear fila
       await sheets.spreadsheets.values.append({
         spreadsheetId: sheetId,
         range: "CLIENTES!A:H",
@@ -704,7 +949,6 @@ async function actualizarNombreInmediato(phone, nombre, { proyecto = "", zona = 
         },
       });
     } else {
-      // Cliente existente — actualizar nombre (y proyecto/zona si los tenemos)
       const prev   = rows[idx];
       const rowNum = idx + 1;
       await sheets.spreadsheets.values.update({
@@ -714,11 +958,11 @@ async function actualizarNombreInmediato(phone, nombre, { proyecto = "", zona = 
         requestBody: {
           values: [[
             phone,
-            nombre,                                       // Nombre: siempre actualizar
+            nombre,
             proyecto || prev[2] || "",
             zona     || prev[3] || "",
-            prev[4]  || now,                              // Primera actividad: preservar
-            prev[5]  || now,                              // Última actividad: preservar
+            prev[4]  || now,
+            prev[5]  || now,
             prev[6]  || "0",
             visitaAgendada ? "Sí" : (prev[7] || "No"),
           ]],
@@ -726,10 +970,8 @@ async function actualizarNombreInmediato(phone, nombre, { proyecto = "", zona = 
       });
     }
 
-    // 2. Rellenar filas de MENSAJES que tenían columna C vacía
     _nombreCache[phone] = nombre;
     await rellenarNombresAnteriores(sheetId, sheets, phone, nombre);
-
     console.log(`✅ Memoria: nombre "${nombre}" registrado inmediatamente para ${phone}`);
   } catch (err) {
     console.error("❌ Memoria: error en actualizarNombreInmediato:", err.message);
@@ -741,10 +983,14 @@ function normalizar(str) {
   return (str || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
 
+// ── Exports ───────────────────────────────────────────────────────────────────
 module.exports = {
+  // Persistencia
   guardarMensaje,
   guardarMedia,
   actualizarNombreInmediato,
+
+  // Búsquedas
   buscarPorTelefono,
   buscarPorNombre,
   buscarPorContenido,
@@ -752,7 +998,15 @@ module.exports = {
   listarClientesCRM,
   buscarClienteEnCRM,
   obtenerFotos,
+
+  // Formateadores
   formatearMensajes,
+
+  // Memoria (consultas de Darwin)
   esConsultaMemoria,
   procesarConsultaMemoria,
+
+  // NUEVO: Audio/Voz
+  detectarComandoVoz,
+  parsearMontoEspanol,
 };
