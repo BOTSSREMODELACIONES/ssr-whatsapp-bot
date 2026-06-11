@@ -1,3 +1,27 @@
+/**
+ * index.js — Orquestador principal de mensajes para Sasha
+ * SS Remodelaciones
+ *
+ * ── CAMBIOS v2 ────────────────────────────────────────────────────────────────
+ * NUEVOS handlers para supervisores:
+ *   [GASTO: monto | descripcion]         → escribe en planilla master OPERACIONES
+ *   [INGRESO: monto | descripcion]       → escribe en planilla master OPERACIONES
+ *   [MSG_CLIENTE: nombre_o_tel | msg]    → envía mensaje directo a un cliente
+ *   [VISITA: tel_cliente | ...]          → agenda visita asociada a teléfono de cliente
+ *   [RESUMEN_CLIENTE: nombre]            → acceso directo al resumen IA
+ *
+ * NUEVO — Detección de comandos por VOZ (audios transcritos):
+ *   Se llama memoria.detectarComandoVoz() antes de procesar el texto.
+ *   Ejemplo: "gasto de cincuenta mil en materiales" → [GASTO: 50000 | materiales]
+ *
+ * CONFIGURACIÓN PLANILLA:
+ *   PLANILLA_SHEET_ID → ID de la hoja "planilla madre" del sistema operativo SSR
+ *   PLANILLA_TAB      → Nombre de la pestaña donde se registran gastos/ingresos
+ *                       Cambiá este valor si la pestaña tiene otro nombre.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+const { google }                     = require("googleapis");
 const { get, update, addMsg, reset } = require("./state");
 const { ask }                        = require("./claude");
 const { sendText, markRead, downloadMedia, sendMediaById } = require("./messenger");
@@ -8,14 +32,336 @@ const KNOWLEDGE                      = require("./knowledge");
 const memoria                        = require("./memoria");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
+// ── Constantes ────────────────────────────────────────────────────────────────
 const SUPERVISORES = ["+50683091817", "+50671981370"];
 
-const IGNORAR = [];
+// Planilla madre del sistema operativo SSR
+// ⚠️  Si la pestaña tiene otro nombre, cambiá PLANILLA_TAB aquí:
+const PLANILLA_SHEET_ID = "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
+const PLANILLA_TAB      = "OPERACIONES";   // ← nombre de la pestaña en la planilla
+
+const TZ = "America/Costa_Rica";
+
+const IGNORAR         = [];
 const IGNORAR_PREFIJOS = ["+57"];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// detectarYCancelarCita
-// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER — Google Sheets auth para planilla
+// ═══════════════════════════════════════════════════════════════════════════════
+async function getPlanillaSheets() {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT;
+  if (!raw) throw new Error("Variable GOOGLE_SERVICE_ACCOUNT no configurada en Railway");
+  const creds = JSON.parse(raw);
+  const auth  = new google.auth.JWT({
+    email:  creds.client_email,
+    key:    creds.private_key,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+  return google.sheets({ version: "v4", auth });
+}
+
+function nombreSupervisor(phone) {
+  const map = {
+    "+50683091817": "Darwin",
+    "+50671981370": "Melvin",
+    "+50670068477": "Mauricio",
+  };
+  return map[phone] || phone;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [GASTO: monto | descripcion]
+// ═══════════════════════════════════════════════════════════════════════════════
+async function handleGasto(cmd, supervisorPhone) {
+  const contenido   = cmd.replace(/^\[GASTO:\s*/i, "").replace(/\]$/, "").trim();
+  const separador   = contenido.indexOf("|");
+  const montoRaw    = separador >= 0 ? contenido.slice(0, separador).trim() : contenido.trim();
+  const descripcion = separador >= 0 ? contenido.slice(separador + 1).trim() : "Sin descripción";
+
+  if (!montoRaw) {
+    return "⚠️ Formato correcto:\n`[GASTO: 50000 | descripción]`\n\nEjemplo: `[GASTO: 15000 | combustible]`";
+  }
+
+  // Parsear monto (por si viene en palabras desde voz)
+  const montoNum = memoria.parsearMontoEspanol(montoRaw) || parseInt(montoRaw.replace(/\D/g, "")) || null;
+  const montoFinal = montoNum ? montoNum.toLocaleString("es-CR") : montoRaw;
+
+  try {
+    const sheets = await getPlanillaSheets();
+    const ahora  = new Date().toLocaleString("es-CR", { timeZone: TZ });
+    const sup    = nombreSupervisor(supervisorPhone);
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: PLANILLA_SHEET_ID,
+      range: `${PLANILLA_TAB}!A:E`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[ahora, "GASTO", montoFinal, descripcion, sup]],
+      },
+    });
+
+    console.log(`✅ GASTO registrado: ₡${montoFinal} — ${descripcion} (${sup})`);
+    return [
+      `✅ *Gasto registrado en planilla*`,
+      ``,
+      `💸 *Monto:* ₡${montoFinal}`,
+      `📝 *Descripción:* ${descripcion}`,
+      `👤 *Registrado por:* ${sup}`,
+      `📅 *Fecha:* ${ahora}`,
+    ].join("\n");
+
+  } catch (err) {
+    console.error("❌ handleGasto:", err.message);
+    // Si la pestaña no existe, indicar cómo crearla
+    if (err.message.includes("Unable to parse range") || err.message.includes("not found")) {
+      return `❌ La pestaña *"${PLANILLA_TAB}"* no existe en la planilla.\n\nCreá la pestaña con ese nombre y las columnas:\nFECHA | TIPO | MONTO | DESCRIPCION | REGISTRADO_POR\n\nO avisame el nombre correcto de la pestaña.`;
+    }
+    return `❌ No se pudo registrar el gasto: ${err.message}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [INGRESO: monto | descripcion]
+// ═══════════════════════════════════════════════════════════════════════════════
+async function handleIngreso(cmd, supervisorPhone) {
+  const contenido   = cmd.replace(/^\[INGRESO:\s*/i, "").replace(/\]$/, "").trim();
+  const separador   = contenido.indexOf("|");
+  const montoRaw    = separador >= 0 ? contenido.slice(0, separador).trim() : contenido.trim();
+  const descripcion = separador >= 0 ? contenido.slice(separador + 1).trim() : "Sin descripción";
+
+  if (!montoRaw) {
+    return "⚠️ Formato correcto:\n`[INGRESO: 50000 | descripción]`\n\nEjemplo: `[INGRESO: 100000 | visita técnica Teresita]`";
+  }
+
+  const montoNum   = memoria.parsearMontoEspanol(montoRaw) || parseInt(montoRaw.replace(/\D/g, "")) || null;
+  const montoFinal = montoNum ? montoNum.toLocaleString("es-CR") : montoRaw;
+
+  try {
+    const sheets = await getPlanillaSheets();
+    const ahora  = new Date().toLocaleString("es-CR", { timeZone: TZ });
+    const sup    = nombreSupervisor(supervisorPhone);
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: PLANILLA_SHEET_ID,
+      range: `${PLANILLA_TAB}!A:E`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[ahora, "INGRESO", montoFinal, descripcion, sup]],
+      },
+    });
+
+    console.log(`✅ INGRESO registrado: ₡${montoFinal} — ${descripcion} (${sup})`);
+    return [
+      `✅ *Ingreso registrado en planilla*`,
+      ``,
+      `💰 *Monto:* ₡${montoFinal}`,
+      `📝 *Descripción:* ${descripcion}`,
+      `👤 *Registrado por:* ${sup}`,
+      `📅 *Fecha:* ${ahora}`,
+    ].join("\n");
+
+  } catch (err) {
+    console.error("❌ handleIngreso:", err.message);
+    if (err.message.includes("Unable to parse range") || err.message.includes("not found")) {
+      return `❌ La pestaña *"${PLANILLA_TAB}"* no existe en la planilla.\n\nCreá la pestaña con ese nombre y las columnas:\nFECHA | TIPO | MONTO | DESCRIPCION | REGISTRADO_POR\n\nO avisame el nombre correcto de la pestaña.`;
+    }
+    return `❌ No se pudo registrar el ingreso: ${err.message}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [MSG_CLIENTE: nombre_o_tel | mensaje]
+// Envía un mensaje directo desde SSR a un cliente específico.
+// ═══════════════════════════════════════════════════════════════════════════════
+async function handleMsgCliente(cmd, supervisorPhone) {
+  const contenido = cmd.replace(/^\[MSG_CLIENTE:\s*/i, "").replace(/\]$/, "").trim();
+  const pipeIdx   = contenido.indexOf("|");
+
+  if (pipeIdx === -1) {
+    return [
+      `⚠️ Formato correcto:`,
+      `\`[MSG_CLIENTE: nombre_o_número | mensaje]\``,
+      ``,
+      `Ejemplos:`,
+      `• \`[MSG_CLIENTE: Teresita | Le confirmamos que su presupuesto ya está listo]\``,
+      `• \`[MSG_CLIENTE: +50688086892 | Su visita queda para el viernes a las 10am]\``,
+    ].join("\n");
+  }
+
+  const destinatario = contenido.slice(0, pipeIdx).trim();
+  const mensaje      = contenido.slice(pipeIdx + 1).trim();
+
+  if (!mensaje) return "⚠️ El mensaje está vacío. Indicá qué querés enviarle al cliente.";
+
+  // ── Resolver teléfono del destinatario ───────────────────────────────────
+  let phoneDestino  = null;
+  let nombreCliente = destinatario;
+  const soloDigitos = destinatario.replace(/\D/g, "");
+
+  if (soloDigitos.length >= 8) {
+    // Es un número de teléfono
+    phoneDestino  = soloDigitos.startsWith("506") ? `+${soloDigitos}` : `+506${soloDigitos}`;
+    nombreCliente = destinatario;
+  } else {
+    // Es un nombre — buscar en memoria de conversaciones
+    const rowsMem = await memoria.buscarPorNombre(destinatario, 5).catch(() => []);
+    if (rowsMem.length > 0) {
+      const tel = (rowsMem[0][1] || "").replace(/\D/g, "");
+      phoneDestino  = tel.startsWith("506") ? `+${tel}` : `+506${tel}`;
+      nombreCliente = rowsMem[0][2] || destinatario;
+    } else {
+      // Buscar en CRM
+      const crmRows = await memoria.buscarClienteEnCRM(destinatario).catch(() => []);
+      if (crmRows.length > 0) {
+        const tel = (crmRows[0][1] || "").replace(/\D/g, "");
+        phoneDestino  = tel.startsWith("506") ? `+${tel}` : `+506${tel}`;
+        nombreCliente = crmRows[0][2] || destinatario;
+      }
+    }
+  }
+
+  if (!phoneDestino) {
+    return [
+      `📭 No encontré el número de *"${destinatario}"* en el sistema.`,
+      ``,
+      `Usá el número directamente:`,
+      `\`[MSG_CLIENTE: +506XXXXXXXX | ${mensaje}]\``,
+    ].join("\n");
+  }
+
+  // ── Enviar mensaje ───────────────────────────────────────────────────────
+  try {
+    await sendText(phoneDestino, mensaje);
+
+    // Registrar en memoria como mensaje saliente de SSR
+    memoria.guardarMensaje({
+      phone:      phoneDestino,
+      clientName: nombreCliente,
+      direction:  "out",
+      type:       "text",
+      content:    mensaje,
+      session:    null,
+    }).catch(() => {});
+
+    console.log(`✅ MSG_CLIENTE enviado a ${phoneDestino} (${nombreCliente})`);
+    return [
+      `✅ *Mensaje enviado a ${nombreCliente}*`,
+      `📱 ${phoneDestino}`,
+      ``,
+      `💬 _"${mensaje}"_`,
+      ``,
+      `👤 Enviado por: ${nombreSupervisor(supervisorPhone)}`,
+    ].join("\n");
+
+  } catch (err) {
+    console.error("❌ handleMsgCliente:", err.message);
+    return `❌ No se pudo enviar el mensaje a ${phoneDestino}: ${err.message}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [VISITA: tel_cliente | nombre | proyecto | zona | dia | hora | ubicacion | email]
+// Permite a un supervisor agendar una visita en nombre de un cliente específico.
+// Si el primer campo es un teléfono (8+ dígitos), se usa como cliente.
+// Si no, funciona igual que el flag VISITA normal (para el número del supervisor).
+// ═══════════════════════════════════════════════════════════════════════════════
+async function handleVisitaSupervisor(cmd, supervisorPhone) {
+  const contenido = cmd.replace(/^\[VISITA:\s*/i, "").replace(/\]$/, "").trim();
+  const partes    = contenido.split("|").map(p => p.trim());
+
+  if (partes.length < 4) {
+    return [
+      `⚠️ Formato para agendar visita de un cliente:`,
+      `\`[VISITA: tel_cliente | nombre | proyecto | zona | dia | hora | ubicacion | email]\``,
+      ``,
+      `Ejemplo:`,
+      `\`[VISITA: +50688086892 | Teresita Varela | Cielo raso gypsum | Coronado | viernes | 10:00 | https://waze.link | correo@mail.com]\``,
+      ``,
+      `El teléfono del cliente es opcional. Sin teléfono:`,
+      `\`[VISITA: nombre | proyecto | zona | dia | hora]\``,
+    ].join("\n");
+  }
+
+  // Detectar si el primer campo es teléfono
+  const primerCampo  = partes[0].replace(/\D/g, "");
+  const esTelefono   = primerCampo.length >= 8;
+
+  let telefonoCliente, name, project, zone, day, hour, ubicacion, email;
+
+  if (esTelefono) {
+    const telClean   = primerCampo.startsWith("506") ? primerCampo : `506${primerCampo}`;
+    telefonoCliente  = `+${telClean}`;
+    [, name, project, zone, day, hour, ubicacion, email] = partes;
+  } else {
+    telefonoCliente = supervisorPhone; // fallback — calendario queda en nombre del supervisor
+    [name, project, zone, day, hour, ubicacion, email] = partes;
+  }
+
+  name      = name      || "Cliente";
+  project   = project   || "";
+  zone      = zone      || "";
+  day       = day       || "a coordinar";
+  hour      = hour      || "09:00";
+  ubicacion = ubicacion || "";
+  email     = email     || "";
+
+  try {
+    const eventData = await createVisitEvent({
+      name, phone: telefonoCliente, project, zone, day, hour,
+      wazeLink: ubicacion, clientEmail: email,
+    });
+
+    const dateStr = eventData.startDate.toLocaleDateString("es-CR", {
+      weekday: "long", day: "numeric", month: "long", timeZone: TZ,
+    });
+
+    const [hh, mm] = hour.split(":");
+    const hourNum  = parseInt(hh);
+    const h12      = hourNum > 12 ? hourNum - 12 : hourNum || 12;
+    const timeStr  = `${h12}:${mm} ${hourNum >= 12 ? "p.m." : "a.m."}`;
+
+    // Notificar al cliente si es un teléfono real (no el del supervisor)
+    if (esTelefono) {
+      const msgCliente = [
+        `¡Hola ${name}! 😊 Le escribimos de *SS Remodelaciones*.`,
+        ``,
+        `Su visita técnica quedó agendada para el *${dateStr} a las ${timeStr}*.`,
+        ubicacion && `📍 Estaremos en: ${ubicacion}`,
+        ``,
+        `¿Tiene alguna consulta? Con gusto le atendemos. ¡Hasta pronto! 🏗️`,
+      ].filter(Boolean).join("\n");
+
+      sendText(telefonoCliente, msgCliente).catch(err =>
+        console.warn(`⚠️ No se pudo notificar al cliente ${telefonoCliente}:`, err.message)
+      );
+    }
+
+    console.log(`✅ VISITA supervisor agendada: ${name} — ${dateStr} ${timeStr}`);
+    return [
+      `✅ *Visita agendada*`,
+      ``,
+      `👤 Cliente: *${name}*`,
+      esTelefono && `📱 Tel: ${telefonoCliente}`,
+      `🏗️ Proyecto: ${project || "—"}`,
+      `📍 Zona: ${zone || "—"}`,
+      `📅 Fecha: *${dateStr}*`,
+      `🕐 Hora: *${timeStr}*`,
+      ubicacion && `🗺️ Ubicación: ${ubicacion}`,
+      ``,
+      esTelefono
+        ? `✉️ Cliente notificado automáticamente por WhatsApp.`
+        : `ℹ️ Para notificar al cliente, usá [MSG_CLIENTE: número | mensaje].`,
+    ].filter(Boolean).join("\n");
+
+  } catch (err) {
+    console.error("❌ handleVisitaSupervisor:", err.message);
+    return `❌ No se pudo agendar la visita: ${err.message}`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CANCELAR CITA — detección por lenguaje natural
+// ═══════════════════════════════════════════════════════════════════════════════
 async function detectarYCancelarCita(text) {
   const n = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -42,17 +388,17 @@ async function detectarYCancelarCita(text) {
   const deMatch  = text.match(/\bde\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i);
   const aMatch   = text.match(/\ba\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*)/i);
 
-  if (conMatch) nameHint = conMatch[1].trim();
-  else if (deMatch) nameHint = deMatch[1].trim();
-  else if (aMatch)  nameHint = aMatch[1].trim();
+  if (conMatch)      nameHint = conMatch[1].trim();
+  else if (deMatch)  nameHint = deMatch[1].trim();
+  else if (aMatch)   nameHint = aMatch[1].trim();
 
-  const EXCLUDE = ["manana", "mañana", "hoy", "la", "el", "los", "las", "una", "un",
-                   "cita", "visita", "evento", "lunes", "martes", "miercoles",
-                   "jueves", "viernes", "sabado", "domingo"];
+  const EXCLUDE = ["manana","mañana","hoy","la","el","los","las","una","un",
+                   "cita","visita","evento","lunes","martes","miercoles",
+                   "jueves","viernes","sabado","domingo"];
   const nameNorm = (nameHint || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (nameHint && EXCLUDE.includes(nameNorm)) nameHint = null;
 
-  console.log(`🗑️ Comando cancelación — nombre: "${nameHint || "—"}", fecha: "${dateHint || "—"}"`);
+  console.log(`🗑️ Cancelación — nombre: "${nameHint || "—"}", fecha: "${dateHint || "—"}"`);
 
   if (!nameHint && !dateHint) {
     return `⚠️ No entendí bien. Decime el nombre del cliente o la fecha.\n\nEjemplos:\n• *cancela la cita de mañana con Gabriela*\n• *borra la visita del viernes con Roxana*\n• *elimina la cita del 6 de junio*`;
@@ -74,8 +420,9 @@ async function detectarYCancelarCita(text) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER PRINCIPAL
+// ═══════════════════════════════════════════════════════════════════════════════
 async function handleMessage(from, text, messageId, mediaIds = null) {
   if (messageId) markRead(messageId).catch(() => {});
 
@@ -98,26 +445,87 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
+
   if (esSupervisor && normalized) {
-    const cancelResult = await detectarYCancelarCita(normalized);
+
+    // ── PASO 1: Normalizar comandos de voz (audio transcrito) ─────────────────
+    // Si el texto viene de un audio transcrito en lenguaje natural,
+    // lo convierte al formato de comando estructurado.
+    // Ejemplo: "gasto de cincuenta mil en materiales" → "[GASTO: 50000 | materiales]"
+    let cmd = normalized;
+    const cmdVoz = memoria.detectarComandoVoz(normalized);
+    if (cmdVoz) {
+      cmd = `[${cmdVoz.tipo}: ${cmdVoz.payload}]`;
+      console.log(`🎙️ Comando voz normalizado: "${normalized}" → "${cmd}"`);
+    }
+
+    // ── PASO 2: Cancelar cita (lenguaje natural) ──────────────────────────────
+    const cancelResult = await detectarYCancelarCita(cmd);
     if (cancelResult !== null) {
       await sendText(from, cancelResult);
       return;
     }
-    const respuestaMemoria = await memoria.procesarConsultaMemoria(normalized);
+
+    // ── PASO 3: Comandos estructurados de supervisor ──────────────────────────
+
+    // [GASTO: monto | descripcion]
+    if (/^\[GASTO:/i.test(cmd)) {
+      const respuesta = await handleGasto(cmd, fromE164);
+      await sendText(from, respuesta);
+      return;
+    }
+
+    // [INGRESO: monto | descripcion]
+    if (/^\[INGRESO:/i.test(cmd)) {
+      const respuesta = await handleIngreso(cmd, fromE164);
+      await sendText(from, respuesta);
+      return;
+    }
+
+    // [MSG_CLIENTE: nombre_o_telefono | mensaje]
+    if (/^\[MSG_CLIENTE:/i.test(cmd)) {
+      const respuesta = await handleMsgCliente(cmd, fromE164);
+      await sendText(from, respuesta);
+      return;
+    }
+
+    // [VISITA: tel_cliente | nombre | proyecto | zona | dia | hora | ubicacion | email]
+    // Supervisor agendando una visita en nombre de un cliente específico
+    if (/^\[VISITA:/i.test(cmd)) {
+      const respuesta = await handleVisitaSupervisor(cmd, fromE164);
+      await sendText(from, respuesta);
+      return;
+    }
+
+    // [RESUMEN_CLIENTE: nombre] — acceso directo al resumen IA
+    if (/^\[RESUMEN_CLIENTE:/i.test(cmd)) {
+      const nombre   = cmd.replace(/^\[RESUMEN_CLIENTE:\s*/i, "").replace(/\]$/, "").trim();
+      const busqueda = `resumen de ${nombre}`;
+      const respuesta = await memoria.procesarConsultaMemoria(busqueda);
+      await sendText(from, respuesta || `📭 No encontré conversaciones de "${nombre}".`);
+      return;
+    }
+
+    // ── PASO 4: Consultas de memoria (lenguaje natural) ───────────────────────
+    const respuestaMemoria = await memoria.procesarConsultaMemoria(cmd);
     if (respuestaMemoria) {
       await sendText(from, respuestaMemoria);
       return;
     }
+
+    // ── PASO 5: Si nada matcheó, cae al flujo normal de Sasha ─────────────────
+    // El supervisor puede hacer preguntas generales a Sasha
   }
 
   if (session.escalated) return;
 
+  // ── MODO SOLICITANTE DE TRABAJO ──────────────────────────────────────────────
   if (session.modo === "solicitante") {
     await handleRRHHFlow(from, normalized, session, "solicitante");
     return;
   }
 
+  // ── MODO PROVEEDOR ───────────────────────────────────────────────────────────
   if (session.modo === "proveedor") {
     await handleRRHHFlow(from, normalized, session, "proveedor");
     return;
@@ -133,10 +541,10 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       imageDataArray = results
         .map((r, i) => {
           if (r.status === "fulfilled" && r.value) {
-            console.log(`✅ Imagen ${i+1}/${ids.length} (${r.value.mimeType})`);
+            console.log(`✅ Imagen ${i + 1}/${ids.length} (${r.value.mimeType})`);
             return r.value;
           }
-          console.error(`❌ Error img ${i+1}:`, r.reason?.message);
+          console.error(`❌ Error img ${i + 1}:`, r.reason?.message);
           return null;
         })
         .filter(Boolean);
@@ -164,8 +572,12 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         imageDataArray.forEach((imgData, i) => {
           const mediaId = ids[i] || "";
           memoria.guardarMedia(imgData.data, imgData.mimeType, fromE164, clientName)
-            .then(driveUrl => memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: driveUrl || "", session }).catch(() => {}))
-            .catch(() => memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: "", session }).catch(() => {}));
+            .then(driveUrl =>
+              memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: driveUrl || "", session }).catch(() => {})
+            )
+            .catch(() =>
+              memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: "", session }).catch(() => {})
+            );
         });
       }
     }
@@ -236,7 +648,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         zone:         zone?.trim()    || session.zone,
       });
 
-      // ── Registrar nombre inmediatamente en el sheet ───────────────────────
       const nombreDetectado = updated.name || name?.trim();
       if (nombreDetectado) {
         memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
@@ -265,7 +676,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         lead_saved:      true,
       });
 
-      // ── Registrar nombre inmediatamente en el sheet ───────────────────────
       const nombreDetectado = updated.name || name?.trim();
       if (nombreDetectado) {
         memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
@@ -294,8 +704,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           clientEmail: updated.client_email,
         });
         dateStr = eventData.startDate.toLocaleDateString("es-CR", {
-          weekday: "long", day: "numeric", month: "long",
-          timeZone: "America/Costa_Rica",
+          weekday: "long", day: "numeric", month: "long", timeZone: TZ,
         });
         console.log(`📅 Visita agendada: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`);
       } catch (calErr) {
@@ -332,7 +741,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   }
 }
 
-// ── RRHH Flow ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// RRHH FLOW
+// ═══════════════════════════════════════════════════════════════════════════════
 async function handleRRHHFlow(from, normalized, session, tipo) {
   const PASOS  = tipo === "solicitante" ? PASOS_SOLICITANTE : PASOS_PROVEEDOR;
   const paso   = session.rrhh_paso || 0;
@@ -349,8 +760,7 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
     if (nextPaso <= PASOS.length) {
       update(from, { rrhh_paso: nextPaso });
       if (nextPaso <= PASOS.length) {
-        const nextPregunta = PASOS[nextPaso - 1];
-        await sendText(from, nextPregunta.texto);
+        await sendText(from, PASOS[nextPaso - 1].texto);
         return;
       }
     }
@@ -386,7 +796,9 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
   }
 }
 
-// ── Detectar nombre de día O fecha específica ─────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (n.includes("lunes"))   return "lunes";
