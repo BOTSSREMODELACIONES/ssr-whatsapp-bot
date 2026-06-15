@@ -4,8 +4,8 @@
  *
  * ── CAMBIOS v2 ────────────────────────────────────────────────────────────────
  * NUEVOS handlers para supervisores:
- *   [GASTO: monto | descripcion]         → escribe en planilla master OPERACIONES
- *   [INGRESO: monto | descripcion]       → escribe en planilla master OPERACIONES
+ *   [GASTO: monto | descripcion | proyecto?]   → escribe en CAJA_GENERAL + AUDIT_LOG
+ *   [INGRESO: monto | descripcion | proyecto?] → escribe en CAJA_GENERAL + AUDIT_LOG
  *   [MSG_CLIENTE: nombre_o_tel | msg]    → envía mensaje directo a un cliente
  *   [VISITA: tel_cliente | ...]          → agenda visita asociada a teléfono de cliente
  *   [RESUMEN_CLIENTE: nombre]            → acceso directo al resumen IA
@@ -16,8 +16,8 @@
  *
  * CONFIGURACIÓN PLANILLA:
  *   PLANILLA_SHEET_ID → ID de la hoja "planilla madre" del sistema operativo SSR
- *   PLANILLA_TAB      → Nombre de la pestaña donde se registran gastos/ingresos
- *                       Cambiá este valor si la pestaña tiene otro nombre.
+ *   CAJA_TAB          → "CAJA_GENERAL" (libro de caja con saldo en cascada)
+ *   AUDIT_TAB         → "AUDIT_LOG" (rastro histórico de movimientos)
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -36,9 +36,14 @@ const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR
 const SUPERVISORES = ["+50683091817", "+50671981370"];
 
 // Planilla madre del sistema operativo SSR
-// ⚠️  Si la pestaña tiene otro nombre, cambiá PLANILLA_TAB aquí:
 const PLANILLA_SHEET_ID = "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
-const PLANILLA_TAB      = "OPERACIONES";   // ← nombre de la pestaña en la planilla
+
+// Pestaña de caja real (libro de movimientos con saldo en cascada).
+// Columnas: FECHA | TIPO | PROYECTO | DESCRIPCIÓN | ENTRADA | SALIDA | SALDO | RESPONSABLE
+const CAJA_TAB  = "CAJA_GENERAL";
+// Rastro de auditoría (donde Sasha registraba históricamente todos los movimientos).
+// Columnas: Timestamp | Tipo | Descripcion | Monto | Proyecto | Categoria | Canal | Pestanas | Confianza_IA | Personal
+const AUDIT_TAB = "AUDIT_LOG";
 
 const TZ = "America/Costa_Rica";
 
@@ -69,102 +74,188 @@ function nombreSupervisor(phone) {
   return map[phone] || phone;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// HANDLER — [GASTO: monto | descripcion]
-// ═══════════════════════════════════════════════════════════════════════════════
-async function handleGasto(cmd, supervisorPhone) {
-  const contenido   = cmd.replace(/^\[GASTO:\s*/i, "").replace(/\]$/, "").trim();
-  const separador   = contenido.indexOf("|");
-  const montoRaw    = separador >= 0 ? contenido.slice(0, separador).trim() : contenido.trim();
-  const descripcion = separador >= 0 ? contenido.slice(separador + 1).trim() : "Sin descripción";
+// Formatea un número a colones con punto como separador de miles (₡10.000),
+// independientemente del locale del servidor (Railway usa espacio con es-CR).
+function fmtColones(n) {
+  if (n === null || n === undefined || isNaN(n)) return String(n ?? "");
+  return Math.round(n).toLocaleString("de-DE");
+}
 
-  if (!montoRaw) {
-    return "⚠️ Formato correcto:\n`[GASTO: 50000 | descripción]`\n\nEjemplo: `[GASTO: 15000 | combustible]`";
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS — registro de movimientos en CAJA_GENERAL + AUDIT_LOG
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Separa el contenido de un comando GASTO/INGRESO en monto, descripción y proyecto.
+ * Acepta formatos flexibles:
+ *   "50000 | materiales"
+ *   "50000 | materiales | PROY 044/2026"
+ *   "cincuenta mil | materiales proyecto Karim"
+ *   "50000 materiales"   (sin pipe)
+ * Devuelve { montoNum, montoFinal, descripcion, proyecto }
+ */
+function parsearMovimiento(contenido) {
+  const partes = contenido.split("|").map(p => p.trim()).filter(Boolean);
+
+  let montoRaw, descripcion, proyecto = "SSR";
+
+  if (partes.length >= 3) {
+    [montoRaw, descripcion, proyecto] = partes;
+  } else if (partes.length === 2) {
+    [montoRaw, descripcion] = partes;
+  } else {
+    // Sin pipe: intentar separar número del resto
+    const m = contenido.trim().match(/^([\d.,]+|\D+?)\s+(.+)$/);
+    if (m && /\d/.test(m[1])) {
+      montoRaw    = m[1].trim();
+      descripcion = m[2].trim();
+    } else {
+      montoRaw    = contenido.trim();
+      descripcion = "Sin descripción";
+    }
   }
 
-  // Parsear monto (por si viene en palabras desde voz)
-  const montoNum = memoria.parsearMontoEspanol(montoRaw) || parseInt(montoRaw.replace(/\D/g, "")) || null;
-  const montoFinal = montoNum ? montoNum.toLocaleString("es-CR") : montoRaw;
+  // Detectar código de proyecto dentro de la descripción (ej: "PROY 044/2026")
+  const proyMatch = (descripcion || "").match(/PROY\s*\d{2,3}\/\d{4}/i);
+  if (proyMatch && proyecto === "SSR") proyecto = proyMatch[0].toUpperCase().replace(/\s+/, " ");
 
+  const montoNum   = memoria.parsearMontoEspanol(montoRaw) || parseInt(String(montoRaw).replace(/\D/g, "")) || null;
+  const montoFinal = montoNum ? fmtColones(montoNum) : montoRaw;
+
+  return { montoNum, montoFinal, descripcion: descripcion || "Sin descripción", proyecto: proyecto || "SSR" };
+}
+
+/**
+ * Lee el último saldo numérico de la columna G (SALDO) de CAJA_GENERAL.
+ * Devuelve un número (puede ser negativo). Si no encuentra, devuelve 0.
+ */
+async function leerUltimoSaldoCaja(sheets) {
   try {
-    const sheets = await getPlanillaSheets();
-    const ahora  = new Date().toLocaleString("es-CR", { timeZone: TZ });
-    const sup    = nombreSupervisor(supervisorPhone);
+    const r = await sheets.spreadsheets.values.get({
+      spreadsheetId: PLANILLA_SHEET_ID,
+      range: `${CAJA_TAB}!G:G`,
+    });
+    const col = r.data.values || [];
+    for (let i = col.length - 1; i >= 0; i--) {
+      const raw = (col[i]?.[0] || "").toString().trim();
+      if (!raw) continue;
+      // Normalizar: quitar ₡, espacios y puntos de miles; coma decimal → punto
+      const limpio = raw.replace(/[₡\s]/g, "").replace(/\.(?=\d{3}\b)/g, "").replace(",", ".");
+      const num = parseFloat(limpio);
+      if (!isNaN(num)) return num;
+    }
+  } catch (e) {
+    console.warn("⚠️ No se pudo leer último saldo de CAJA_GENERAL:", e.message);
+  }
+  return 0;
+}
+
+/**
+ * Registra un movimiento (GASTO/INGRESO) en CAJA_GENERAL con saldo en cascada
+ * y deja rastro en AUDIT_LOG. Devuelve el texto de confirmación para WhatsApp.
+ */
+async function registrarMovimiento(tipo, contenido, supervisorPhone) {
+  const esGasto = tipo === "GASTO";
+  const { montoNum, montoFinal, descripcion, proyecto } = parsearMovimiento(contenido);
+
+  if (!montoNum) {
+    const ej = esGasto
+      ? "`[GASTO: 15000 | combustible]`  ó  `[GASTO: 50000 | materiales | PROY 044/2026]`"
+      : "`[INGRESO: 100000 | visita técnica Teresita]`";
+    return `⚠️ No entendí el monto. Formato correcto:\n${ej}`;
+  }
+
+  const sheets = await getPlanillaSheets();
+  const sup    = nombreSupervisor(supervisorPhone);
+  const fechaCorta = new Date().toLocaleDateString("es-CR", { timeZone: TZ, day: "2-digit", month: "2-digit", year: "numeric" });
+  const tsCompleto = new Date().toLocaleString("es-CR", { timeZone: TZ });
+
+  // ── 1) Escribir en CAJA_GENERAL con saldo en cascada ──────────────────────
+  let nuevoSaldo = null;
+  try {
+    const saldoAnterior = await leerUltimoSaldoCaja(sheets);
+    nuevoSaldo = esGasto ? saldoAnterior - montoNum : saldoAnterior + montoNum;
+
+    // Columnas: FECHA | TIPO | PROYECTO | DESCRIPCIÓN | ENTRADA | SALIDA | SALDO | RESPONSABLE
+    const entrada = esGasto ? "" : montoNum;
+    const salida  = esGasto ? montoNum : "";
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: PLANILLA_SHEET_ID,
-      range: `${PLANILLA_TAB}!A:E`,
+      range: `${CAJA_TAB}!A:H`,
       valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
       requestBody: {
-        values: [[ahora, "GASTO", montoFinal, descripcion, sup]],
+        values: [[fechaCorta, tipo, proyecto, descripcion, entrada, salida, nuevoSaldo, sup]],
       },
     });
+    console.log(`✅ ${tipo} en CAJA_GENERAL: ₡${montoFinal} — ${descripcion} (${proyecto}) saldo→${nuevoSaldo}`);
+  } catch (err) {
+    console.error(`❌ ${tipo} CAJA_GENERAL:`, err.message);
+    if (err.message.includes("Unable to parse range") || err.message.includes("not found")) {
+      return `❌ La pestaña *"${CAJA_TAB}"* no existe en la planilla. Verificá el nombre exacto de la pestaña.`;
+    }
+    return `❌ No se pudo registrar en CAJA_GENERAL: ${err.message}`;
+  }
 
-    console.log(`✅ GASTO registrado: ₡${montoFinal} — ${descripcion} (${sup})`);
-    return [
-      `✅ *Gasto registrado en planilla*`,
-      ``,
-      `💸 *Monto:* ₡${montoFinal}`,
-      `📝 *Descripción:* ${descripcion}`,
-      `👤 *Registrado por:* ${sup}`,
-      `📅 *Fecha:* ${ahora}`,
-    ].join("\n");
+  // ── 2) Rastro en AUDIT_LOG (no crítico — si falla, no rompe el registro) ──
+  try {
+    // Timestamp | Tipo | Descripcion | Monto | Proyecto | Categoria | Canal | Pestanas | Confianza_IA | Personal
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: PLANILLA_SHEET_ID,
+      range: `${AUDIT_TAB}!A:J`,
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: {
+        values: [[tsCompleto, tipo, descripcion, montoNum, proyecto, "WhatsApp", "whatsapp", CAJA_TAB, 100, "NO"]],
+      },
+    });
+  } catch (err) {
+    console.warn("⚠️ No se pudo escribir en AUDIT_LOG:", err.message);
+  }
 
+  // ── 3) Confirmación a WhatsApp ────────────────────────────────────────────
+  const saldoTxt = nuevoSaldo !== null ? `₡${fmtColones(nuevoSaldo)}` : "—";
+  return [
+    esGasto ? `✅ *Gasto registrado en caja*` : `✅ *Ingreso registrado en caja*`,
+    ``,
+    esGasto ? `💸 *Monto:* ₡${montoFinal}` : `💰 *Monto:* ₡${montoFinal}`,
+    `📝 *Descripción:* ${descripcion}`,
+    `🏗️ *Proyecto:* ${proyecto}`,
+    `🏦 *Saldo actual:* ${saldoTxt}`,
+    `👤 *Registrado por:* ${sup}`,
+    `📅 *Fecha:* ${fechaCorta}`,
+  ].join("\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [GASTO: monto | descripcion | proyecto?]
+// ═══════════════════════════════════════════════════════════════════════════════
+async function handleGasto(cmd, supervisorPhone) {
+  const contenido = cmd.replace(/^\[GASTO:\s*/i, "").replace(/\]$/, "").trim();
+  if (!contenido) {
+    return "⚠️ Formato correcto:\n`[GASTO: 50000 | descripción]`\n\nEjemplo: `[GASTO: 15000 | combustible]`";
+  }
+  try {
+    return await registrarMovimiento("GASTO", contenido, supervisorPhone);
   } catch (err) {
     console.error("❌ handleGasto:", err.message);
-    // Si la pestaña no existe, indicar cómo crearla
-    if (err.message.includes("Unable to parse range") || err.message.includes("not found")) {
-      return `❌ La pestaña *"${PLANILLA_TAB}"* no existe en la planilla.\n\nCreá la pestaña con ese nombre y las columnas:\nFECHA | TIPO | MONTO | DESCRIPCION | REGISTRADO_POR\n\nO avisame el nombre correcto de la pestaña.`;
-    }
     return `❌ No se pudo registrar el gasto: ${err.message}`;
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// HANDLER — [INGRESO: monto | descripcion]
+// HANDLER — [INGRESO: monto | descripcion | proyecto?]
 // ═══════════════════════════════════════════════════════════════════════════════
 async function handleIngreso(cmd, supervisorPhone) {
-  const contenido   = cmd.replace(/^\[INGRESO:\s*/i, "").replace(/\]$/, "").trim();
-  const separador   = contenido.indexOf("|");
-  const montoRaw    = separador >= 0 ? contenido.slice(0, separador).trim() : contenido.trim();
-  const descripcion = separador >= 0 ? contenido.slice(separador + 1).trim() : "Sin descripción";
-
-  if (!montoRaw) {
+  const contenido = cmd.replace(/^\[INGRESO:\s*/i, "").replace(/\]$/, "").trim();
+  if (!contenido) {
     return "⚠️ Formato correcto:\n`[INGRESO: 50000 | descripción]`\n\nEjemplo: `[INGRESO: 100000 | visita técnica Teresita]`";
   }
-
-  const montoNum   = memoria.parsearMontoEspanol(montoRaw) || parseInt(montoRaw.replace(/\D/g, "")) || null;
-  const montoFinal = montoNum ? montoNum.toLocaleString("es-CR") : montoRaw;
-
   try {
-    const sheets = await getPlanillaSheets();
-    const ahora  = new Date().toLocaleString("es-CR", { timeZone: TZ });
-    const sup    = nombreSupervisor(supervisorPhone);
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: PLANILLA_SHEET_ID,
-      range: `${PLANILLA_TAB}!A:E`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[ahora, "INGRESO", montoFinal, descripcion, sup]],
-      },
-    });
-
-    console.log(`✅ INGRESO registrado: ₡${montoFinal} — ${descripcion} (${sup})`);
-    return [
-      `✅ *Ingreso registrado en planilla*`,
-      ``,
-      `💰 *Monto:* ₡${montoFinal}`,
-      `📝 *Descripción:* ${descripcion}`,
-      `👤 *Registrado por:* ${sup}`,
-      `📅 *Fecha:* ${ahora}`,
-    ].join("\n");
-
+    return await registrarMovimiento("INGRESO", contenido, supervisorPhone);
   } catch (err) {
     console.error("❌ handleIngreso:", err.message);
-    if (err.message.includes("Unable to parse range") || err.message.includes("not found")) {
-      return `❌ La pestaña *"${PLANILLA_TAB}"* no existe en la planilla.\n\nCreá la pestaña con ese nombre y las columnas:\nFECHA | TIPO | MONTO | DESCRIPCION | REGISTRADO_POR\n\nO avisame el nombre correcto de la pestaña.`;
-    }
     return `❌ No se pudo registrar el ingreso: ${err.message}`;
   }
 }
@@ -547,8 +638,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           console.error(`❌ Error img ${i + 1}:`, r.reason?.message);
           return null;
         })
-        .filter(Boolean);
-    }
+        .filter(Boolean);    }
 
     const imageData = imageDataArray.length === 0 ? null
       : imageDataArray.length === 1 ? imageDataArray[0]
@@ -571,7 +661,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
         imageDataArray.forEach((imgData, i) => {
           const mediaId = ids[i] || "";
-          memoria.guardarMedia(imgData.data, imgData.mimeType, fromE164, clientName)
+          memoria.guardarMedia(Buffer.from(imgData.base64, "base64"), imgData.mimeType, fromE164, clientName)
             .then(driveUrl =>
               memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: driveUrl || "", session }).catch(() => {})
             )
