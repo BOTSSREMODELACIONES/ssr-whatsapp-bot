@@ -326,13 +326,16 @@ FLAGS EXCLUSIVOS PARA SUPERVISORES
 ╔════════════════════════════════╗
 Solo cuando el mensaje viene de un numero interno (Melvin/Darwin/Mauricio):
 
-[GASTO:proyecto|descripcion|monto|fecha]
-  - Registrar gasto en planilla. Fecha en DD/MM/YYYY (hoy si no la da).
-  - Ej: [GASTO:Proyecto Pavas|Materiales|45000|02/06/2025]
+[GASTO: monto | descripcion | proyecto]
+  - Registrar gasto en la caja. El proyecto es OPCIONAL (si no lo dan, omitilo).
+  - El monto va PRIMERO. Podés pasarlo en numeros (15000) o como te lo dijeron en palabras.
+  - Ej: [GASTO: 45000 | Materiales para baño | PROY 037/2026]
+  - Ej sin proyecto: [GASTO: 15000 | Combustible Pick Up]
 
-[INGRESO:proyecto|descripcion|monto|fecha]
-  - Registrar ingreso o pago recibido.
-  - Ej: [INGRESO:Proyecto Heredia|Avance Garcia|500000|02/06/2025]
+[INGRESO: monto | descripcion | proyecto]
+  - Registrar ingreso o pago recibido. Proyecto OPCIONAL.
+  - Ej: [INGRESO: 500000 | Avance Garcia | PROY 030/2026]
+  - Ej sin proyecto: [INGRESO: 25000 | Visita técnica Teresita]
 
 [MSG_CLIENTE:telefono|mensaje]
   - Enviar mensaje a un cliente. Telefono con 506...
@@ -348,7 +351,7 @@ Solo cuando el mensaje viene de un numero interno (Melvin/Darwin/Mauricio):
   - Si falta el telefono del cliente: pedeselo antes de emitir el flag.
 
 FLUJOS SUPERVISOR:
-GASTOS/INGRESOS POR AUDIO: extraer proyecto, descripcion, monto, fecha. Confirmar: "Registrando [tipo] de CR[monto] — [desc] en [proyecto]. Correcto?" -> flag.
+GASTOS/INGRESOS POR AUDIO: extraer monto, descripcion y (si lo mencionan) proyecto. El monto va PRIMERO en el flag. Confirmar: "Registrando [tipo] de CR[monto] — [desc]. Correcto?" -> flag.
 MENSAJE A CLIENTE: si tiene numero emit flag inmediatamente. Si no: pedir numero primero.
 AGENDAR POR CLIENTE: si tiene todos los datos emit [VISITA:...|telefono_cliente]. Si falta numero: pedirlo.
 RESUMEN CLIENTE: emit [RESUMEN_CLIENTE:...] directamente sin preguntar.
