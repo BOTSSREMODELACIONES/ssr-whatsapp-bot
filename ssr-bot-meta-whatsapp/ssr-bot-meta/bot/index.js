@@ -35,6 +35,21 @@ const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR
 // ── Constantes ────────────────────────────────────────────────────────────────
 const SUPERVISORES = ["+50683091817", "+50671981370"];
 
+// Número de Darwin — recibe copia de todo movimiento financiero registrado por otros.
+const DARWIN_PHONE = "+50683091817";
+
+// Envía una copia de la confirmación financiera a Darwin cuando OTRO supervisor
+// (ej: Melvin) registra un gasto/ingreso. Si lo registró Darwin, no se duplica.
+async function copiaFinancieraADarwin(quienRegistro, respuesta) {
+  if (quienRegistro === DARWIN_PHONE) return;            // no copiar lo propio
+  if (!respuesta || !respuesta.startsWith("✅")) return;  // solo registros exitosos
+  const quien = nombreSupervisor(quienRegistro);
+  const copia = `📋 *Copia — movimiento registrado por ${quien}*\n\n${respuesta}`;
+  sendText(DARWIN_PHONE, copia).catch(err =>
+    console.warn("⚠️ No se pudo enviar copia financiera a Darwin:", err.message)
+  );
+}
+
 // Planilla madre del sistema operativo SSR
 const PLANILLA_SHEET_ID = "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
 
@@ -563,6 +578,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     if (/^\[GASTO:/i.test(cmd)) {
       const respuesta = await handleGasto(cmd, fromE164);
       await sendText(from, respuesta);
+      await copiaFinancieraADarwin(fromE164, respuesta);
       return;
     }
 
@@ -570,6 +586,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     if (/^\[INGRESO:/i.test(cmd)) {
       const respuesta = await handleIngreso(cmd, fromE164);
       await sendText(from, respuesta);
+      await copiaFinancieraADarwin(fromE164, respuesta);
       return;
     }
 
