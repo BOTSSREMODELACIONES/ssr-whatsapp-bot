@@ -40,46 +40,67 @@ const NUMEROS_INTERNOS = new Set([
   "50670068477",  // Mauricio
 ]);
 
-// ── Transcripción de audio vía Claude ────────────────────────────────────────
+// ── Transcripción de audio vía OpenAI Whisper ────────────────────────────────
+// IMPORTANTE: La API de Anthropic (Claude) NO acepta audio como input.
+// Solo texto, imágenes y PDFs. Por eso la transcripción se hace con Whisper,
+// que sí acepta el formato .ogg/opus que envía WhatsApp directamente.
+//
+// REQUISITO: agregar la variable OPENAI_API_KEY en Railway.
+// No requiere instalar ninguna librería nueva — se usa fetch + FormData nativos.
 async function transcribirAudio(audioId, esInterno) {
   try {
-    const { downloadMedia } = require("./bot/messenger");
-    const Anthropic = require("@anthropic-ai/sdk");
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      console.error("❌ transcribirAudio: falta OPENAI_API_KEY en variables de entorno");
+      return null;
+    }
 
+    const { downloadMedia } = require("./bot/messenger");
     const { base64, mimeType } = await downloadMedia(audioId);
 
-    const systemPrompt = esInterno
-      ? "Sos un asistente que transcribe instrucciones internas de SS Remodelaciones. " +
-        "El mensaje viene de un supervisor o de Melvin. " +
-        "Transcribí el audio exactamente como fue dicho, en español costarricense. " +
-        "Solo devolvé el texto transcrito, sin explicaciones ni formato extra."
-      : "Sos un asistente que transcribe mensajes de clientes de SS Remodelaciones en Costa Rica. " +
-        "Transcribí el audio exactamente como fue dicho, en español. " +
-        "Solo devolvé el texto transcrito, sin explicaciones ni formato extra.";
+    if (!base64) {
+      console.error("❌ transcribirAudio: descarga de audio vacía");
+      return null;
+    }
 
-    const r = await anthropic.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 500,
-      system: systemPrompt,
-      messages: [{
-        role: "user",
-        content: [
-          {
-            type: "document",
-            source: { type: "base64", media_type: mimeType || "audio/ogg", data: base64 }
-          },
-          { type: "text", text: "Transcribí este audio." }
-        ]
-      }]
+    // WhatsApp envía audio en audio/ogg (codec opus). Whisper lo acepta.
+    const buffer = Buffer.from(base64, "base64");
+    const mime   = mimeType || "audio/ogg";
+    const ext    = mime.includes("mpeg") ? "mp3"
+                 : mime.includes("mp4")  ? "mp4"
+                 : mime.includes("wav")  ? "wav"
+                 : mime.includes("webm") ? "webm"
+                 : "ogg";
+
+    const form = new FormData();
+    form.append("file", new Blob([buffer], { type: mime }), `audio.${ext}`);
+    form.append("model", "whisper-1");
+    form.append("language", "es");           // español — mejora precisión y velocidad
+    form.append("response_format", "json");
+    // Prompt de contexto: ayuda a Whisper con vocabulario de construcción/CR
+    form.append(
+      "prompt",
+      esInterno
+        ? "Instrucción interna de SS Remodelaciones en Costa Rica. Vocabulario: gasto, ingreso, " +
+          "planilla, proyecto, materiales, colones, visita técnica, cliente, Darwin, Melvin, Mauricio."
+        : "Mensaje de un cliente de SS Remodelaciones en Costa Rica sobre remodelación, " +
+          "construcción, pintura, gypsum, cocina, baño."
+    );
+
+    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body:    form,
     });
 
-    const texto = (r.content || [])
-      .filter(b => b.type === "text")
-      .map(b => b.text)
-      .join("")
-      .trim();
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => "");
+      console.error(`❌ Whisper error ${resp.status}:`, errBody.slice(0, 300));
+      return null;
+    }
 
+    const data  = await resp.json();
+    const texto = (data?.text || "").trim();
     return texto || null;
 
   } catch (err) {
@@ -551,39 +572,54 @@ app.post("/api/cotizacion", async (req, res) => {
 });
 
 // ── Transcripción de voz (endpoint manual para apps externas) ─────────────────
+// Usa OpenAI Whisper (Claude no acepta audio). Recibe audio en base64.
 app.post("/api/transcribir-voz", async (req, res) => {
   try {
     const { audio, mimeType } = req.body;
     if (!audio) return res.status(400).json({ ok: false, error: "Sin audio" });
 
-    const Anthropic = require("@anthropic-ai/sdk");
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-    try {
-      const r = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        system: "Sos un asistente que transcribe notas de obras de construccion en Costa Rica. " +
-                "Transcribí el audio exactamente como fue dicho, en español. " +
-                "Solo devolvé el texto transcrito, sin explicaciones ni formato extra.",
-        messages: [{
-          role: "user",
-          content: [
-            { type: "document", source: { type: "base64", media_type: mimeType || "audio/webm", data: audio } },
-            { type: "text", text: "Transcribí este audio de notas de obra de construccion en Costa Rica." }
-          ]
-        }]
-      });
-      const texto = (r.content || []).filter(b => b.type === "text").map(b => b.text).join("").trim();
-      if (texto) {
-        console.log("✅ /api/transcribir-voz OK:", texto.slice(0, 60));
-        return res.json({ ok: true, texto });
-      }
-    } catch (e) {
-      console.warn("⚠️  Claude no pudo procesar el audio:", e.message);
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      console.error("❌ /api/transcribir-voz: falta OPENAI_API_KEY");
+      return res.status(500).json({ ok: false, error: "Transcripción no configurada (falta OPENAI_API_KEY)" });
     }
 
-    res.json({ ok: false, error: "Transcripción no disponible" });
+    const buffer = Buffer.from(audio, "base64");
+    const mime   = mimeType || "audio/webm";
+    const ext    = mime.includes("mpeg") ? "mp3"
+                 : mime.includes("mp4")  ? "mp4"
+                 : mime.includes("wav")  ? "wav"
+                 : mime.includes("ogg")  ? "ogg"
+                 : "webm";
+
+    const form = new FormData();
+    form.append("file", new Blob([buffer], { type: mime }), `nota.${ext}`);
+    form.append("model", "whisper-1");
+    form.append("language", "es");
+    form.append("response_format", "json");
+    form.append("prompt", "Notas de obra de construcción en Costa Rica: materiales, medidas, metros, colones, cliente, proyecto.");
+
+    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method:  "POST",
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body:    form,
+    });
+
+    if (!resp.ok) {
+      const errBody = await resp.text().catch(() => "");
+      console.warn("⚠️  Whisper no pudo procesar el audio:", errBody.slice(0, 200));
+      return res.json({ ok: false, error: "Transcripción no disponible" });
+    }
+
+    const data  = await resp.json();
+    const texto = (data?.text || "").trim();
+
+    if (texto) {
+      console.log("✅ /api/transcribir-voz OK:", texto.slice(0, 60));
+      return res.json({ ok: true, texto });
+    }
+
+    res.json({ ok: false, error: "Transcripción vacía" });
 
   } catch (err) {
     console.error("🔥 /api/transcribir-voz:", err.message);
@@ -633,7 +669,7 @@ app.listen(PORT, () => {
   console.log(`
 ┌────────────────────────────────────────────────────────────┐
 │  🏗️  SS Remodelaciones ∙ WhatsApp Bot (Sasha)              │
-│  🤖  IA: Claude Sonnet 4.6 (visión + audio activados)      │
+│  🤖  IA: Claude Sonnet 4.6 (visión) + Whisper (audio)      │
 │  ⏰  Recordatorios: 8:00 AM CR diario                      │
 │  🚀  Puerto: ${PORT}                                           │
 │  📌  Webhook WhatsApp: GET|POST /webhook                   │
