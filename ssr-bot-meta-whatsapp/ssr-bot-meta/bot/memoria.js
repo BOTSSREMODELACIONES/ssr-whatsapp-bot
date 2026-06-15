@@ -684,38 +684,74 @@ function detectarComandoVoz(text) {
 
 /**
  * Separa "50 mil en materiales" → { monto: "50000", descripcion: "materiales" }
- * Separadores reconocidos: "en", "para", "por", "de"
+ * Maneja correctamente:
+ *   - Números con separador de miles: "16,000 colones por comida" → monto 16000
+ *   - Números con punto de miles: "16.000 por comida" → monto 16000
+ *   - Palabras: "cincuenta mil en materiales" → monto 50000
+ * Separadores de descripción reconocidos: "en", "para", "por", "de", "a nombre de"
  */
 function _separarMontoDesc(texto) {
-  // Intentar separar por preposición: "X mil en Y"
+  // Limpiar la palabra "colones"/"colón" que no aporta al monto ni a la descripción
+  let t = texto.replace(/\bcolon(?:es)?\b/gi, " ").replace(/\s+/g, " ").trim();
+
+  // ── CASO 1: monto numérico con separador de miles EN CUALQUIER POSICIÓN ───────
+  // Cubre audios como "...proyecto Marriott por 16,000 por concepto de comida"
+  // Busca patrones tipo 16,000 / 16.000 / 16000 / 1.500.000 (mínimo 3 dígitos o con separador)
+  const numAnywhere = t.match(/\b(\d{1,3}(?:[.,]\d{3})+|\d{4,})\b/);
+  if (numAnywhere) {
+    const montoRaw = numAnywhere[1];
+    const monto    = parsearMontoEspanol(montoRaw);
+    if (monto !== null && monto > 0) {
+      // La descripción es lo que viene DESPUÉS del monto (más útil que lo de antes)
+      const idx     = t.indexOf(montoRaw) + montoRaw.length;
+      let   desc    = t.slice(idx).trim();
+      desc = desc.replace(/^(?:por|para|en|de|a)\s+/i, "")
+                 .replace(/^concepto\s+de\s+/i, "")
+                 .replace(/\ba\s+nombre\s+de(?:l)?\s+(?:ss\s+remodelaciones|ssr|s\.?s\.?\s*remodelaciones)\b/gi, "")
+                 .replace(/\bpor\s+concepto\s+de\b/gi, "")
+                 .replace(/[\]"'.]+$/g, "")
+                 .replace(/\s+/g, " ")
+                 .trim();
+      // Si no hay nada útil después, usar lo de antes del monto
+      if (!desc || desc.length < 2) {
+        let antes = t.slice(0, t.indexOf(montoRaw)).trim();
+        antes = antes.replace(/^(?:.*?\bgasto\b|.*?\bingreso\b)\s*/i, "")
+                     .replace(/\b(?:de|por|para|a nombre del?|a nombre de|del?)\b/gi, " ")
+                     .replace(/\s+/g, " ").trim();
+        desc = antes || "Sin descripción";
+      }
+      return { monto: String(monto), descripcion: desc || "Sin descripción" };
+    }
+  }
+
+  // ── CASO 2: separar por preposición "X mil en Y" / "X por Y" (palabras) ───────
   const sepRe = /^(.+?)\s+(?:en|para|por)\s+(.+)$/i;
-  const sep   = texto.match(sepRe);
+  const sep   = t.match(sepRe);
   if (sep) {
     const monto = parsearMontoEspanol(sep[1].trim());
-    return {
-      monto:       monto !== null ? String(monto) : sep[1].trim(),
-      descripcion: sep[2].trim(),
-    };
+    if (monto !== null && monto > 0) {
+      let desc = sep[2].trim().replace(/^(?:concepto\s+de\s+|el\s+|la\s+)/i, "").trim();
+      return { monto: String(monto), descripcion: desc || "Sin descripción" };
+    }
   }
 
-  // Sin separador — intentar extraer número al inicio seguido de descripción
-  // "50000 materiales" o "cincuenta mil materiales"
-  const numInicioRe = /^((?:\d[\d.,]*(?:\s*mil(?:lones?)?)?|(?:[a-záéíóúñ]+\s+)*(?:mil(?:lones?)?|ciento[s]?|cien)))\s+(.+)$/i;
-  const ni = texto.match(numInicioRe);
-  if (ni) {
-    const monto = parsearMontoEspanol(ni[1].trim());
-    return {
-      monto:       monto !== null ? String(monto) : ni[1].trim(),
-      descripcion: ni[2].trim(),
-    };
+  // ── CASO 3: monto en palabras al inicio "cincuenta mil materiales" ───────────
+  const numPalabrasRe = /^((?:[a-záéíóúñ]+\s+)*(?:mil(?:lones?)?|ciento[s]?|cien|quinientos?|doscientos?|trescientos?))\s+(.+)$/i;
+  const np = t.match(numPalabrasRe);
+  if (np) {
+    const monto = parsearMontoEspanol(np[1].trim());
+    if (monto !== null && monto > 0) {
+      let desc = np[2].trim().replace(/^(?:por|para|en|de)\s+/i, "").replace(/^concepto\s+de\s+/i, "").trim();
+      return { monto: String(monto), descripcion: desc || "Sin descripción" };
+    }
   }
 
-  // Solo hay monto, sin descripción
-  const monto = parsearMontoEspanol(texto);
-  if (monto !== null) return { monto: String(monto), descripcion: "" };
+  // ── CASO 4: solo monto en palabras, sin descripción ──────────────────────────
+  const monto = parsearMontoEspanol(t);
+  if (monto !== null && monto > 0) return { monto: String(monto), descripcion: "" };
 
-  // No es número → todo es descripción
-  return { monto: null, descripcion: texto };
+  // ── No es número → todo es descripción ───────────────────────────────────────
+  return { monto: null, descripcion: t };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
