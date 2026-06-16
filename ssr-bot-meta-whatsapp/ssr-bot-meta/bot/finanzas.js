@@ -10,22 +10,31 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL ||
 const SHEETS_ID = process.env.SHEETS_ID ||
   "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
 
+// ⚠️ Códigos VERIFICADOS contra la hoja PROYECTOS (junio 2026).
+// Si abrís un proyecto nuevo, agregalo acá con su código EXACTO de la hoja.
+// Un código mal escrito = el gasto no aparece en el dashboard (SUMIF no hace match).
 const PROYECTOS = [
-  { codigo: "PROY 001/2026", nombre: "Sergio Gonzales Pauta",  alias: ["sergio", "gonzales"] },
-  { codigo: "PROY 002/2026", nombre: "Jeannette Mora",         alias: ["jeannette", "jeanette"] },
-  { codigo: "PROY 016/2026", nombre: "Guillermo",              alias: ["guillermo"] },
-  { codigo: "PROY 019/2026", nombre: "Cristián",               alias: ["cristian"] },
-  { codigo: "PROY 028/2026", nombre: "Fede",                   alias: ["fede", "federico"] },
-  { codigo: "PROY 033/2026", nombre: "Jeannette 033",          alias: ["033"] },
-  { codigo: "PROY 043/2026", nombre: "Miriam",                 alias: ["miriam"] },
-  { codigo: "PROY 044/2026", nombre: "Karim",                  alias: ["karim"] },
-  { codigo: "PROY 045/2026", nombre: "Juan Diego",             alias: ["juan diego", "juan"] },
-  { codigo: "PROY 050/2026", nombre: "Maccaferri",             alias: ["maccaferri", "macaferri"] },
-  { codigo: "PROY 001/2025", nombre: "César Adrián",           alias: ["cesar", "adrian"] },
-  { codigo: "PROY 004/2025", nombre: "Franxi Solano",          alias: ["franxi", "solano"] },
-  { codigo: "PROY 008/2025", nombre: "Jorge Córdoba",          alias: ["jorge", "cordoba"] },
-  { codigo: "PROY 015/2025", nombre: "Fede y Lore",            alias: ["lore"] },
-  { codigo: "PROY 022/2025", nombre: "Nathalie",               alias: ["nathalie"] },
+  // ── Activos / recientes ──
+  { codigo: "PROY 030/2026", nombre: "Marriot",               alias: ["marriot", "marriott"] },
+  { codigo: "PROY 037/2026", nombre: "Nathalie Alpizar",      alias: ["nathalie", "natalie"] },
+  { codigo: "PROY 049/2026", nombre: "Laura Viquez",          alias: ["laura", "viquez"] },
+  { codigo: "PROY 045/2026", nombre: "Juan Diego",            alias: ["juan diego"] },
+  { codigo: "PROY 044/2026", nombre: "Karim Sanchez",         alias: ["karim", "karin"] },
+  { codigo: "PROY 043/2026", nombre: "Miriam Ramirez",        alias: ["miriam"] },
+  { codigo: "PROY 033/2026", nombre: "Jeannette",             alias: ["jeannette", "jeanette"] },
+  { codigo: "PROY 019/2026", nombre: "Christian Alfaro",      alias: ["cristian", "christian", "alfaro"] },
+  { codigo: "PROY 018/2026", nombre: "Anahí Almirón",         alias: ["anahi", "almiron"] },
+  { codigo: "PROY 016/2026", nombre: "Frank Solano",          alias: ["frank", "franck", "solano"] },
+  { codigo: "PROY 015/2026", nombre: "Guillermo Naranjo",     alias: ["guillermo", "naranjo"] },
+  { codigo: "PROY 028/2026", nombre: "Fede y Lore",           alias: ["fede", "lore", "federico"] },
+  { codigo: "PROY 006/2026", nombre: "Jorge Cordoba",         alias: ["jorge", "cordoba"] },
+  { codigo: "PROY 002/2026", nombre: "Kevin Chanto",          alias: ["kevin", "chanto"] },
+  { codigo: "PROY 001/2026", nombre: "Sergio Gonzales",       alias: ["sergio", "gonzales", "pauta"] },
+  // ── Históricos cerrados (siguen recibiendo gastos de garantía) ──
+  { codigo: "PROY 166/2025", nombre: "Cesar Adrian Montenegro", alias: ["cesar", "adrian", "montenegro"] },
+  { codigo: "PROY 154/2025", nombre: "Ruth Valverde",        alias: ["ruth", "valverde"] },
+  { codigo: "PROY 151/2025", nombre: "Daniel Marin",         alias: ["daniel", "marin"] },
+  { codigo: "PROY SC1/2026", nombre: "Leonardo Alvarez",     alias: ["leonardo", "leo", "alvarez"] },
 ];
 
 const KEYWORDS_FINANZAS = [
@@ -181,7 +190,9 @@ function esComandoFinanciero(texto) {
 async function interpretarMovimientos(texto) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const response = await client.messages.create({
-    model: "claude-sonnet-4-5",
+    // Interpretar un comando de texto corto es tarea simple → Haiku (más barato).
+    // Si notás errores de clasificación, subí a claude-sonnet-4-5.
+    model: "claude-haiku-4-5-20251001",
     max_tokens: 1500,
     system: buildSystemPrompt(),
     messages: [{ role: "user", content: texto }],
