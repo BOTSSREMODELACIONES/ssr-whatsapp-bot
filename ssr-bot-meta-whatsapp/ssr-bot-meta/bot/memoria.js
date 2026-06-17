@@ -520,6 +520,16 @@ const NUMEROS_ES = {
  *   "15000"                → 15000
  */
 function parsearMontoEspanol(texto) {
+  // SSR_FIX_20MIL: soporta "20mil", "20 mil", "200mil", "20k", "1.5 millones".
+  if (texto !== null && texto !== undefined) {
+    const rawTxt = String(texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/₡/g, "").trim();
+    let m = rawTxt.match(/(\d+(?:[.,]\d+)?)\s*(?:mil|k)\b/);
+    if (m) return Math.round(Number(m[1].replace(",", ".")) * 1000);
+    m = rawTxt.match(/(\d+(?:[.,]\d+)?)\s*(?:millones?|millon)\b/);
+    if (m) return Math.round(Number(m[1].replace(",", ".")) * 1000000);
+    m = rawTxt.match(/\d{1,3}(?:[.,]\d{3})+/);
+    if (m) return Number(m[0].replace(/[.,]/g, ""));
+  }
   if (!texto) return null;
 
   // Limpiar símbolo de colón y espacios
