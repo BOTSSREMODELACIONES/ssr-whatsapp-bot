@@ -47,7 +47,7 @@ const KEYWORDS_FINANZAS = [
   "planilla","sueldo","salario","quincena","jornal",
   "trabajó","trabajo","trabajaron","horas","hora",
   "vale","adelanto planilla",
-  "subcontrato","subcontratista",
+  "subcontrato","subcontratista","descuenta","desconta","rebaja","apunta","saca","pague","pagé",
   "materiales","herramientas","gasolina","combustible","diesel","diésel",
   "transporte","almuerzo","comida","alimentacion",
   "ferretería","ferreteria","epa","construplaza",
@@ -187,12 +187,67 @@ function esComandoFinanciero(texto) {
   );
 }
 
+
+function extraerComandoFinancieroCrudo(texto) {
+  if (!texto) return null;
+  const m = String(texto).match(/\[(GASTO|INGRESO)\s*:\s*([^\]]+)\]/i);
+  if (!m) return null;
+
+  const tipo = m[1].toUpperCase();
+  const partes = m[2].split("|").map(p => p.trim()).filter(Boolean);
+  const monto = Number(String(partes[0] || "").replace(/[^\d]/g, ""));
+  const descripcion = partes[1] || (tipo === "GASTO" ? "Gasto registrado" : "Ingreso registrado");
+  const proyectoTexto = partes[2] || "";
+
+  const proy = detectarProyectoLocal(proyectoTexto || descripcion);
+
+  return [{
+    fecha: TODAY(),
+    monto,
+    tipo,
+    proyecto: proy.nombre || proyectoTexto || "SS Remodelaciones",
+    proyecto_codigo: proy.codigo || "SSR",
+    cliente: tipo === "INGRESO" ? (proy.nombre || proyectoTexto || "") : null,
+    categoria: tipo === "GASTO" ? categorizarGastoLocal(descripcion) : "Ingreso cliente",
+    descripcion,
+    proveedor: null,
+    forma_pago: "Transferencia",
+    responsable: null,
+    es_personal: false,
+    "pestaña_principal": tipo === "INGRESO" ? "INGRESOS_CLIENTES" : "GASTOS_PROYECTO",
+    pestanas_adicionales: ["CAJA_GENERAL"],
+    confianza: 90,
+    observaciones: proyectoTexto ? `Proyecto detectado: ${proyectoTexto}` : null
+  }];
+}
+
+function detectarProyectoLocal(texto) {
+  const t = String(texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  for (const p of PROYECTOS) {
+    const nombre = p.nombre.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const aliases = (p.alias || []).map(a => a.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+    if (t.includes(nombre) || aliases.some(a => a && t.includes(a))) return p;
+  }
+  return { codigo: "SSR", nombre: "SS Remodelaciones" };
+}
+
+function categorizarGastoLocal(desc) {
+  const t = String(desc || "").toLowerCase();
+  if (/gasolina|combustible|diesel|diésel|aceite|pick up|pickup|veh[ií]culo/.test(t)) return "Transporte";
+  if (/material|ferreter|epa|construplaza|lagar|colono/.test(t)) return "Material";
+  if (/comida|almuerzo|desayuno|cena|alimentaci/.test(t)) return "Alimentación";
+  if (/herramient|equipo|maquina|máquina/.test(t)) return "Herramienta";
+  if (/subcontrat|contratista/.test(t)) return "Subcontrato";
+  return "Gasto";
+}
+
+
 async function interpretarMovimientos(texto) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const response = await client.messages.create({
     // Interpretar un comando de texto corto es tarea simple → Haiku (más barato).
     // Si notás errores de clasificación, subí a claude-sonnet-4-5.
-    model: "claude-haiku-4-5-20251001",
+    model: process.env.ANTHROPIC_FINANCE_MODEL || "claude-sonnet-4-5-20250929",
     max_tokens: 1500,
     system: buildSystemPrompt(),
     messages: [{ role: "user", content: texto }],
@@ -210,8 +265,13 @@ async function registrarEnSheets(data) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
-  if (!res.ok) throw new Error(`Apps Script HTTP ${res.status}`);
-  return res.json();
+  const bodyText = await res.text();
+  if (!res.ok) throw new Error(`Apps Script HTTP ${res.status}: ${bodyText}`);
+  try {
+    return JSON.parse(bodyText);
+  } catch (e) {
+    throw new Error(`Apps Script respondió no-JSON: ${bodyText.slice(0, 300)}`);
+  }
 }
 
 function formatCRC(n) {
@@ -252,7 +312,7 @@ async function procesarComandoFinanciero(texto) {
   if (!esComandoFinanciero(texto)) return null;
 
   try {
-    const movimientos = await interpretarMovimientos(texto);
+    const movimientos = extraerComandoFinancieroCrudo(texto) || await interpretarMovimientos(texto);
     if (!movimientos.length) return null;
 
     const confirmaciones = [];
