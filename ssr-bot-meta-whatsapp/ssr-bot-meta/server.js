@@ -6,6 +6,9 @@ const { handleMessage }       = require("./bot/index");
 const { sendDailyReminders }  = require("./bot/reminders");
 const memoria                 = require("./bot/memoria");
 
+// ── KEEP-ALIVE: evita que Railway duerma el proceso ───────────────────────────
+require("./bot/keepalive");
+
 const app = express();
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -40,13 +43,7 @@ const NUMEROS_INTERNOS = new Set([
   "50670068477",  // Mauricio
 ]);
 
-// ── Transcripción de audio vía OpenAI Whisper ────────────────────────────────
-// IMPORTANTE: La API de Anthropic (Claude) NO acepta audio como input.
-// Solo texto, imágenes y PDFs. Por eso la transcripción se hace con Whisper,
-// que sí acepta el formato .ogg/opus que envía WhatsApp directamente.
-//
-// REQUISITO: agregar la variable OPENAI_API_KEY en Railway.
-// No requiere instalar ninguna librería nueva — se usa fetch + FormData nativos.
+// ── Transcripción de audio vía OpenAI Whisper ─────────────────────────────────
 async function transcribirAudio(audioId, esInterno) {
   try {
     const apiKey = process.env.OPENAI_API_KEY;
@@ -63,7 +60,6 @@ async function transcribirAudio(audioId, esInterno) {
       return null;
     }
 
-    // WhatsApp envía audio en audio/ogg (codec opus). Whisper lo acepta.
     const buffer = Buffer.from(base64, "base64");
     const mime   = mimeType || "audio/ogg";
     const ext    = mime.includes("mpeg") ? "mp3"
@@ -75,9 +71,8 @@ async function transcribirAudio(audioId, esInterno) {
     const form = new FormData();
     form.append("file", new Blob([buffer], { type: mime }), `audio.${ext}`);
     form.append("model", "whisper-1");
-    form.append("language", "es");           // español — mejora precisión y velocidad
+    form.append("language", "es");
     form.append("response_format", "json");
-    // Prompt de contexto: ayuda a Whisper con vocabulario de construcción/CR
     form.append(
       "prompt",
       esInterno
@@ -110,7 +105,7 @@ async function transcribirAudio(audioId, esInterno) {
 }
 
 // ── Buffer de mensajes (agrupa fotos múltiples en un lote) ────────────────────
-const messageBuffer  = new Map();
+const messageBuffer   = new Map();
 const BATCH_WINDOW_MS = 1500;
 
 function flushBuffer(from) {
@@ -134,6 +129,16 @@ function addToBuffer(from, messageId, text, mediaId) {
   buffer.items.push({ messageId, text: text || null, mediaId: mediaId || null });
   buffer.timer = setTimeout(() => flushBuffer(from), BATCH_WINDOW_MS);
 }
+
+// ── HEALTH CHECK — requerido por keepalive.js ─────────────────────────────────
+app.get("/health", (_req, res) => {
+  res.json({
+    status:   "ok",
+    service:  "Sasha SSR",
+    ts:       new Date().toISOString(),
+    sessions: "active",
+  });
+});
 
 // ── Webhook verification ───────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
@@ -299,7 +304,6 @@ app.post("/meta-lead", async (req, res) => {
     await sendText("+" + telefonoNorm, mensaje);
     console.log(`✅ WhatsApp enviado a +${telefonoNorm}`);
 
-    // Guardar en memoria
     memoria.guardarMensaje({
       phone: "+" + telefonoNorm,
       clientName: nombre !== "Cliente" ? nombre : null,
@@ -392,7 +396,7 @@ app.get("/test-meta-lead", async (req, res) => {
   }
 });
 
-// ── Cotizador: procesar notas con IA ─────────────────────────────────────────
+// ── Cotizador: procesar notas con IA ──────────────────────────────────────────
 app.post("/api/procesar-notas", async (req, res) => {
   try {
     const { notas, fotos, pdfs } = req.body;
@@ -572,7 +576,6 @@ app.post("/api/cotizacion", async (req, res) => {
 });
 
 // ── Transcripción de voz (endpoint manual para apps externas) ─────────────────
-// Usa OpenAI Whisper (Claude no acepta audio). Recibe audio en base64.
 app.post("/api/transcribir-voz", async (req, res) => {
   try {
     const { audio, mimeType } = req.body;
@@ -627,7 +630,7 @@ app.post("/api/transcribir-voz", async (req, res) => {
   }
 });
 
-// ── Servir archivos estáticos (cotizador y otros) ─────────────────────────────
+// ── Servir archivos estáticos ──────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
 
 // ── Endpoint: Enviar mensaje outbound desde CRM o Make ───────────────────────
@@ -647,7 +650,6 @@ app.post("/send-message", async (req, res) => {
     await sendText("+" + telefonoNorm, mensaje);
     console.log(`📤 /send-message → +${telefonoNorm}: "${mensaje.substring(0, 60)}"`);
 
-    // ── Guardar en memoria para que aparezca en el CRM al refrescar ──────────
     memoria.guardarMensaje({
       phone: "+" + telefonoNorm,
       clientName: null,
@@ -671,10 +673,12 @@ app.listen(PORT, () => {
 │  🏗️  SS Remodelaciones ∙ WhatsApp Bot (Sasha)              │
 │  🤖  IA: Claude Sonnet 4.6 (visión) + Whisper (audio)      │
 │  ⏰  Recordatorios: 8:00 AM CR diario                      │
+│  💓  KeepAlive: ping cada 14 min (siempre activa)          │
 │  🚀  Puerto: ${PORT}                                           │
 │  📌  Webhook WhatsApp: GET|POST /webhook                   │
 │  🔥  Webhook Meta Leads: GET|POST /meta-lead               │
 │  🎙️  Audio interno: transcripción en tiempo real           │
+│  🩺  Health check: GET /health                             │
 │  🧪  Test leads: GET /test-meta-lead                       │
 └────────────────────────────────────────────────────────────┘
   `);
