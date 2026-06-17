@@ -30,10 +30,11 @@ const { sendVisitConfirmation }      = require("./email");
 const { upsertLead, registerVisit }  = require("./crm");
 const KNOWLEDGE                      = require("./knowledge");
 const memoria                        = require("./memoria");
+const { procesarComandoFinanciero, esComandoFinanciero } = require("./finanzas");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
 // ── Constantes ────────────────────────────────────────────────────────────────
-const SUPERVISORES = ["+50683091817", "+50671981370"];
+const SUPERVISORES = ["+50683091817", "+50671981370", "+50671951695"];
 
 // Número de Darwin — recibe copia de todo movimiento financiero registrado por otros.
 const DARWIN_PHONE = "+50683091817";
@@ -97,182 +98,58 @@ function fmtColones(n) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// HELPERS — registro de movimientos en CAJA_GENERAL + AUDIT_LOG
+// HELPERS — registro financiero vía finanzas.js → Apps Script
 // ═══════════════════════════════════════════════════════════════════════════════
+//
+// IMPORTANTE:
+// Este index.js ya NO escribe directamente en una pestaña OPERACIONES ni solo en
+// CAJA_GENERAL. Todo gasto/ingreso pasa por finanzas.js, que manda el POST al
+// Apps Script y deja los datos en:
+//   - GASTOS_PROYECTO + CAJA_GENERAL para gastos
+//   - INGRESOS_CLIENTES + CAJA_GENERAL para ingresos
+//
+// Esto mantiene el Dashboard alineado con la planilla madre.
 
-/**
- * Separa el contenido de un comando GASTO/INGRESO en monto, descripción y proyecto.
- * Acepta formatos flexibles:
- *   "50000 | materiales"
- *   "50000 | materiales | PROY 044/2026"
- *   "cincuenta mil | materiales proyecto Karim"
- *   "50000 materiales"   (sin pipe)
- * Devuelve { montoNum, montoFinal, descripcion, proyecto }
- */
-function parsearMovimiento(contenido) {
-  const partes = contenido.split("|").map(p => p.trim()).filter(Boolean);
-
-  let montoRaw, descripcion, proyecto = "SSR";
-
-  if (partes.length >= 3) {
-    [montoRaw, descripcion, proyecto] = partes;
-  } else if (partes.length === 2) {
-    [montoRaw, descripcion] = partes;
-  } else {
-    // Sin pipe: intentar separar número del resto
-    const m = contenido.trim().match(/^([\d.,]+|\D+?)\s+(.+)$/);
-    if (m && /\d/.test(m[1])) {
-      montoRaw    = m[1].trim();
-      descripcion = m[2].trim();
-    } else {
-      montoRaw    = contenido.trim();
-      descripcion = "Sin descripción";
-    }
-  }
-
-  // Detectar código de proyecto dentro de la descripción (ej: "PROY 044/2026")
-  const proyMatch = (descripcion || "").match(/PROY\s*\d{2,3}\/\d{4}/i);
-  if (proyMatch && proyecto === "SSR") proyecto = proyMatch[0].toUpperCase().replace(/\s+/, " ");
-
-  const montoNum   = memoria.parsearMontoEspanol(montoRaw) || parseInt(String(montoRaw).replace(/\D/g, "")) || null;
-  const montoFinal = montoNum ? fmtColones(montoNum) : montoRaw;
-
-  return { montoNum, montoFinal, descripcion: descripcion || "Sin descripción", proyecto: proyecto || "SSR" };
+function extraerComandoEstructurado(cmd, tipo) {
+  const re = new RegExp("^\\[" + tipo + ":\\s*", "i");
+  return String(cmd || "").replace(re, "").replace(/\\]\\s*$/, "").trim();
 }
 
-/**
- * Lee el último saldo numérico de la columna G (SALDO) de CAJA_GENERAL.
- * Devuelve un número (puede ser negativo). Si no encuentra, devuelve 0.
- */
-async function leerUltimoSaldoCaja(sheets) {
+async function registrarFinanzasConCopia(tipo, cmd, supervisorPhone) {
   try {
-    const r = await sheets.spreadsheets.values.get({
-      spreadsheetId: PLANILLA_SHEET_ID,
-      range: `${CAJA_TAB}!G:G`,
-    });
-    const col = r.data.values || [];
-    for (let i = col.length - 1; i >= 0; i--) {
-      const raw = (col[i]?.[0] || "").toString().trim();
-      if (!raw) continue;
-      // Normalizar: quitar ₡, espacios y puntos de miles; coma decimal → punto
-      const limpio = raw.replace(/[₡\s]/g, "").replace(/\.(?=\d{3}\b)/g, "").replace(",", ".");
-      const num = parseFloat(limpio);
-      if (!isNaN(num)) return num;
+    const contenido = extraerComandoEstructurado(cmd, tipo);
+    if (!contenido) {
+      return tipo === "GASTO"
+        ? "⚠️ Formato correcto:\\n`[GASTO: 50000 | descripción | proyecto opcional]`"
+        : "⚠️ Formato correcto:\\n`[INGRESO: 50000 | descripción | proyecto opcional]`";
     }
-  } catch (e) {
-    console.warn("⚠️ No se pudo leer último saldo de CAJA_GENERAL:", e.message);
-  }
-  return 0;
-}
 
-/**
- * Registra un movimiento (GASTO/INGRESO) en CAJA_GENERAL con saldo en cascada
- * y deja rastro en AUDIT_LOG. Devuelve el texto de confirmación para WhatsApp.
- */
-async function registrarMovimiento(tipo, contenido, supervisorPhone) {
-  const esGasto = tipo === "GASTO";
-  const { montoNum, montoFinal, descripcion, proyecto } = parsearMovimiento(contenido);
+    const comando = `[${tipo}: ${contenido}]`;
+    const respuesta = await procesarComandoFinanciero(comando);
 
-  if (!montoNum) {
-    const ej = esGasto
-      ? "`[GASTO: 15000 | combustible]`  ó  `[GASTO: 50000 | materiales | PROY 044/2026]`"
-      : "`[INGRESO: 100000 | visita técnica Teresita]`";
-    return `⚠️ No entendí el monto. Formato correcto:\n${ej}`;
-  }
-
-  const sheets = await getPlanillaSheets();
-  const sup    = nombreSupervisor(supervisorPhone);
-  const fechaCorta = new Date().toLocaleDateString("es-CR", { timeZone: TZ, day: "2-digit", month: "2-digit", year: "numeric" });
-  const tsCompleto = new Date().toLocaleString("es-CR", { timeZone: TZ });
-
-  // ── 1) Escribir en CAJA_GENERAL con saldo en cascada ──────────────────────
-  let nuevoSaldo = null;
-  try {
-    const saldoAnterior = await leerUltimoSaldoCaja(sheets);
-    nuevoSaldo = esGasto ? saldoAnterior - montoNum : saldoAnterior + montoNum;
-
-    // Columnas: FECHA | TIPO | PROYECTO | DESCRIPCIÓN | ENTRADA | SALIDA | SALDO | RESPONSABLE
-    const entrada = esGasto ? "" : montoNum;
-    const salida  = esGasto ? montoNum : "";
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: PLANILLA_SHEET_ID,
-      range: `${CAJA_TAB}!A:H`,
-      valueInputOption: "USER_ENTERED",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: {
-        values: [[fechaCorta, tipo, proyecto, descripcion, entrada, salida, nuevoSaldo, sup]],
-      },
-    });
-    console.log(`✅ ${tipo} en CAJA_GENERAL: ₡${montoFinal} — ${descripcion} (${proyecto}) saldo→${nuevoSaldo}`);
-  } catch (err) {
-    console.error(`❌ ${tipo} CAJA_GENERAL:`, err.message);
-    if (err.message.includes("Unable to parse range") || err.message.includes("not found")) {
-      return `❌ La pestaña *"${CAJA_TAB}"* no existe en la planilla. Verificá el nombre exacto de la pestaña.`;
+    if (!respuesta) {
+      return `⚠️ No pude interpretar el ${tipo.toLowerCase()}. Probá con:\\n${comando}`;
     }
-    return `❌ No se pudo registrar en CAJA_GENERAL: ${err.message}`;
-  }
 
-  // ── 2) Rastro en AUDIT_LOG (no crítico — si falla, no rompe el registro) ──
-  try {
-    // Timestamp | Tipo | Descripcion | Monto | Proyecto | Categoria | Canal | Pestanas | Confianza_IA | Personal
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: PLANILLA_SHEET_ID,
-      range: `${AUDIT_TAB}!A:J`,
-      valueInputOption: "USER_ENTERED",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: {
-        values: [[tsCompleto, tipo, descripcion, montoNum, proyecto, "WhatsApp", "whatsapp", CAJA_TAB, 100, "NO"]],
-      },
-    });
+    return respuesta;
   } catch (err) {
-    console.warn("⚠️ No se pudo escribir en AUDIT_LOG:", err.message);
+    console.error(`❌ registrarFinanzasConCopia ${tipo}:`, err.message, err.stack);
+    return `❌ No se pudo registrar el ${tipo.toLowerCase()}: ${err.message}`;
   }
-
-  // ── 3) Confirmación a WhatsApp ────────────────────────────────────────────
-  const saldoTxt = nuevoSaldo !== null ? `₡${fmtColones(nuevoSaldo)}` : "—";
-  return [
-    esGasto ? `✅ *Gasto registrado en caja*` : `✅ *Ingreso registrado en caja*`,
-    ``,
-    esGasto ? `💸 *Monto:* ₡${montoFinal}` : `💰 *Monto:* ₡${montoFinal}`,
-    `📝 *Descripción:* ${descripcion}`,
-    `🏗️ *Proyecto:* ${proyecto}`,
-    `🏦 *Saldo actual:* ${saldoTxt}`,
-    `👤 *Registrado por:* ${sup}`,
-    `📅 *Fecha:* ${fechaCorta}`,
-  ].join("\n");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HANDLER — [GASTO: monto | descripcion | proyecto?]
 // ═══════════════════════════════════════════════════════════════════════════════
 async function handleGasto(cmd, supervisorPhone) {
-  const contenido = cmd.replace(/^\[GASTO:\s*/i, "").replace(/\]$/, "").trim();
-  if (!contenido) {
-    return "⚠️ Formato correcto:\n`[GASTO: 50000 | descripción]`\n\nEjemplo: `[GASTO: 15000 | combustible]`";
-  }
-  try {
-    return await registrarMovimiento("GASTO", contenido, supervisorPhone);
-  } catch (err) {
-    console.error("❌ handleGasto:", err.message);
-    return `❌ No se pudo registrar el gasto: ${err.message}`;
-  }
+  return await registrarFinanzasConCopia("GASTO", cmd, supervisorPhone);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HANDLER — [INGRESO: monto | descripcion | proyecto?]
 // ═══════════════════════════════════════════════════════════════════════════════
 async function handleIngreso(cmd, supervisorPhone) {
-  const contenido = cmd.replace(/^\[INGRESO:\s*/i, "").replace(/\]$/, "").trim();
-  if (!contenido) {
-    return "⚠️ Formato correcto:\n`[INGRESO: 50000 | descripción]`\n\nEjemplo: `[INGRESO: 100000 | visita técnica Teresita]`";
-  }
-  try {
-    return await registrarMovimiento("INGRESO", contenido, supervisorPhone);
-  } catch (err) {
-    console.error("❌ handleIngreso:", err.message);
-    return `❌ No se pudo registrar el ingreso: ${err.message}`;
-  }
+  return await registrarFinanzasConCopia("INGRESO", cmd, supervisorPhone);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -563,6 +440,19 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     if (cmdVoz) {
       cmd = `[${cmdVoz.tipo}: ${cmdVoz.payload}]`;
       console.log(`🎙️ Comando voz normalizado: "${normalized}" → "${cmd}"`);
+    }
+
+    // ── PASO 1B: Finanzas naturales como respaldo ─────────────────────────────
+    // Si memoria.js no lo convirtió, finanzas.js puede interpretar:
+    // "descuenta 200mil de gas y aceite para Pick Up, proyecto Marriot"
+    // y registrarlo en Apps Script.
+    if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(normalized)) {
+      const respuesta = await procesarComandoFinanciero(normalized);
+      if (respuesta) {
+        await sendText(from, respuesta);
+        await copiaFinancieraADarwin(fromE164, respuesta);
+        return;
+      }
     }
 
     // ── PASO 2: Cancelar cita (lenguaje natural) ──────────────────────────────
