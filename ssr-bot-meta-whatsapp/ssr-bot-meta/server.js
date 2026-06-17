@@ -6,8 +6,35 @@ const { handleMessage }       = require("./bot/index");
 const { sendDailyReminders }  = require("./bot/reminders");
 const memoria                 = require("./bot/memoria");
 
-// ── KEEP-ALIVE: evita que Railway duerma el proceso ───────────────────────────
-require("./bot/keepalive");
+// ── KEEP-ALIVE: evita que Railway duerma el proceso ─────────────────────────────
+// Self-ping cada 14 min — sin archivo externo, todo inline.
+(function iniciarKeepAlive() {
+  const PING_MS = 14 * 60 * 1000;
+  function getUrl() {
+    const d = process.env.RAILWAY_PUBLIC_DOMAIN || process.env.BOT_URL || null;
+    if (!d) return null;
+    let u = d.trim().replace(/\/+$/, "");
+    return (u.startsWith("http") ? u : "https://" + u) + "/health";
+  }
+  async function ping() {
+    const url = getUrl();
+    if (!url) return;
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      console.log("💓 KeepAlive: OK", r.status, new Date().toLocaleString("es-CR", { timeZone: "America/Costa_Rica" }));
+    } catch (e) {
+      console.warn("⚠️ KeepAlive ping falló:", e.message);
+    }
+  }
+  const url = getUrl();
+  if (!url) {
+    console.warn("⚠️ KeepAlive: agregá BOT_URL=https://ssr-whatsapp-bot-production.up.railway.app en Railway Variables");
+    return;
+  }
+  console.log("💓 KeepAlive activo — ping cada 14 min a:", url);
+  setTimeout(ping, 5000);
+  setInterval(ping, PING_MS);
+})();
 
 const app = express();
 
