@@ -624,31 +624,33 @@ function detectarComandoVoz(text) {
   const t = text.trim();
 
   // ── GASTO ──────────────────────────────────────────────────────────────────
-  // Patrones: "gasto de X en Y", "anota un gasto de X", "gasto X colones Y"
-  const gastoRe = /(?:anota?r?|registra?r?|agrega?r?|escrib(?:e|ir))?\s*(?:un\s+)?gasto\s+(?:de\s+)?(.+)/i;
+  // Reconoce frases naturales:
+  // "descuenta 200mil de gas y aceite para Pick Up, proyecto Marriot"
+  // "apunta 19500 al Marriot por comida"
+  // "rebaja 80 mil de materiales Karim"
+  // "pagué 25 mil de gasolina proyecto Laura"
+  const gastoRe = /^(?:(?:anota?r?|registra?r?|agrega?r?|escrib(?:e|ir)|apunta?r?|carga?r?|carg[aá]me|descuenta?r?|descont[aá]r?|rebaja?r?|saca?r?|pag(?:u[eé]|ar|ue)|compr(?:e|é|ar)|gast(?:e|é|ar)|met(?:e|er))\s+)?(?:un\s+)?(?:gasto\s+(?:de\s+)?|pago\s+(?:de\s+)?|compra\s+(?:de\s+)?|)(.+)$/i;
   const gm = t.match(gastoRe);
-  if (gm) {
-    const { monto, descripcion } = _separarMontoDesc(gm[1].trim());
+  if (gm && /(gasto|pago|compra|compr[eé]|gast[eé]|descuenta|descont|rebaja|saca|apunta|carga|pag[ué]|material|gas|aceite|gasolina|diesel|di[eé]sel|ferreter|epa|construplaza|marriot|marriott|karim|laura|miriam|nathalie|jeannette)/i.test(t)) {
+    const { monto, descripcion, proyecto } = _separarMontoDesc(gm[1].trim());
     if (monto || descripcion) {
-      const partes = [monto, descripcion].filter(Boolean);
+      const partes = [monto, descripcion || "Sin descripción", proyecto].filter(Boolean);
       return { tipo: "GASTO", payload: partes.join(" | ") };
     }
   }
 
   // ── INGRESO ────────────────────────────────────────────────────────────────
-  // Patrones: "ingreso de X por Y", "anota un ingreso de X"
-  const ingresoRe = /(?:anota?r?|registra?r?|agrega?r?|escrib(?:e|ir))?\s*(?:un\s+)?ingreso\s+(?:de\s+)?(.+)/i;
+  const ingresoRe = /^(?:(?:anota?r?|registra?r?|agrega?r?|escrib(?:e|ir)|apunta?r?|carga?r?|carg[aá]me)?\s*)?(?:un\s+)?(?:(?:ingreso|pago recibido|me pagaron|pagaron|abonaron|abono|adelanto|dep[oó]sito|deposito)\s+(?:de\s+)?)(.+)$/i;
   const im = t.match(ingresoRe);
   if (im) {
-    const { monto, descripcion } = _separarMontoDesc(im[1].trim());
+    const { monto, descripcion, proyecto } = _separarMontoDesc(im[1].trim());
     if (monto || descripcion) {
-      const partes = [monto, descripcion].filter(Boolean);
+      const partes = [monto, descripcion || "Ingreso cliente", proyecto].filter(Boolean);
       return { tipo: "INGRESO", payload: partes.join(" | ") };
     }
   }
 
   // ── MSG_CLIENTE ────────────────────────────────────────────────────────────
-  // Patrones: "mándale a [nombre] que [mensaje]", "enviále a [nombre] [mensaje]"
   const msgRe = /(?:m[aá]ndale|envi[aá]le|dec[íi]le|av[íi]sale|escr[íi]bele)\s+a\s+(.+?)\s+que\s+(.+)/i;
   const mm = t.match(msgRe);
   if (mm) {
@@ -660,9 +662,6 @@ function detectarComandoVoz(text) {
   }
 
   // ── RESUMEN_CLIENTE ────────────────────────────────────────────────────────
-  // Patrones: "resumen de X", "dame el resumen de X", "qué pasó con X"
-  // Alternativa explícita "de la conversación con" antes de "de" simple,
-  // para evitar que (.+) capture "la conversacion con Teresita" en lugar de "Teresita"
   const resumenVozRe = [
     /(?:dame|deme|mu[eé]strame)\s+(?:el\s+)?resumen\s+(?:de\s+la\s+conversaci[oó]n\s+(?:de\s+|con\s+)?|de\s+|con\s+)?(.+)/i,
     /(?:c[oó]mo)\s+(?:est[aá]|va|anda)\s+(.+)/i,
@@ -691,67 +690,78 @@ function detectarComandoVoz(text) {
  * Separadores de descripción reconocidos: "en", "para", "por", "de", "a nombre de"
  */
 function _separarMontoDesc(texto) {
-  // Limpiar la palabra "colones"/"colón" que no aporta al monto ni a la descripción
-  let t = texto.replace(/\bcolon(?:es)?\b/gi, " ").replace(/\s+/g, " ").trim();
+  let t = texto
+    .replace(/\bcolon(?:es)?\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
-  // ── CASO 1: monto numérico con separador de miles EN CUALQUIER POSICIÓN ───────
-  // Cubre audios como "...proyecto Marriott por 16,000 por concepto de comida"
-  // Busca patrones tipo 16,000 / 16.000 / 16000 / 1.500.000 (mínimo 3 dígitos o con separador)
-  const numAnywhere = t.match(/\b(\d{1,3}(?:[.,]\d{3})+|\d{4,})\b/);
-  if (numAnywhere) {
-    const montoRaw = numAnywhere[1];
-    const monto    = parsearMontoEspanol(montoRaw);
-    if (monto !== null && monto > 0) {
-      // La descripción es lo que viene DESPUÉS del monto (más útil que lo de antes)
-      const idx     = t.indexOf(montoRaw) + montoRaw.length;
-      let   desc    = t.slice(idx).trim();
-      desc = desc.replace(/^(?:por|para|en|de|a)\s+/i, "")
-                 .replace(/^concepto\s+de\s+/i, "")
-                 .replace(/\ba\s+nombre\s+de(?:l)?\s+(?:ss\s+remodelaciones|ssr|s\.?s\.?\s*remodelaciones)\b/gi, "")
-                 .replace(/\bpor\s+concepto\s+de\b/gi, "")
-                 .replace(/[\]"'.]+$/g, "")
-                 .replace(/\s+/g, " ")
-                 .trim();
-      // Si no hay nada útil después, usar lo de antes del monto
-      if (!desc || desc.length < 2) {
-        let antes = t.slice(0, t.indexOf(montoRaw)).trim();
-        antes = antes.replace(/^(?:.*?\bgasto\b|.*?\bingreso\b)\s*/i, "")
-                     .replace(/\b(?:de|por|para|a nombre del?|a nombre de|del?)\b/gi, " ")
-                     .replace(/\s+/g, " ").trim();
-        desc = antes || "Sin descripción";
-      }
-      return { monto: String(monto), descripcion: desc || "Sin descripción" };
+  // Extraer proyecto explícito: "proyecto Marriot", "obra Karim", "cliente Laura"
+  let proyecto = "";
+  const proyectoMatch = t.match(/\b(?:proyecto|obra|cliente)\s+([a-záéíóúñ0-9\s/.-]+)$/i);
+  if (proyectoMatch) {
+    proyecto = proyectoMatch[1].trim().replace(/[,.]+$/g, "");
+    t = t.replace(proyectoMatch[0], "").trim();
+  } else {
+    const alMatch = t.match(/\b(?:al|a la|a el|para|de)\s+([a-záéíóúñ]+(?:\s+[a-záéíóúñ]+)?)\s*$/i);
+    if (alMatch && !/gas|aceite|material|herramient|comida|almuerzo|diesel|gasolina|factura|sinpe|transferencia|pick\s*up/i.test(alMatch[1])) {
+      proyecto = alMatch[1].trim().replace(/[,.]+$/g, "");
+      t = t.replace(alMatch[0], "").trim();
     }
   }
 
-  // ── CASO 2: separar por preposición "X mil en Y" / "X por Y" (palabras) ───────
-  const sepRe = /^(.+?)\s+(?:en|para|por)\s+(.+)$/i;
-  const sep   = t.match(sepRe);
+  // CASO 1: monto numérico o "200mil" en cualquier posición.
+  const numAnywhere = t.match(/\b(\d{1,3}(?:[.,]\d{3})+|\d{4,}|\d+\s*mil(?:lones?)?)\b/i);
+  if (numAnywhere) {
+    const montoRaw = numAnywhere[1];
+    const monto = parsearMontoEspanol(montoRaw);
+    if (monto !== null && monto > 0) {
+      const idx = t.toLowerCase().indexOf(montoRaw.toLowerCase()) + montoRaw.length;
+      let desc = t.slice(idx).trim();
+      desc = desc.replace(/^(?:por|para|en|de|a|al|a la)\s+/i, "")
+                 .replace(/^concepto\s+de\s+/i, "")
+                 .replace(/\bpor\s+concepto\s+de\b/gi, "")
+                 .replace(/[,\]"'.]+$/g, "")
+                 .replace(/\s+/g, " ")
+                 .trim();
+
+      if (!desc || desc.length < 2) {
+        let antes = t.slice(0, t.toLowerCase().indexOf(montoRaw.toLowerCase())).trim();
+        antes = antes.replace(/^(?:.*?\bgasto\b|.*?\bingreso\b|.*?\bdescuenta\b|.*?\bapunta\b|.*?\brebaja\b|.*?\bpagu[eé]\b)\s*/i, "")
+                     .replace(/\b(?:de|por|para|a nombre del?|a nombre de|del?)\b/gi, " ")
+                     .replace(/\s+/g, " ")
+                     .trim();
+        desc = antes || "Sin descripción";
+      }
+      return { monto: String(monto), descripcion: desc || "Sin descripción", proyecto };
+    }
+  }
+
+  // CASO 2: monto en palabras separado por preposición.
+  const sepRe = /^(.+?)\s+(?:en|para|por|de)\s+(.+)$/i;
+  const sep = t.match(sepRe);
   if (sep) {
     const monto = parsearMontoEspanol(sep[1].trim());
     if (monto !== null && monto > 0) {
       let desc = sep[2].trim().replace(/^(?:concepto\s+de\s+|el\s+|la\s+)/i, "").trim();
-      return { monto: String(monto), descripcion: desc || "Sin descripción" };
+      return { monto: String(monto), descripcion: desc || "Sin descripción", proyecto };
     }
   }
 
-  // ── CASO 3: monto en palabras al inicio "cincuenta mil materiales" ───────────
-  const numPalabrasRe = /^((?:[a-záéíóúñ]+\s+)*(?:mil(?:lones?)?|ciento[s]?|cien|quinientos?|doscientos?|trescientos?))\s+(.+)$/i;
+  // CASO 3: monto en palabras al inicio.
+  const numPalabrasRe = /^((?:[a-záéíóúñ]+\s+)*(?:mil(?:lones?)?|ciento[s]?|cien|quinientos?|doscientos?|trescientos?|cuatrocientos?|seiscientos?|setecientos?|ochocientos?|novecientos?))\s+(.+)$/i;
   const np = t.match(numPalabrasRe);
   if (np) {
     const monto = parsearMontoEspanol(np[1].trim());
     if (monto !== null && monto > 0) {
       let desc = np[2].trim().replace(/^(?:por|para|en|de)\s+/i, "").replace(/^concepto\s+de\s+/i, "").trim();
-      return { monto: String(monto), descripcion: desc || "Sin descripción" };
+      return { monto: String(monto), descripcion: desc || "Sin descripción", proyecto };
     }
   }
 
-  // ── CASO 4: solo monto en palabras, sin descripción ──────────────────────────
   const monto = parsearMontoEspanol(t);
-  if (monto !== null && monto > 0) return { monto: String(monto), descripcion: "" };
+  if (monto !== null && monto > 0) return { monto: String(monto), descripcion: "", proyecto };
 
-  // ── No es número → todo es descripción ───────────────────────────────────────
-  return { monto: null, descripcion: t };
+  return { monto: null, descripcion: t, proyecto };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
