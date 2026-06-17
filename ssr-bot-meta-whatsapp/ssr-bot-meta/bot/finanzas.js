@@ -188,6 +188,78 @@ function esComandoFinanciero(texto) {
 }
 
 
+
+// ─── Parser local de montos CR ──────────────────────────────────────────────
+// Regla práctica para WhatsApp:
+// - "20mil", "20 mil", "20 MIL" => 20000
+// - "200mil" => 200000
+// - "20.000" => 20000
+// - "20,000" => 20000
+// - "1.200.000" => 1200000
+// - "20" a secas queda 20; para miles usar "20mil".
+function parseMontoFinancieroLocal(valor) {
+  if (valor === null || valor === undefined) return 0;
+
+  let txt = String(valor)
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/₡/g, "")
+    .replace(/\bcolones?\b/g, "")
+    .trim();
+
+  if (!txt) return 0;
+  if (/\bmedio\s+millon\b/.test(txt)) return 500000;
+
+  let m = txt.match(/(\d+(?:[.,]\d+)?)\s*(?:millones?|millon)\b/);
+  if (m) {
+    const n = Number(m[1].replace(",", "."));
+    return isNaN(n) ? 0 : Math.round(n * 1000000);
+  }
+
+  m = txt.match(/(\d+(?:[.,]\d+)?)\s*(?:mil|k)\b/);
+  if (m) {
+    const n = Number(m[1].replace(",", "."));
+    return isNaN(n) ? 0 : Math.round(n * 1000);
+  }
+
+  m = txt.match(/\d{1,3}(?:[.,]\d{3})+/);
+  if (m) return Number(m[0].replace(/[.,]/g, "")) || 0;
+
+  m = txt.match(/\d+/);
+  if (m) return Number(m[0]) || 0;
+
+  return 0;
+}
+
+function normalizarTextoFinancieroLocal(texto) {
+  if (!texto) return "";
+  return String(texto)
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function extraerMontoDeTextoFinanciero(texto) {
+  const t = normalizarTextoFinancieroLocal(texto);
+
+  let m = t.match(/(\d+(?:[.,]\d+)?)\s*(?:mil|k)\b/);
+  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
+
+  m = t.match(/(\d+(?:[.,]\d+)?)\s*(?:millones?|millon)\b/);
+  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
+
+  m = t.match(/\d{1,3}(?:[.,]\d{3})+/);
+  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
+
+  m = t.match(/\d{4,}/);
+  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
+
+  m = t.match(/\d+/);
+  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
+
+  return { raw: "", monto: 0 };
+}
+
 function extraerComandoFinancieroCrudo(texto) {
   if (!texto) return null;
   const m = String(texto).match(/\[(GASTO|INGRESO)\s*:\s*([^\]]+)\]/i);
@@ -195,7 +267,7 @@ function extraerComandoFinancieroCrudo(texto) {
 
   const tipo = m[1].toUpperCase();
   const partes = m[2].split("|").map(p => p.trim()).filter(Boolean);
-  const monto = Number(String(partes[0] || "").replace(/[^\d]/g, ""));
+  const monto = parseMontoFinancieroLocal(partes[0] || "");
   const descripcion = partes[1] || (tipo === "GASTO" ? "Gasto registrado" : "Ingreso registrado");
   const proyectoTexto = partes[2] || "";
 
@@ -241,6 +313,60 @@ function categorizarGastoLocal(desc) {
   return "Gasto";
 }
 
+
+
+function extraerMovimientoNaturalLocal(texto) {
+  if (!texto) return null;
+
+  const original = String(texto).trim();
+  const t = normalizarTextoFinancieroLocal(original);
+
+  const esGasto = /\b(gasto|gaste|gaste|pague|pago|compra|compre|descuenta|desconta|rebaja|apunta|carga|saca)\b/.test(t);
+  const esIngreso = /\b(ingreso|me pagaron|pagaron|abono|abonaron|adelanto|deposito|depositaron|transferencia recibida)\b/.test(t);
+
+  if (!esGasto && !esIngreso) return null;
+
+  const { raw, monto } = extraerMontoDeTextoFinanciero(original);
+  if (!monto || monto <= 0 || !raw) return null;
+
+  let desc = original;
+  desc = desc.replace(new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), "").trim();
+  desc = desc
+    .replace(/^(apunta|anota|registra|carga|descuenta|desconta|rebaja|saca|gasto|pago|pague|compr[eé]|compra|ingreso|me pagaron|pagaron|abono|abonaron)\b\s*/i, "")
+    .replace(/\bcolones?\b/ig, "")
+    .replace(/^(de|por|para|en|al|a la|a el)\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  let proyectoTexto = "";
+  const pm = desc.match(/\b(?:proyecto|obra|cliente)\s+([a-záéíóúñ0-9\s/.-]+)$/i);
+  if (pm) {
+    proyectoTexto = pm[1].trim().replace(/[,.]+$/g, "");
+    desc = desc.replace(pm[0], "").trim();
+  }
+
+  const proy = detectarProyectoLocal(proyectoTexto || desc);
+  const tipo = esIngreso && !esGasto ? "INGRESO" : "GASTO";
+
+  return [{
+    fecha: TODAY(),
+    monto,
+    tipo,
+    proyecto: proy.nombre || proyectoTexto || "SS Remodelaciones",
+    proyecto_codigo: proy.codigo || "SSR",
+    cliente: tipo === "INGRESO" ? (proy.nombre || proyectoTexto || "") : null,
+    categoria: tipo === "GASTO" ? categorizarGastoLocal(desc) : "Ingreso cliente",
+    descripcion: desc || (tipo === "GASTO" ? "Gasto registrado" : "Ingreso registrado"),
+    proveedor: null,
+    forma_pago: "Transferencia",
+    responsable: null,
+    es_personal: false,
+    "pestaña_principal": tipo === "INGRESO" ? "INGRESOS_CLIENTES" : "GASTOS_PROYECTO",
+    pestanas_adicionales: ["CAJA_GENERAL"],
+    confianza: 95,
+    observaciones: proyectoTexto ? `Proyecto detectado: ${proyectoTexto}` : null
+  }];
+}
 
 async function interpretarMovimientos(texto) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -312,7 +438,7 @@ async function procesarComandoFinanciero(texto) {
   if (!esComandoFinanciero(texto)) return null;
 
   try {
-    const movimientos = extraerComandoFinancieroCrudo(texto) || await interpretarMovimientos(texto);
+    const movimientos = extraerComandoFinancieroCrudo(texto) || extraerMovimientoNaturalLocal(texto) || await interpretarMovimientos(texto);
     if (!movimientos.length) return null;
 
     const confirmaciones = [];
