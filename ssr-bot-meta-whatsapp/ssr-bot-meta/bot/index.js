@@ -18,6 +18,18 @@
  *   PLANILLA_SHEET_ID → ID de la hoja "planilla madre" del sistema operativo SSR
  *   CAJA_TAB          → "CAJA_GENERAL" (libro de caja con saldo en cascada)
  *   AUDIT_TAB         → "AUDIT_LOG" (rastro histórico de movimientos)
+ *
+ * ── CAMBIOS v3 — FIX AUDIO SUPERVISOR ──────────────────────────────────────────
+ * BUG: server.js envuelve las transcripciones de audio interno con
+ *   `[Instrucción de voz de supervisor (tel): "texto"]` antes de llamar a
+ *   handleMessage. Ese envoltorio completo (corchetes, paréntesis, comillas)
+ *   se pasaba TAL CUAL a esComandoFinanciero/procesarComandoFinanciero, lo
+ *   que rompía la detección de monto/tipo/proyecto/descripción incluso con
+ *   finanzas.js funcionando bien para texto limpio.
+ * FIX: desenvolverInstruccionVoz(texto) extrae solo la transcripción real
+ *   ANTES de evaluar comandos financieros. El resto del pipeline (Claude
+ *   conversacional, memoria, logs) sigue viendo el texto envuelto completo,
+ *   porque ahí sí aporta contexto útil.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -38,6 +50,18 @@ const SUPERVISORES = ["+50683091817", "+50671981370", "+50671951695"];
 
 // Número de Darwin — recibe copia de todo movimiento financiero registrado por otros.
 const DARWIN_PHONE = "+50683091817";
+
+// ── FIX v3 — Desenvolver instrucciones de voz antes del parser financiero ────
+// server.js envuelve las transcripciones de audio de supervisores así:
+//   [Instrucción de voz de supervisor (50683091817): "texto real transcrito"]
+// Esta función extrae SOLO "texto real transcrito" cuando ese envoltorio está
+// presente. Si el texto no tiene el envoltorio (mensaje escrito normal, o
+// fallback de transcripción fallida), lo devuelve sin cambios.
+function desenvolverInstruccionVoz(texto) {
+  if (!texto) return texto;
+  const m = texto.match(/^\[Instrucci[oó]n de voz de supervisor\s*\([^)]*\):\s*"([\s\S]*)"\]$/i);
+  return m ? m[1].trim() : texto;
+}
 
 // Envía una copia de la confirmación financiera a Darwin cuando OTRO supervisor
 // (ej: Melvin) registra un gasto/ingreso. Si lo registró Darwin, no se duplica.
@@ -431,23 +455,35 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   if (esSupervisor && normalized) {
 
+    // ── FIX v3: desenvolver instrucción de voz ANTES de evaluar comandos
+    // financieros. server.js envuelve las transcripciones de audio interno
+    // con [Instrucción de voz de supervisor (tel): "texto"] — ese envoltorio
+    // rompía la detección de monto/tipo/proyecto en finanzas.js porque los
+    // corchetes, paréntesis y comillas contaban como parte del mensaje.
+    // textoFinanciero = solo la transcripción real, para usar SOLO en los
+    // pasos 1, 1B y 3 (todo lo relacionado a GASTO/INGRESO). El resto del
+    // pipeline (Claude conversacional, memoria, cancelación de citas) sigue
+    // usando "normalized" completo, con el envoltorio, porque ahí el contexto
+    // de "esto es audio de supervisor" sigue siendo útil.
+    const textoFinanciero = desenvolverInstruccionVoz(normalized);
+
     // ── PASO 1: Normalizar comandos de voz (audio transcrito) ─────────────────
     // Si el texto viene de un audio transcrito en lenguaje natural,
     // lo convierte al formato de comando estructurado.
     // Ejemplo: "gasto de cincuenta mil en materiales" → "[GASTO: 50000 | materiales]"
     let cmd = normalized;
-    const cmdVoz = memoria.detectarComandoVoz(normalized);
+    const cmdVoz = memoria.detectarComandoVoz(textoFinanciero);
     if (cmdVoz) {
       cmd = `[${cmdVoz.tipo}: ${cmdVoz.payload}]`;
-      console.log(`🎙️ Comando voz normalizado: "${normalized}" → "${cmd}"`);
+      console.log(`🎙️ Comando voz normalizado: "${textoFinanciero}" → "${cmd}"`);
     }
 
     // ── PASO 1B: Finanzas naturales como respaldo ─────────────────────────────
     // Si memoria.js no lo convirtió, finanzas.js puede interpretar:
     // "descuenta 200mil de gas y aceite para Pick Up, proyecto Marriot"
     // y registrarlo en Apps Script.
-    if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(normalized)) {
-      const respuesta = await procesarComandoFinanciero(normalized);
+    if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(textoFinanciero)) {
+      const respuesta = await procesarComandoFinanciero(textoFinanciero);
       if (respuesta) {
         await sendText(from, respuesta);
         await copiaFinancieraADarwin(fromE164, respuesta);
