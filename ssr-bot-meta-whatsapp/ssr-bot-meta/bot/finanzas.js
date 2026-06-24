@@ -435,7 +435,11 @@ function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
     .replace(/\bdolar(es)?\b/ig, "")
     .replace(/\$/g, "")
     .replace(/^(apunta|anota|anotame|registra|registrame|carga|cargame|descuenta|desconta|rebaja|saca|gasto|pago|pague|compr[eé]|compra|ingreso|me pagaron|pagaron|abono|abonaron)\b\s*/i, "")
-    .replace(/\b(el|la|los|las)\s+(pago|gasto)\s+de\b/ig, "") // "el pago de" / "el gasto de" sueltos en medio
+    // "el/un gasto de" o "el/un ingreso de" sueltos en cualquier posición de la
+    // frase (no solo al inicio) — cubre "Apunta el ingreso de 71393..." donde
+    // "ingreso" no es la primera palabra.
+    .replace(/\b(el|un|la|una)\s+(pago|gasto|ingreso|abono|adelanto)\s+de\b/ig, "")
+    .replace(/\b(pague|pago|gasto|ingreso|abono|adelanto)\s+de\b/ig, "")
     .replace(/\bcolones?\b/ig, "")
     .trim();
 
@@ -444,7 +448,7 @@ function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
   // para no repetir el proyecto dentro de la descripción.
   if (proyectoTextoExtraido) {
     const re = new RegExp(
-      "\\s*(?:,)?\\s*(?:para|en|de|del|al|el|la)?\\s*(?:para|en|de|del|al|el|la)?\\s*(?:proyecto|obra|cliente)\\s+" +
+      "\\s*(?:,)?\\s*(?:para|en|de|del|al|el|la)?\\s*(?:para|en|de|del|al|el|la)?\\s*(?:proyecto|obra|cliente)\\s+(?:de\\s+|del\\s+)?" +
       proyectoTextoExtraido.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b.*$",
       "i"
     );
@@ -489,10 +493,18 @@ function extraerMovimientoNaturalLocal(texto) {
   const original = String(texto).trim();
   const t = normalizarTextoFinancieroLocal(original);
 
-  const esGasto = /\b(gasto|gaste|pague|pago|compra|compre|descuenta|desconta|rebaja|apunta|carga|saca)\b/.test(t);
+  // Verbos como "apunta", "anota", "registra", "carga" son NEUTROS — Darwin los
+  // usa tanto para gastos ("apunta el gasto...") como para ingresos ("apunta el
+  // ingreso..."). Si los incluyéramos en esGasto, un mensaje de ingreso con el
+  // verbo "apunta" calificaría como ambos a la vez y el desempate caería mal.
+  // Solo palabras que indican GASTO específicamente:
+  const esGasto = /\b(gasto|gaste|pague|pago|compra|compre|descuenta|desconta|rebaja|saca)\b/.test(t);
+  // Solo palabras que indican INGRESO específicamente:
   const esIngreso = /\b(ingreso|me pagaron|pagaron|abono|abonaron|adelanto|deposito|depositaron|transferencia recibida)\b/.test(t);
+  // Verbos neutros que disparan el parser financiero pero no deciden el tipo:
+  const esComandoNeutro = /\b(apunta|anota|registra|carga)\b/.test(t);
 
-  if (!esGasto && !esIngreso) return null;
+  if (!esGasto && !esIngreso && !esComandoNeutro) return null;
 
   const cantidadPalabras = original.split(/\s+/).filter(Boolean).length;
   if (cantidadPalabras > MAX_PALABRAS_PARSER_LOCAL) return null;
@@ -507,13 +519,27 @@ function extraerMovimientoNaturalLocal(texto) {
   // recortada — así no depende de que "proyecto X" quede al final de la frase
   // ni de que la palabra "proyecto" esté bien escrita.
   let proyectoTexto = "";
-  const pm = original.match(/\b(?:proyecto|obra|cliente)\s+([a-záéíóúñ0-9\s/.-]+?)(?:\s+(?:para|por|en|de)\b|$)/i);
-  if (pm) proyectoTexto = pm[1].trim().replace(/[,.]+$/g, "");
+  const pm = original.match(/\b(?:proyecto|obra|cliente)\s+(?:de\s+|del\s+)?([a-záéíóúñ0-9\s/.-]+?)(?:\s+(?:para|por|en|de)\b|$)/i);
+  if (pm) proyectoTexto = pm[1].trim().replace(/[,.]+$/g, "").replace(/^(de|del)\s+/i, "");
 
   const desc = construirDescripcionLocal(original, raw, proyectoTexto);
 
   const proy = detectarProyectoLocal(proyectoTexto || original);
-  const tipo = esIngreso && !esGasto ? "INGRESO" : "GASTO";
+
+  // Desempate explícito de tipo:
+  // - Señal de ingreso sin señal de gasto → INGRESO
+  // - Señal de gasto sin señal de ingreso → GASTO
+  // - Ambas señales específicas a la vez, o ninguna (solo verbo neutro como
+  //   "apunta" sin que diga ni "gasto" ni "ingreso") → ambiguo, mejor que lo
+  //   resuelva Claude con el contexto completo en vez de asumir GASTO a ciegas.
+  let tipo;
+  if (esIngreso && !esGasto) {
+    tipo = "INGRESO";
+  } else if (esGasto && !esIngreso) {
+    tipo = "GASTO";
+  } else {
+    return null; // ambiguo → fallback a Claude
+  }
 
   // ── Cálculo de confianza local ──────────────────────────────────────────
   // Si la descripción no se pudo construir de forma limpia, es señal de que
