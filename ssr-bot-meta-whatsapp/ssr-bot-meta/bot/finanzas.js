@@ -21,27 +21,32 @@ const TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 506;
 // Si abrís un proyecto nuevo, agregalo acá con su código EXACTO de la hoja.
 // Un código mal escrito = el gasto no aparece en el dashboard (SUMIF no hace match).
 const PROYECTOS = [
-  // ── Activos / recientes ──
-  { codigo: "PROY 030/2026", nombre: "Marriot",               alias: ["marriot", "marriott"] },
-  { codigo: "PROY 037/2026", nombre: "Nathalie Alpizar",      alias: ["nathalie", "natalie"] },
-  { codigo: "PROY 049/2026", nombre: "Laura Viquez",          alias: ["laura", "viquez"] },
-  { codigo: "PROY 045/2026", nombre: "Juan Diego",            alias: ["juan diego"] },
-  { codigo: "PROY 044/2026", nombre: "Karim Sanchez",         alias: ["karim", "karin"] },
-  { codigo: "PROY 043/2026", nombre: "Miriam Ramirez",        alias: ["miriam"] },
-  { codigo: "PROY 033/2026", nombre: "Jeannette",             alias: ["jeannette", "jeanette"] },
-  { codigo: "PROY 019/2026", nombre: "Christian Alfaro",      alias: ["cristian", "christian", "alfaro"] },
-  { codigo: "PROY 018/2026", nombre: "Anahí Almirón",         alias: ["anahi", "almiron"] },
-  { codigo: "PROY 016/2026", nombre: "Frank Solano",          alias: ["frank", "franck", "solano"] },
-  { codigo: "PROY 015/2026", nombre: "Guillermo Naranjo",     alias: ["guillermo", "naranjo"] },
-  { codigo: "PROY 028/2026", nombre: "Fede y Lore",           alias: ["fede", "lore", "federico"] },
-  { codigo: "PROY 006/2026", nombre: "Jorge Cordoba",         alias: ["jorge", "cordoba"] },
-  { codigo: "PROY 002/2026", nombre: "Kevin Chanto",          alias: ["kevin", "chanto"] },
-  { codigo: "PROY 001/2026", nombre: "Sergio Gonzales",       alias: ["sergio", "gonzales", "pauta"] },
-  // ── Históricos cerrados (siguen recibiendo gastos de garantía) ──
-  { codigo: "PROY 166/2025", nombre: "Cesar Adrian Montenegro", alias: ["cesar", "adrian", "montenegro"] },
-  { codigo: "PROY 154/2025", nombre: "Ruth Valverde",        alias: ["ruth", "valverde"] },
-  { codigo: "PROY 151/2025", nombre: "Daniel Marin",         alias: ["daniel", "marin"] },
-  { codigo: "PROY SC1/2026", nombre: "Leonardo Alvarez",     alias: ["leonardo", "leo", "alvarez"] },
+  // ── Activos / recientes ──────────────────────────────────────────────────
+  { codigo: "PROY 060/2026", nombre: "María José",               alias: ["maria jose", "mariajose", "balcon", "balcon maria jose"] },
+  { codigo: "PROY 059/2026", nombre: "Rosalía Granados",         alias: ["rosalia", "granados", "closet rosalia"] },
+  { codigo: "PROY 049/2026", nombre: "Laura Víquez",             alias: ["laura", "viquez", "consultorio laura"] },
+  { codigo: "PROY 045/2026", nombre: "Juan Diego",               alias: ["juan diego", "juan", "anexo juan"] },
+  { codigo: "PROY 044/2026", nombre: "Karim Sánchez",            alias: ["karim", "karin", "sanchez"] },
+  { codigo: "PROY 043/2026", nombre: "Miriam Ramírez Cordero",   alias: ["miriam", "ramirez", "enchape miriam"] },
+  { codigo: "PROY 037/2026", nombre: "Nathalie Alpízar",         alias: ["nathalie", "natalie", "alpizar", "baño nathalie"] },
+  { codigo: "PROY 033/2026", nombre: "Jeannette",                alias: ["jeannette", "jeanette", "cocina jeannette"] },
+  { codigo: "PROY 030/2026", nombre: "Marriott",                 alias: ["marriott", "marriot", "mariot", "hotel marriott", "diversa marriott"] },
+  { codigo: "PROY 028/2026", nombre: "Fede y Lore",              alias: ["fede", "lore", "federico", "banos fede"] },
+  { codigo: "PROY 019/2026", nombre: "Christian Alfaro",         alias: ["christian", "cristian", "alfaro", "ventanas", "ventaneria", "ventanería", "jonathan ventanas"] },
+  { codigo: "PROY 018/2026", nombre: "Anahí Almirón",            alias: ["anahi", "almiron", "almirón", "salon belleza", "muebles salon"] },
+  { codigo: "PROY 016/2026", nombre: "Frank Solano",             alias: ["frank", "franck", "solano", "baño frank", "bano frank"] },
+  { codigo: "PROY 015/2026", nombre: "Guillermo Naranjo",        alias: ["guillermo", "naranjo", "pintura interior"] },
+  { codigo: "PROY 006/2026", nombre: "Jorge Córdoba 2026",       alias: ["jorge", "cordoba", "chorreadosa", "losa"] },
+  { codigo: "PROY 002/2026", nombre: "Kevin Chanto",             alias: ["kevin", "chanto"] },
+  { codigo: "PROY 001/2026", nombre: "Leonardo Álvarez",         alias: ["leonardo", "leo", "alvarez", "panel acanalado"] },
+  // ── Históricos cerrados (siguen recibiendo gastos de garantía) ───────────
+  { codigo: "PROY 166/2025", nombre: "César Adrián Montenegro",  alias: ["cesar", "adrian", "montenegro"] },
+  { codigo: "PROY 154/2025", nombre: "Ruth Valverde Aguilar",    alias: ["ruth", "valverde", "escazu"] },
+  { codigo: "PROY 151/2025", nombre: "Daniel Marín Ortega",      alias: ["daniel", "marin", "cocina daniel"] },
+  { codigo: "PROY 022/2025", nombre: "Nathalie Alpízar 2025",    alias: ["nathalie 2025"] },
+  { codigo: "PROY 015/2025", nombre: "Fede y Lore 2025",         alias: ["lore 2025"] },
+  { codigo: "PROY 008/2025", nombre: "Jorge Córdoba 2025",       alias: ["cordoba 2025"] },
+  { codigo: "PROY 004/2025", nombre: "Franxi Solano",            alias: ["franxi"] },
 ];
 
 const KEYWORDS_FINANZAS = [
@@ -206,9 +211,6 @@ function esComandoFinanciero(texto) {
 }
 
 // ─── Detección de moneda ─────────────────────────────────────────────────────
-// Busca señales explícitas de USD en el texto. Si no encuentra nada, asume CRC.
-// Importante: esto corre ANTES de extraer el monto, sobre el texto COMPLETO,
-// para no depender de que el número y la moneda queden pegados.
 function detectarMonedaLocal(texto) {
   const t = String(texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (/\busd\b/.test(t) || /\bdolar(es)?\b/.test(t) || /\$\s*\d/.test(t) || /\d\s*\$/.test(t)) {
@@ -218,13 +220,6 @@ function detectarMonedaLocal(texto) {
 }
 
 // ─── Parser local de montos CR ──────────────────────────────────────────────
-// Regla práctica para WhatsApp:
-// - "20mil", "20 mil", "20 MIL" => 20000
-// - "200mil" => 200000
-// - "20.000" => 20000
-// - "20,000" => 20000
-// - "1.200.000" => 1200000
-// - "20" a secas queda 20; para miles usar "20mil".
 function parseMontoFinancieroLocal(valor) {
   if (valor === null || valor === undefined) return 0;
 
@@ -270,15 +265,9 @@ function normalizarTextoFinancieroLocal(texto) {
     .trim();
 }
 
-// Extrae el monto buscando primero un número que esté pegado a una señal de
-// moneda (usd, $, mil, millon), y si no, cualquier número suelto.
-// Devuelve también el "raw" exacto que matcheó, para poder quitarlo de la
-// descripción más adelante sin destruir el resto de la frase.
 function extraerMontoDeTextoFinanciero(texto) {
   const t = normalizarTextoFinancieroLocal(texto);
 
-  // Número + "usd"/"dolares"/"$" pegado (en cualquier orden) — máxima prioridad,
-  // así el monto y su unidad se quitan juntos de la descripción.
   let m = t.match(/\$\s*\d+(?:[.,]\d+)?/);
   if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
 
@@ -319,9 +308,7 @@ function categorizarGastoLocal(desc) {
   return "Gasto";
 }
 
-// ─── Detección de proyecto robusta ──────────────────────────────────────────
-// Distancia de Levenshtein simple, para tolerar errores de tipeo cortos
-// (ej. "marriot" vs "marriott", o un alias con una letra de más/menos).
+// ─── Detección de proyecto robusta (Levenshtein) ─────────────────────────────
 function levenshtein(a, b) {
   if (a === b) return 0;
   const al = a.length, bl = b.length;
@@ -339,22 +326,18 @@ function levenshtein(a, b) {
   return dp[al][bl];
 }
 
-// Busca un proyecto por alias/nombre EN CUALQUIER PARTE del texto completo
-// (no solo al final, no solo tras la palabra "proyecto"). Tolera errores de
-// tipeo cortos en las palabras del texto comparándolas con cada alias.
 function detectarProyectoLocal(texto) {
   const t = String(texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const palabras = t.split(/[^a-z0-9]+/).filter(Boolean);
 
-  // 1) Match exacto por substring (rápido, cubre el caso normal)
+  // 1) Match exacto por substring
   for (const p of PROYECTOS) {
     const nombre = p.nombre.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     const aliases = (p.alias || []).map(a => a.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
     if (t.includes(nombre) || aliases.some(a => a && t.includes(a))) return p;
   }
 
-  // 2) Match tolerante a typos: compara cada palabra del texto contra cada alias.
-  //    Solo para alias de 4+ letras (evita falsos positivos con palabras cortas).
+  // 2) Match tolerante a typos
   for (const p of PROYECTOS) {
     const aliases = (p.alias || []).map(a => a.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
     for (const alias of aliases) {
@@ -362,7 +345,6 @@ function detectarProyectoLocal(texto) {
       for (const palabra of palabras) {
         if (palabra.length < 4) continue;
         const dist = levenshtein(alias, palabra);
-        // Tolerancia: 1 error cada ~5 caracteres del alias.
         if (dist <= Math.max(1, Math.floor(alias.length / 5))) return p;
       }
     }
@@ -384,7 +366,6 @@ function extraerComandoFinancieroCrudo(texto) {
   const proyectoTexto = partes[2] || "";
 
   const proy = detectarProyectoLocal(proyectoTexto || `${descripcion} ${texto}`);
-
   const montoCRC = moneda === "USD" ? Math.round(monto * TIPO_CAMBIO_USD) : monto;
 
   return [{
@@ -411,41 +392,27 @@ function extraerComandoFinancieroCrudo(texto) {
   }];
 }
 
-// Conectores/preposiciones sin contenido propio — no cuentan como "palabra útil"
-// al evaluar si la descripción resultante tiene sentido.
 const CONECTORES_SIN_CONTENIDO = new Set([
   "el","la","los","las","un","una","unos","unas","de","del","al","a","en",
   "para","por","con","y","o","que","su","sus","lo","le","se","es","son",
 ]);
 
-// Quita del texto el fragmento de monto+moneda detectado, palabras de comando
-// al inicio, y conectores sueltos al borde. Si el resultado no tiene al menos
-// 3 palabras con contenido real (sustantivos/verbos), devuelve null para
-// forzar el fallback a Claude — preferimos una llamada extra a la API antes
-// que guardar una descripción ilegible en la hoja.
 function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
   let desc = original;
 
   if (raw) {
     desc = desc.replace(new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"), "").trim();
   }
-  // Por si quedó un "usd"/"dolares"/"$" suelto que no estaba pegado al número.
   desc = desc
     .replace(/\busd\b/ig, "")
     .replace(/\bdolar(es)?\b/ig, "")
     .replace(/\$/g, "")
     .replace(/^(apunta|anota|anotame|registra|registrame|carga|cargame|descuenta|desconta|rebaja|saca|gasto|pago|pague|compr[eé]|compra|ingreso|me pagaron|pagaron|abono|abonaron)\b\s*/i, "")
-    // "el/un gasto de" o "el/un ingreso de" sueltos en cualquier posición de la
-    // frase (no solo al inicio) — cubre "Apunta el ingreso de 71393..." donde
-    // "ingreso" no es la primera palabra.
     .replace(/\b(el|un|la|una)\s+(pago|gasto|ingreso|abono|adelanto)\s+de\b/ig, "")
     .replace(/\b(pague|pago|gasto|ingreso|abono|adelanto)\s+de\b/ig, "")
     .replace(/\bcolones?\b/ig, "")
     .trim();
 
-  // Si ya extrajimos el proyecto por separado (ej: "para el proyecto Marriot" al
-  // final), cortamos desde donde empieza esa mención hasta el final de la frase,
-  // para no repetir el proyecto dentro de la descripción.
   if (proyectoTextoExtraido) {
     const re = new RegExp(
       "\\s*(?:,)?\\s*(?:para|en|de|del|al|el|la)?\\s*(?:para|en|de|del|al|el|la)?\\s*(?:proyecto|obra|cliente)\\s+(?:de\\s+|del\\s+)?" +
@@ -455,8 +422,6 @@ function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
     desc = desc.replace(re, "").trim();
   }
 
-  // Conectores sueltos al inicio/fin pueden quedar anidados (ej: "de" se quita
-  // y deja "en gasolina"). Repetimos la limpieza hasta que se estabilice.
   let prev;
   do {
     prev = desc;
@@ -481,10 +446,6 @@ function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
   return desc;
 }
 
-// Por encima de este número de palabras, una frase es conversacional/compleja
-// (típica de un mensaje de voz transcrito o un mensaje escrito sin pensar en
-// "formato de comando"). El parser local con regex encadenados se vuelve poco
-// confiable a esta longitud — preferimos que Claude la interprete directamente.
 const MAX_PALABRAS_PARSER_LOCAL = 11;
 
 function extraerMovimientoNaturalLocal(texto) {
@@ -493,15 +454,8 @@ function extraerMovimientoNaturalLocal(texto) {
   const original = String(texto).trim();
   const t = normalizarTextoFinancieroLocal(original);
 
-  // Verbos como "apunta", "anota", "registra", "carga" son NEUTROS — Darwin los
-  // usa tanto para gastos ("apunta el gasto...") como para ingresos ("apunta el
-  // ingreso..."). Si los incluyéramos en esGasto, un mensaje de ingreso con el
-  // verbo "apunta" calificaría como ambos a la vez y el desempate caería mal.
-  // Solo palabras que indican GASTO específicamente:
   const esGasto = /\b(gasto|gaste|pague|pago|compra|compre|descuenta|desconta|rebaja|saca)\b/.test(t);
-  // Solo palabras que indican INGRESO específicamente:
   const esIngreso = /\b(ingreso|me pagaron|pagaron|abono|abonaron|adelanto|deposito|depositaron|transferencia recibida)\b/.test(t);
-  // Verbos neutros que disparan el parser financiero pero no deciden el tipo:
   const esComandoNeutro = /\b(apunta|anota|registra|carga)\b/.test(t);
 
   if (!esGasto && !esIngreso && !esComandoNeutro) return null;
@@ -515,23 +469,13 @@ function extraerMovimientoNaturalLocal(texto) {
   const moneda = detectarMonedaLocal(original);
   const montoCRC = moneda === "USD" ? Math.round(monto * TIPO_CAMBIO_USD) : monto;
 
-  // Proyecto: buscamos en el TEXTO COMPLETO original, no en la descripción ya
-  // recortada — así no depende de que "proyecto X" quede al final de la frase
-  // ni de que la palabra "proyecto" esté bien escrita.
   let proyectoTexto = "";
   const pm = original.match(/\b(?:proyecto|obra|cliente)\s+(?:de\s+|del\s+)?([a-záéíóúñ0-9\s/.-]+?)(?:\s+(?:para|por|en|de)\b|$)/i);
   if (pm) proyectoTexto = pm[1].trim().replace(/[,.]+$/g, "").replace(/^(de|del)\s+/i, "");
 
   const desc = construirDescripcionLocal(original, raw, proyectoTexto);
-
   const proy = detectarProyectoLocal(proyectoTexto || original);
 
-  // Desempate explícito de tipo:
-  // - Señal de ingreso sin señal de gasto → INGRESO
-  // - Señal de gasto sin señal de ingreso → GASTO
-  // - Ambas señales específicas a la vez, o ninguna (solo verbo neutro como
-  //   "apunta" sin que diga ni "gasto" ni "ingreso") → ambiguo, mejor que lo
-  //   resuelva Claude con el contexto completo en vez de asumir GASTO a ciegas.
   let tipo;
   if (esIngreso && !esGasto) {
     tipo = "INGRESO";
@@ -541,10 +485,6 @@ function extraerMovimientoNaturalLocal(texto) {
     return null; // ambiguo → fallback a Claude
   }
 
-  // ── Cálculo de confianza local ──────────────────────────────────────────
-  // Si la descripción no se pudo construir de forma limpia, es señal de que
-  // la frase es larga/compleja y el parser local no es confiable acá:
-  // devolvemos null para que el caller haga fallback a Claude.
   if (!desc) return null;
 
   return [{
@@ -584,8 +524,6 @@ async function interpretarMovimientos(texto) {
   const parsed = JSON.parse(clean);
   const movimientos = Array.isArray(parsed) ? parsed : [parsed];
 
-  // Asegura que el campo moneda y la conversión a CRC siempre estén presentes,
-  // incluso si Claude no lo incluyó por alguna razón.
   return movimientos.map(m => {
     const moneda = m.moneda === "USD" ? "USD" : "CRC";
     const montoOriginal = Number(m.monto) || 0;
@@ -660,11 +598,6 @@ async function procesarComandoFinanciero(texto) {
   if (!esComandoFinanciero(texto)) return null;
 
   try {
-    // Orden híbrido:
-    // 1. Comando estructurado [GASTO: ...] / [INGRESO: ...] → siempre local, es inequívoco.
-    // 2. Lenguaje natural → parser local SOLO si construye una descripción limpia
-    //    (extraerMovimientoNaturalLocal devuelve null si no puede, forzando el fallback).
-    // 3. Si el parser local no pudo, Claude interpreta la frase completa.
     let movimientos = extraerComandoFinancieroCrudo(texto) || extraerMovimientoNaturalLocal(texto);
 
     if (!movimientos) {
