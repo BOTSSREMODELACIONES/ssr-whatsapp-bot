@@ -1,7 +1,7 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
-// v8 — FIX: detección de moneda (USD), proyecto robusto a typos,
-//      y fallback híbrido a Claude cuando la confianza local es baja.
+// v9 — FIX: pago de planilla sin horas (vale/adelanto), lectura
+//      de comprobantes bancarios por imagen (SINPE/BAC).
 // ============================================================
 
 const Anthropic = require("@anthropic-ai/sdk");
@@ -150,6 +150,25 @@ REGLAS PARA PLANILLA (cuando alguien dice "X trabajó N horas"):
 - Cada trabajador = un objeto separado en el array
 - Si hay vale, agregá UN objeto extra de tipo GASTO: descripcion="Vale planilla [nombre]", monto=[vale], pestaña_principal="GASTOS_PROYECTO", pestanas_adicionales=["CAJA_GENERAL"]
 
+REGLA CRÍTICA — pago de planilla SIN mención de horas trabajadas:
+Si el mensaje dice "pago de planilla a [nombre] por [monto]" o similar, y NO menciona
+horas trabajadas ("trabajó X horas"), es un VALE/ADELANTO, NO un registro de horas.
+Tratalo así:
+{
+  "tipo": "GASTO",
+  "monto": [el monto mencionado],
+  "moneda": "CRC" (o "USD" si aplica),
+  "categoria": "Mano de obra",
+  "descripcion": "Vale planilla [nombre]",
+  "responsable": "[nombre]",
+  "proyecto_codigo": "[código si el mensaje menciona proyecto, si no 'SSR']",
+  "pestaña_principal": "GASTOS_PROYECTO",
+  "pestanas_adicionales": ["CAJA_GENERAL"],
+  "confianza": 90
+}
+NUNCA uses tipo="PLANILLA" con monto=0 para este caso — el monto es real y si lo
+forzás a 0, el gasto desaparece silenciosamente sin que nadie se entere.
+
 INSTRUCCIONES MÚLTIPLES:
 Siempre devolvés un ARRAY JSON. Un objeto por operación o trabajador.
 
@@ -177,24 +196,7 @@ Formato objeto planilla:
   "confianza": 95,
   "observaciones": null
 }
-REGLA CRÍTICA — pago de planilla SIN mención de horas trabajadas:
-Si el mensaje dice "pago de planilla a [nombre] por [monto]" o similar, y NO menciona
-horas trabajadas ("trabajó X horas"), es un VALE/ADELANTO, NO un registro de horas.
-Tratalo así:
-{
-  "tipo": "GASTO",
-  "monto": [el monto mencionado],
-  "moneda": "CRC" (o "USD" si aplica),
-  "categoria": "Mano de obra",
-  "descripcion": "Vale planilla [nombre]",
-  "responsable": "[nombre]",
-  "proyecto_codigo": "[código si el mensaje menciona proyecto, si no 'SSR']",
-  "pestaña_principal": "GASTOS_PROYECTO",
-  "pestanas_adicionales": ["CAJA_GENERAL"],
-  "confianza": 90
-}
-NUNCA uses tipo="PLANILLA" con monto=0 para este caso — el monto es real y si lo
-forzás a 0, el gasto desaparece silenciosamente sin que nadie se entere.
+
 Formato objeto gasto/ingreso normal:
 {
   "fecha": "${TODAY()}",
@@ -668,4 +670,110 @@ async function procesarComandoFinanciero(texto) {
   }
 }
 
-module.exports = { procesarComandoFinanciero, esComandoFinanciero };
+// ============================================================
+// LECTURA DE COMPROBANTES BANCARIOS POR IMAGEN (SINPE/BAC)
+// ============================================================
+
+async function interpretarComprobante(imageBase64, mimeType, textoAdicional) {
+  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const systemPrompt = `Sos el agente financiero IA de SS Remodelaciones. Te llega una
+captura de pantalla de una notificación bancaria (BAC, SINPE Móvil u otro banco
+costarricense). Extraé los datos del movimiento y devolvé JSON.
+
+CONTEXTO HOY: ${TODAY()}
+
+PROYECTOS (para detectar si el "Detalle" menciona alguno):
+${PROYECTOS.map(p => `- ${p.codigo}: ${p.nombre} (alias: ${p.alias.join(", ")})`).join("\n")}
+
+CÓMO LEER LA NOTIFICACIÓN:
+- "SOLO SENSO SOCIEDAD ANONIMA realizó una transferencia..." → SALIDA de dinero (GASTO).
+- "...recibió una transferencia..." o similar → ENTRADA (INGRESO).
+- "Monto debitado" en $ (dólares) → la cuenta de origen es "BAC USD".
+- "Monto debitado" en ₡ (colones) → la cuenta de origen es "BAC CRC".
+- Si ADEMÁS aparece "Monto enviado" en ₡, ESE es el monto real del gasto en colones
+  (lo que efectivamente costó), aunque la cuenta se haya debitado en dólares por
+  conversión. Usá ese monto con moneda="CRC" — la cuenta queda "BAC USD" igual.
+- Si NO hay "Monto enviado" separado, usá "Monto debitado" tal cual, con su moneda.
+- "Detalle" = descripción/motivo. Usalo para "descripcion" y para detectar proyecto.
+- Si el detalle menciona "planilla", "vale", o un nombre de trabajador sin proyecto
+  claro → categoria "Mano de obra", proyecto_codigo "SSR" salvo que mencione proyecto.
+
+Devolvé SOLO este JSON (un objeto, no array):
+{
+  "fecha": "YYYY-MM-DD",
+  "tipo": "GASTO o INGRESO",
+  "monto": <número, monto real en su moneda>,
+  "moneda": "CRC o USD",
+  "cuenta": "BAC CRC o BAC USD",
+  "proyecto": "nombre o SS Remodelaciones",
+  "proyecto_codigo": "PROY XXX/YYYY o SSR",
+  "categoria": "categoría breve",
+  "descripcion": "el Detalle de la notificación, 3-8 palabras",
+  "responsable": "nombre de persona si aplica, si no null",
+  "pestaña_principal": "GASTOS_PROYECTO o INGRESOS_CLIENTES",
+  "pestanas_adicionales": ["CAJA_GENERAL"],
+  "confianza": <0-100>,
+  "observaciones": "cualquier dato relevante que no encaje arriba"
+}
+
+Si la imagen no es una notificación bancaria legible, devolvé:
+{"error": "No pude leer un comprobante bancario en esta imagen"}
+
+Respondé ÚNICAMENTE con el JSON, sin markdown, sin texto extra.`;
+
+  const response = await client.messages.create({
+    model: process.env.ANTHROPIC_FINANCE_MODEL || "claude-sonnet-4-5-20250929",
+    max_tokens: 1000,
+    system: systemPrompt,
+    messages: [{
+      role: "user",
+      content: [
+        { type: "image", source: { type: "base64", media_type: mimeType, data: imageBase64 } },
+        { type: "text", text: textoAdicional || "Leé este comprobante y extraé el movimiento." },
+      ],
+    }],
+  });
+
+  const raw   = response.content[0]?.text || "{}";
+  const clean = raw.replace(/```json\n?|\n?```/g, "").trim();
+  const parsed = JSON.parse(clean);
+
+  if (parsed.error) return { error: parsed.error };
+
+  const moneda        = parsed.moneda === "USD" ? "USD" : "CRC";
+  const montoOriginal  = Number(parsed.monto) || 0;
+  const montoCRC       = moneda === "USD" ? Math.round(montoOriginal * TIPO_CAMBIO_USD) : montoOriginal;
+
+  return { ...parsed, moneda, monto: montoCRC, monto_original: montoOriginal };
+}
+
+async function procesarComprobanteImagen(imageBase64, mimeType, textoAdicional) {
+  try {
+    const datos = await interpretarComprobante(imageBase64, mimeType, textoAdicional);
+
+    if (datos.error) {
+      return `📭 ${datos.error}. Si querés registrarlo a mano, decime el monto y la descripción.`;
+    }
+    if (!datos.monto || datos.monto <= 0) {
+      return `⚠️ No pude leer un monto válido en el comprobante. Registralo a mano si querés.`;
+    }
+
+    const resultado = await registrarEnSheets({
+      ...datos,
+      audit_id: `SSR-IMG-${Date.now()}`,
+      canal: "whatsapp_imagen",
+    });
+
+    if (resultado?.resultado?.status === "DUPLICADO") {
+      return `⚠️ Este comprobante parece duplicado — ya hay un movimiento similar registrado.`;
+    }
+
+    return generarConfirmacionItem(datos, 0, 1) + "\n\n📸 _Registrado desde comprobante bancario_";
+  } catch (err) {
+    console.error("❌ procesarComprobanteImagen:", err.message);
+    return `❌ No pude procesar el comprobante: ${err.message}`;
+  }
+}
+
+module.exports = { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImagen };
