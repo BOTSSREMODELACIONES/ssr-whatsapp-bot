@@ -177,7 +177,24 @@ Formato objeto planilla:
   "confianza": 95,
   "observaciones": null
 }
-
+REGLA CRÍTICA — pago de planilla SIN mención de horas trabajadas:
+Si el mensaje dice "pago de planilla a [nombre] por [monto]" o similar, y NO menciona
+horas trabajadas ("trabajó X horas"), es un VALE/ADELANTO, NO un registro de horas.
+Tratalo así:
+{
+  "tipo": "GASTO",
+  "monto": [el monto mencionado],
+  "moneda": "CRC" (o "USD" si aplica),
+  "categoria": "Mano de obra",
+  "descripcion": "Vale planilla [nombre]",
+  "responsable": "[nombre]",
+  "proyecto_codigo": "[código si el mensaje menciona proyecto, si no 'SSR']",
+  "pestaña_principal": "GASTOS_PROYECTO",
+  "pestanas_adicionales": ["CAJA_GENERAL"],
+  "confianza": 90
+}
+NUNCA uses tipo="PLANILLA" con monto=0 para este caso — el monto es real y si lo
+forzás a 0, el gasto desaparece silenciosamente sin que nadie se entere.
 Formato objeto gasto/ingreso normal:
 {
   "fecha": "${TODAY()}",
