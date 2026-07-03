@@ -30,6 +30,12 @@
  *   ANTES de evaluar comandos financieros. El resto del pipeline (Claude
  *   conversacional, memoria, logs) sigue viendo el texto envuelto completo,
  *   porque ahí sí aporta contexto útil.
+ *
+ * ── CAMBIOS v4 — LECTURA DE COMPROBANTES BANCARIOS POR IMAGEN ──────────────────
+ * NUEVO: si un supervisor manda una foto (con o sin texto), se intenta leer
+ *   como comprobante bancario (SINPE/BAC) ANTES de cualquier otro flujo.
+ *   Si la imagen no es un comprobante reconocible, cae al flujo normal
+ *   (foto de obra, conversación con Claude, etc.) sin interrumpir nada.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -42,7 +48,7 @@ const { sendVisitConfirmation }      = require("./email");
 const { upsertLead, registerVisit }  = require("./crm");
 const KNOWLEDGE                      = require("./knowledge");
 const memoria                        = require("./memoria");
-const { procesarComandoFinanciero, esComandoFinanciero } = require("./finanzas");
+const { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImagen } = require("./finanzas");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
 // ── Constantes ────────────────────────────────────────────────────────────────
@@ -452,6 +458,32 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
+
+  // ── NUEVO v4: lectura de comprobantes bancarios por imagen ─────────────────
+  // Se ejecuta ANTES de cualquier otro flujo, con o sin texto acompañando la
+  // foto. Si la imagen resulta ser un comprobante bancario reconocible, se
+  // registra el movimiento y se corta acá. Si no lo es (foto de obra, por
+  // ejemplo), sigue de largo al flujo normal más abajo sin ninguna interrupción.
+  if (esSupervisor && mediaIds) {
+    const idsComprobante = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
+    for (const id of idsComprobante) {
+      try {
+        const imgData = await downloadMedia(id);
+        if (!imgData) continue;
+
+        const respuestaComprobante = await procesarComprobanteImagen(imgData.base64, imgData.mimeType, normalized);
+
+        if (respuestaComprobante && !respuestaComprobante.startsWith("📭")) {
+          await sendText(from, respuestaComprobante);
+          await copiaFinancieraADarwin(fromE164, respuestaComprobante);
+          return;
+        }
+        // Si no era comprobante bancario, seguimos al flujo normal (foto de obra, chat, etc.)
+      } catch (err) {
+        console.error("❌ Error procesando imagen de comprobante:", err.message);
+      }
+    }
+  }
 
   if (esSupervisor && normalized) {
 
