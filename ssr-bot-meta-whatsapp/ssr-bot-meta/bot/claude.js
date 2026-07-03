@@ -4,6 +4,33 @@ const KNOWLEDGE = require("./knowledge");
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// ── FIX FECHA — Sasha no sabía qué día era hoy ────────────────────────────────
+// Antes, SYSTEM_PROMPT se armaba una sola vez al arrancar el servidor, sin
+// fecha, y Claude tenía que "adivinar" qué día de la semana correspondía a
+// una fecha futura fuera de su entrenamiento — de ahí que un cliente tuviera
+// que corregirle a Sasha qué día era hoy. Esta función calcula el día y la
+// fecha reales de Costa Rica EN CADA LLAMADA, y se inyecta directo en el
+// system prompt dentro de ask() (nunca queda congelada en el deploy).
+function contextoFechaHoy() {
+  const dias = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
+  const meses = ["enero","febrero","marzo","abril","mayo","junio","julio",
+                  "agosto","septiembre","octubre","noviembre","diciembre"];
+
+  const cr = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  const diaSemana = dias[cr.getDay()];
+  const fechaTexto = `${cr.getDate()} de ${meses[cr.getMonth()]} de ${cr.getFullYear()}`;
+
+  return `
+╔════════════════════════════════╗
+FECHA Y HORA ACTUAL — SIEMPRE USAR ESTO, NUNCA CALCULAR SOLO
+╔════════════════════════════════╗
+HOY es ${diaSemana}, ${fechaTexto} (zona horaria Costa Rica).
+Si el cliente dice "hoy", "mañana", "pasado mañana", o menciona un día de la semana,
+calculalo SIEMPRE a partir de esta fecha exacta — nunca inventes ni asumas qué día
+es hoy por tu cuenta. Si el cliente te corrige sobre qué día es hoy, la fecha de
+arriba es la correcta — el error nunca es del cliente.`;
+}
+
 // ── Helpers — generan las secciones de conocimiento dinámicamente ─────────────
 function buildPreciosSection() {
   const P   = KNOWLEDGE.precios_referencia;
@@ -368,7 +395,7 @@ async function ask(history, userMessage, imageData = null) {
   const response = await client.messages.create({
     model:      "claude-sonnet-4-6",
     max_tokens: 600,
-    system:     SYSTEM_PROMPT,
+    system:     SYSTEM_PROMPT + contextoFechaHoy(),
     messages,
   });
 
