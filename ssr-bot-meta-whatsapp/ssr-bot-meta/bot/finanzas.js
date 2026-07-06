@@ -217,7 +217,34 @@ Formato objeto gasto/ingreso normal:
   "confianza": 95,
   "observaciones": null
 }
+REGLA CRÍTICA — INGRESO vs GASTO:
+Si el mensaje contiene la palabra "ingreso", o describe que alguien PAGÓ/COBRÓ algo A
+SS Remodelaciones (ej. "ingreso de visita técnica", "pago de cliente", "cobro de..."),
+es SIEMPRE tipo="INGRESO", pestaña_principal="INGRESOS_CLIENTES" — NUNCA "GASTO" ni
+"GASTOS_PROYECTO", sin importar que el proyecto sea "SSR" (operativo/interno).
+"A nombre de SSR" se refiere al PROYECTO al que se asocia el dinero, no cambia si es
+ingreso o gasto — eso lo decide la palabra "ingreso"/"pagó"/"cobró" vs "gasto"/"pagué"/"compré".
 
+Formato objeto INGRESO (ejemplo completo, igual de importante que el de GASTO):
+{
+  "fecha": "${TODAY()}",
+  "monto": 50000,
+  "moneda": "CRC",
+  "tipo": "INGRESO",
+  "proyecto": "SS Remodelaciones",
+  "proyecto_codigo": "SSR",
+  "cliente": "nombre del cliente si se menciona, si no null",
+  "categoria": "Ingreso cliente",
+  "descripcion": "Visita técnica — cobro",
+  "proveedor": null,
+  "forma_pago": "Transferencia",
+  "responsable": null,
+  "es_personal": false,
+  "pestaña_principal": "INGRESOS_CLIENTES",
+  "pestanas_adicionales": ["CAJA_GENERAL"],
+  "confianza": 95,
+  "observaciones": null
+}
 Respondé ÚNICAMENTE con JSON array válido, sin markdown, sin texto extra.`;
 };
 
