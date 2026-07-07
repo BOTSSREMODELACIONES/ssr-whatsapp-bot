@@ -1,5 +1,15 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v10.2 — FIX (7 julio 2026):
+//        1. APPS_SCRIPT_URL de respaldo actualizada a la implementación
+//           vigente del ERP V13 (la anterior AKfycbxpOjox... fue eliminada
+//           al re-implementar el script → causaba HTTP 404 con página HTML
+//           de Google). La URL real SIEMPRE debe vivir en la variable
+//           APPS_SCRIPT_URL de Railway; el hardcode es solo respaldo.
+//        2. registrarEnSheets ya no incrusta el HTML completo de Google en
+//           los errores: detecta respuestas HTML (404, login redirect) y
+//           lanza un mensaje corto y accionable. El cuerpo crudo queda
+//           truncado en los logs para diagnóstico.
 // v10.1 — FIX (7 julio 2026): moneda forzada por regla local (10 USD ya
 //        no puede quedar como ₡10), "Sin descripción" se repara antes de
 //        enviar, y los rechazos del Apps Script (ERROR_VALIDACION) ya no
@@ -25,8 +35,13 @@
 
 const Anthropic = require("@anthropic-ai/sdk");
 
+// ⚠️ v10.2 — Implementación vigente del ERP V13 (7 jul 2026).
+// Si volvés a crear una implementación NUEVA en Apps Script, actualizá la
+// variable APPS_SCRIPT_URL en Railway (y este respaldo). Mejor práctica:
+// actualizar la implementación existente con "Editar → Nueva versión" para
+// que la URL nunca cambie.
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL ||
-  "https://script.google.com/macros/s/AKfycbxpOjoxmar3WsfqwFS1EXJN4uYApUtXph08NSt_q35_6QIX-IP0SuFEqNFqhExRKIvx/exec";
+  "https://script.google.com/macros/s/AKfycbyMP4_cyxuB4oCNqh5SGZepnSujePha-tOcVOKbeo9y6BGOxhP-C86dT18JP0r0CvkkLQ/exec";
 
 const SHEETS_ID = process.env.SHEETS_ID ||
   "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
@@ -710,6 +725,14 @@ async function interpretarMovimientos(texto) {
 }
 
 // ─── Registro en Sheets ──────────────────────────────────────
+// v10.2 — Los errores del webhook ya NO incluyen el HTML completo de Google.
+// Si la respuesta es HTML (404 de implementación borrada, redirect de login,
+// error 500 de Google), se lanza un mensaje corto y accionable. El cuerpo
+// crudo queda truncado en los logs de Railway para diagnóstico.
+function esRespuestaHTML(texto) {
+  return /<!DOCTYPE|<html|<head|<body/i.test(String(texto || ""));
+}
+
 async function registrarEnSheets(data) {
   if (!APPS_SCRIPT_URL) return { success: true, simulated: true };
   const res = await fetch(APPS_SCRIPT_URL, {
@@ -718,11 +741,31 @@ async function registrarEnSheets(data) {
     body: JSON.stringify(data),
   });
   const bodyText = await res.text();
-  if (!res.ok) throw new Error(`Apps Script HTTP ${res.status}: ${bodyText}`);
+
+  if (!res.ok) {
+    console.error(`❌ Apps Script HTTP ${res.status}. Cuerpo (truncado):`, bodyText.slice(0, 400));
+    if (esRespuestaHTML(bodyText)) {
+      throw new Error(
+        `Apps Script HTTP ${res.status} — la URL del webhook apunta a una implementación ` +
+        `que ya no existe o sin acceso público. Revisá APPS_SCRIPT_URL en Railway ` +
+        `(Administrar implementaciones → URL /exec vigente).`
+      );
+    }
+    throw new Error(`Apps Script HTTP ${res.status}: ${bodyText.slice(0, 200)}`);
+  }
+
   try {
     return JSON.parse(bodyText);
   } catch (e) {
-    throw new Error(`Apps Script respondió no-JSON: ${bodyText.slice(0, 300)}`);
+    console.error("❌ Apps Script respondió no-JSON. Cuerpo (truncado):", bodyText.slice(0, 400));
+    if (esRespuestaHTML(bodyText)) {
+      throw new Error(
+        `Apps Script devolvió una página HTML en vez de JSON — probablemente la ` +
+        `implementación no tiene acceso "Cualquier persona" o la URL es de una ` +
+        `versión vieja. Revisá la implementación y APPS_SCRIPT_URL en Railway.`
+      );
+    }
+    throw new Error(`Apps Script respondió no-JSON: ${bodyText.slice(0, 200)}`);
   }
 }
 
@@ -816,7 +859,7 @@ async function procesarComandoFinanciero(texto) {
         }
       } catch (err) {
         console.error("❌ Error:", err.message);
-        errores.push(`❌ Error en: ${datos.descripcion}`);
+        errores.push(`❌ Error en: ${datos.descripcion} — ${err.message}`);
       }
     }
 
