@@ -1,5 +1,9 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v10.1 — FIX (7 julio 2026): moneda forzada por regla local (10 USD ya
+//        no puede quedar como ₡10), "Sin descripción" se repara antes de
+//        enviar, y los rechazos del Apps Script (ERROR_VALIDACION) ya no
+//        se confirman como éxito.
 // v10 — FIX MAYOR (julio 2026):
 //   1. INGRESO vs GASTO: corrección determinística post-Claude.
 //      "Apunta el ingreso de 25.000 de José Guillermo..." ya no
@@ -322,6 +326,9 @@ const CONECTORES_SIN_CONTENIDO = new Set([
 
 function descripcionEsPobre(desc) {
   if (!desc) return true;
+  // "Sin descripción" era la vía de escape favorita de Claude y el Apps
+  // Script la rechaza (ERROR_VALIDACION) — se repara ANTES de enviar.
+  if (/^sin\s+descripci/i.test(String(desc).trim())) return true;
   const palabras = norm(desc).split(/\s+/).filter(w => w.length > 1 && !CONECTORES_SIN_CONTENIDO.has(w));
   if (palabras.length < 1) return true;
   // termina en preposición/artículo colgante → quedó cortada
@@ -397,7 +404,17 @@ function esComandoFinanciero(texto) {
 
 // ─── Post-procesamiento común (moneda, cuenta, tipo, descripción) ──
 function postProcesarMovimiento(m, textoOriginal) {
-  const moneda = m.moneda === "USD" ? "USD" : "CRC";
+  // FIX v10.1 — la moneda también se verifica localmente, no solo con Claude.
+  // "Registra un ingreso de 10 USD" se registró como ₡10 porque Claude
+  // devolvió CRC y nadie lo cuestionó. Si el texto dice usd/dólares/$,
+  // la moneda ES USD sin importar lo que haya dicho el modelo.
+  let moneda = m.moneda === "USD" ? "USD" : "CRC";
+  const monedaLocal = detectarMonedaLocal(textoOriginal);
+  let monedaCorregida = false;
+  if (monedaLocal === "USD" && moneda !== "USD") {
+    moneda = "USD";
+    monedaCorregida = true;
+  }
   const montoOriginal = Number(m.monto_original ?? m.monto) || 0;
   const montoCRC = moneda === "USD" ? Math.round(montoOriginal * TIPO_CAMBIO_USD) : montoOriginal;
 
@@ -406,9 +423,15 @@ function postProcesarMovimiento(m, textoOriginal) {
     moneda,
     monto: montoCRC,
     monto_original: montoOriginal,
-    cuenta: m.cuenta || cuentaSegunMoneda(moneda),
+    // Si la moneda fue corregida localmente, la cuenta del modelo ya no
+    // vale (habría dicho BAC CRC para un movimiento USD) — se recalcula.
+    cuenta: monedaCorregida ? cuentaSegunMoneda(moneda) : (m.cuenta || cuentaSegunMoneda(moneda)),
     tipo_cambio: moneda === "USD" ? TIPO_CAMBIO_USD : 1,
   };
+  if (monedaCorregida) {
+    out.observaciones = [(out.observaciones || ""), "Moneda corregida a USD por regla local"]
+      .filter(Boolean).join(" | ");
+  }
 
   // 1) FORZAR tipo si el texto es inequívoco (aunque Claude diga otra cosa)
   if (out.tipo !== "PLANILLA") {
@@ -774,8 +797,18 @@ async function procesarComandoFinanciero(texto) {
           canal: "whatsapp",
         });
 
-        if (resultado?.resultado?.status === "DUPLICADO") {
+        // FIX v10.1 — antes solo se revisaba DUPLICADO, así que si el Apps
+        // Script RECHAZABA el movimiento (ERROR_VALIDACION, success:false),
+        // Sasha igual confirmaba "registrado" y el dato nunca existió.
+        const status = resultado?.resultado?.status || resultado?.status;
+        const mensajeAS = resultado?.resultado?.mensaje || resultado?.error || "";
+
+        if (status === "DUPLICADO") {
           errores.push(`⚠️ Duplicado: ${datos.descripcion}`);
+        } else if (resultado?.success === false || resultado?.ok === false ||
+                   (status && status !== "OK")) {
+          errores.push(`❌ Rechazado por el sistema: ${datos.descripcion}` +
+            (mensajeAS ? ` — ${mensajeAS}` : ""));
         } else {
           confirmaciones.push(
             generarConfirmacionItem(datos, confirmaciones.length, movimientos.length)
@@ -895,8 +928,13 @@ async function procesarComprobanteImagen(imageBase64, mimeType, textoAdicional) 
       canal: "whatsapp_imagen",
     });
 
-    if (resultado?.resultado?.status === "DUPLICADO") {
+    const status = resultado?.resultado?.status || resultado?.status;
+    if (status === "DUPLICADO") {
       return `⚠️ Este comprobante parece duplicado — ya hay un movimiento similar registrado.`;
+    }
+    if (resultado?.success === false || resultado?.ok === false || (status && status !== "OK")) {
+      const mensajeAS = resultado?.resultado?.mensaje || resultado?.error || "";
+      return `❌ El sistema rechazó el comprobante${mensajeAS ? `: ${mensajeAS}` : "."} Registralo a mano si querés.`;
     }
 
     return generarConfirmacionItem(datos, 0, 1) + "\n\n📸 _Registrado desde comprobante bancario_";
