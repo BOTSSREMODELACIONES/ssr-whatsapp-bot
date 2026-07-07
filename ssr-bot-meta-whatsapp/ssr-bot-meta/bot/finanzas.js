@@ -1,5 +1,18 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v10.3 — FIX (7 julio 2026, tarde):
+//        1. MONTOS CON DECIMALES: "89.535,27" ya se lee como 89535.27
+//           (formato tico: miles con punto, decimales con coma). Antes el
+//           parser agarraba solo "89.535" y el ",27" quedaba huérfano en
+//           el texto, contaminando la descripción. También soporta formato
+//           US "89,535.27".
+//        2. DESCRIPCIONES SIN LETRAS: ",27", "0,27", "123" ahora cuentan
+//           como descripción pobre y se reconstruyen automáticamente
+//           ("Categoría — Proyecto/Responsable").
+//        NOTA: junto con index.js v6, TODO el lenguaje natural financiero
+//        pasa ahora por este pipeline (parser local corto o Claude con
+//        contexto completo de proyectos) — el pre-parser de voz de
+//        memoria.js ya no pre-mastica los mensajes.
 // v10.2 — FIX (7 julio 2026):
 //        1. APPS_SCRIPT_URL de respaldo actualizada a la implementación
 //           vigente del ERP V13 (la anterior AKfycbxpOjox... fue eliminada
@@ -219,6 +232,14 @@ function parseMontoFinancieroLocal(valor) {
     return isNaN(n) ? 0 : Math.round(n * 1000);
   }
 
+  // v10.3 — Formato tico: miles con punto, decimales con coma → "89.535,27" = 89535.27
+  m = txt.match(/\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?/);
+  if (m) return Number(m[0].replace(/\./g, "").replace(",", ".")) || 0;
+
+  // v10.3 — Formato US: miles con coma, decimales con punto → "89,535.27" = 89535.27
+  m = txt.match(/\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?/);
+  if (m) return Number(m[0].replace(/,/g, "")) || 0;
+
   m = txt.match(/\d{1,3}(?:[.,]\d{3})+/);
   if (m) return Number(m[0].replace(/[.,]/g, "")) || 0;
 
@@ -238,6 +259,10 @@ function extraerMontoDeTextoFinanciero(texto) {
     /(?:usd|dolares|dolar)\s*\d+(?:[.,]\d+)?/,
     /(\d+(?:[.,]\d+)?)\s*(?:mil|k)\b/,
     /(\d+(?:[.,]\d+)?)\s*(?:millones?|millon)\b/,
+    // v10.3 — capturan el número COMPLETO incluyendo decimales ("89.535,27"),
+    // para que al limpiar la descripción no quede un ",27" huérfano.
+    /\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?/,
+    /\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?/,
     /\d{1,3}(?:[.,]\d{3})+/,
     /\d{4,}/,
     /\d+(?:[.,]\d+)?/,
@@ -344,6 +369,8 @@ function descripcionEsPobre(desc) {
   // "Sin descripción" era la vía de escape favorita de Claude y el Apps
   // Script la rechaza (ERROR_VALIDACION) — se repara ANTES de enviar.
   if (/^sin\s+descripci/i.test(String(desc).trim())) return true;
+  // v10.3 — sin ninguna letra (",27", "0,27", "123") no es una descripción
+  if (!/[a-z]/i.test(norm(desc))) return true;
   const palabras = norm(desc).split(/\s+/).filter(w => w.length > 1 && !CONECTORES_SIN_CONTENIDO.has(w));
   if (palabras.length < 1) return true;
   // termina en preposición/artículo colgante → quedó cortada
