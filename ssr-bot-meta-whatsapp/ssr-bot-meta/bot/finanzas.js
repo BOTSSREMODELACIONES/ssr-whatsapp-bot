@@ -1,7 +1,22 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
-// v9 — FIX: pago de planilla sin horas (vale/adelanto), lectura
-//      de comprobantes bancarios por imagen (SINPE/BAC).
+// v10 — FIX MAYOR (julio 2026):
+//   1. INGRESO vs GASTO: corrección determinística post-Claude.
+//      "Apunta el ingreso de 25.000 de José Guillermo..." ya no
+//      puede terminar como GASTO aunque Claude se equivoque.
+//   2. VALES/PLANILLA a TRABAJADORES: "vale para Christhian" ya no
+//      se asigna al proyecto del cliente Christian. Si el nombre
+//      después de vale/planilla/adelanto es un TRABAJADOR, se usa
+//      como responsable y el proyecto solo se detecta con OTRO alias.
+//   3. DESCRIPCIONES: validación de calidad. Nunca más "el",
+//      "Yader en el", "nombre" — si la descripción queda pobre,
+//      se reconstruye como "Categoría — Responsable/Proyecto".
+//   4. CUENTA BANCARIA: cada movimiento lleva "cuenta" (BAC CRC /
+//      BAC USD) para la nueva CAJA_GENERAL de dos monedas.
+//   5. Payload COMPLETO a Apps Script: entrada_crc, salida_crc,
+//      entrada_usd, salida_usd, cuenta, tipo_cambio, responsable,
+//      id_movimiento — el Apps Script ya no tiene que adivinar
+//      columnas (ver Code_AppsScript_Caja.gs).
 // ============================================================
 
 const Anthropic = require("@anthropic-ai/sdk");
@@ -12,33 +27,33 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL ||
 const SHEETS_ID = process.env.SHEETS_ID ||
   "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
 
-// Tipo de cambio USD → CRC. Ajustalo aquí o vía variable de entorno TIPO_CAMBIO_USD.
-// Esto NO convierte el monto silenciosamente sin que lo veas: el mensaje de
-// confirmación siempre muestra el monto original en USD Y su equivalente en ₡.
-const TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 506;
+// Tipo de cambio USD → CRC. El mensaje de confirmación siempre muestra
+// el monto original en USD Y su equivalente en ₡.
+const TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 530;
 
-// ⚠️ Códigos VERIFICADOS contra la hoja PROYECTOS (junio 2026).
-// Si abrís un proyecto nuevo, agregalo acá con su código EXACTO de la hoja.
-// Un código mal escrito = el gasto no aparece en el dashboard (SUMIF no hace match).
+// ⚠️ Códigos VERIFICADOS contra la hoja PROYECTOS (julio 2026).
+// OJO: el proyecto del panel acanalado de Leonardo es PROY SC1/2026
+// (PROY 001/2026 es de Sergio Gonzales Pauta — pintura exterior).
 const PROYECTOS = [
   // ── Activos / recientes ──────────────────────────────────────────────────
   { codigo: "PROY 060/2026", nombre: "María José",               alias: ["maria jose", "mariajose", "balcon", "balcon maria jose"] },
   { codigo: "PROY 059/2026", nombre: "Rosalía Granados",         alias: ["rosalia", "granados", "closet rosalia"] },
   { codigo: "PROY 049/2026", nombre: "Laura Víquez",             alias: ["laura", "viquez", "consultorio laura"] },
-  { codigo: "PROY 045/2026", nombre: "Juan Diego",               alias: ["juan diego", "juan", "anexo juan"] },
+  { codigo: "PROY 045/2026", nombre: "Juan Diego",               alias: ["juan diego", "anexo juan"] },
   { codigo: "PROY 044/2026", nombre: "Karim Sánchez",            alias: ["karim", "karin", "sanchez"] },
-  { codigo: "PROY 043/2026", nombre: "Miriam Ramírez Cordero",   alias: ["miriam", "ramirez", "enchape miriam"] },
+  { codigo: "PROY 043/2026", nombre: "Miriam Ramírez Cordero",   alias: ["miriam", "ramirez", "enchape miriam", "enchape"] },
   { codigo: "PROY 037/2026", nombre: "Nathalie Alpízar",         alias: ["nathalie", "natalie", "alpizar", "baño nathalie"] },
   { codigo: "PROY 033/2026", nombre: "Jeannette",                alias: ["jeannette", "jeanette", "cocina jeannette"] },
   { codigo: "PROY 030/2026", nombre: "Marriott",                 alias: ["marriott", "marriot", "mariot", "hotel marriott", "diversa marriott"] },
   { codigo: "PROY 028/2026", nombre: "Fede y Lore",              alias: ["fede", "lore", "federico", "banos fede"] },
-  { codigo: "PROY 019/2026", nombre: "Christian Alfaro",         alias: ["christian", "cristian", "alfaro", "ventanas", "ventaneria", "ventanería", "jonathan ventanas"] },
+  { codigo: "PROY 019/2026", nombre: "Christian Alfaro",         alias: ["christian alfaro", "alfaro", "ventanas", "ventaneria", "ventanería", "proyecto de christian", "proyecto de cristian"] },
   { codigo: "PROY 018/2026", nombre: "Anahí Almirón",            alias: ["anahi", "almiron", "almirón", "salon belleza", "muebles salon"] },
   { codigo: "PROY 016/2026", nombre: "Frank Solano",             alias: ["frank", "franck", "solano", "baño frank", "bano frank"] },
   { codigo: "PROY 015/2026", nombre: "Guillermo Naranjo",        alias: ["guillermo", "naranjo", "pintura interior"] },
   { codigo: "PROY 006/2026", nombre: "Jorge Córdoba 2026",       alias: ["jorge", "cordoba", "chorreadosa", "losa"] },
   { codigo: "PROY 002/2026", nombre: "Kevin Chanto",             alias: ["kevin", "chanto"] },
-  { codigo: "PROY 001/2026", nombre: "Leonardo Álvarez",         alias: ["leonardo", "leo", "alvarez", "panel acanalado"] },
+  { codigo: "PROY 001/2026", nombre: "Sergio Gonzales Pauta",    alias: ["sergio", "gonzales pauta", "pintura sergio"] },
+  { codigo: "PROY SC1/2026", nombre: "Leonardo Álvarez",         alias: ["leonardo", "leo", "alvarez", "panel acanalado"] },
   // ── Históricos cerrados (siguen recibiendo gastos de garantía) ───────────
   { codigo: "PROY 166/2025", nombre: "César Adrián Montenegro",  alias: ["cesar", "adrian", "montenegro"] },
   { codigo: "PROY 154/2025", nombre: "Ruth Valverde Aguilar",    alias: ["ruth", "valverde", "escazu"] },
@@ -47,6 +62,25 @@ const PROYECTOS = [
   { codigo: "PROY 015/2025", nombre: "Fede y Lore 2025",         alias: ["lore 2025"] },
   { codigo: "PROY 008/2025", nombre: "Jorge Córdoba 2025",       alias: ["cordoba 2025"] },
   { codigo: "PROY 004/2025", nombre: "Franxi Solano",            alias: ["franxi"] },
+];
+
+// ⚠️ TRABAJADORES — sincronizado con la hoja TRABAJADORES.
+// Sirve para que "vale para Christhian" NO se confunda con el
+// cliente Christian (PROY 019/2026), y para llenar "responsable".
+const TRABAJADORES = [
+  { nombre: "Fernando Chevez Sandino", alias: ["fernando", "fercho"] },
+  { nombre: "Melvin Zúñiga",           alias: ["melvin", "cuñis", "cunis"] },
+  { nombre: "Christhian Zacarias",     alias: ["christhian", "christian", "cristian", "chirstian"] },
+  { nombre: "Mauricio",                alias: ["mauricio", "chollina"] },
+  { nombre: "Yader Fonseca",           alias: ["yader"] },
+  { nombre: "Darwin Guillón",          alias: ["darwin"] },
+  { nombre: "Brayan Solís",            alias: ["brayan", "bryan"] },
+  { nombre: "Maribel",                 alias: ["maribel"] },
+  { nombre: "Victor Guillón",          alias: ["victor", "vic"] },
+  { nombre: "Eithan Tames Salazar",    alias: ["eithan"] },
+  { nombre: "Kenny",                   alias: ["kenny"] },
+  { nombre: "Enrique",                 alias: ["enrique"] },
+  { nombre: "Roilan",                  alias: ["roilan"] },
 ];
 
 const KEYWORDS_FINANZAS = [
@@ -59,7 +93,7 @@ const KEYWORDS_FINANZAS = [
   "planilla","sueldo","salario","quincena","jornal",
   "trabajó","trabajo","trabajaron","horas","hora",
   "vale","adelanto planilla",
-  "subcontrato","subcontratista","descuenta","desconta","rebaja","apunta","saca","pague","pagé",
+  "subcontrato","subcontratista","descuenta","desconta","rebaja","saca",
   "materiales","herramientas","gasolina","combustible","diesel","diésel",
   "transporte","almuerzo","comida","alimentacion",
   "ferretería","ferreteria","epa","construplaza",
@@ -96,182 +130,54 @@ const getSemanaDelMes = () => {
   return Math.ceil(cr.getDate() / 7);
 };
 
-const buildSystemPrompt = () => {
-  const proyectosCtx = PROYECTOS
-    .map(p => `- ${p.codigo}: ${p.nombre} (alias: ${p.alias.join(", ")})`)
-    .join("\n");
-
-  const mesActual   = getMesActual();
-  const diaSemana   = getDiaSemana();
-  const numSemana   = getSemanaDelMes();
-  const planillaMes = `PLANILLA_${mesActual}`;
-
-  return `Sos el agente financiero IA de SS Remodelaciones, empresa costarricense de construcción.
-
-PROYECTOS (activos y cerrados — ambos reciben gastos):
-${proyectosCtx}
-
-CONTEXTO HOY: ${TODAY()} | Día: ${diaSemana} | Semana del mes: ${numSemana} | Mes planilla: ${planillaMes}
-
-REGLAS DE INTERPRETACIÓN:
-- NÚMEROS COSTARRICENSES: punto = separador de miles → "4.500"=4500, "1.200.000"=1200000
-- "X mil" = X*1000. "medio millón" = 500000
-- MONEDA: si el mensaje menciona "usd", "dólares", "dolares" o "$" antes/después del número,
-  el monto está en USD. En ese caso devolvé "moneda": "USD" y "monto" en USD (NO conviertas).
-  Si no se menciona moneda extranjera, asumí colones y "moneda": "CRC".
-- Sin fecha = hoy: ${TODAY()}
-- Detectá proyecto por nombre o alias EN CUALQUIER PARTE del mensaje, incluso con errores
-  de tipeo leves (ej: "poryecto", "marriot" sin la segunda T). Si el admin menciona un
-  nombre de cliente o proyecto, buscalo en la lista de PROYECTOS de arriba y usá su código exacto.
-- Si no encontrás el proyecto por ningún alias → proyecto_codigo = "SSR"
-- Gastos operativos sin proyecto claro → proyecto_codigo = "SSR"
-- SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales (excepto planillas de horas)
-- La descripción debe ser un resumen claro de 3-8 palabras del MOTIVO del gasto/ingreso
-  (ej: "Transporte operarios Marriott", "Materiales gypsum"). NUNCA dejes la descripción
-  vacía o con fragmentos sueltos de la frase original.
-
-PESTAÑAS VÁLIDAS — SOLO ESTOS NOMBRES:
-- "GASTOS_PROYECTO" → cualquier gasto
-- "INGRESOS_CLIENTES" → pago de cliente
-- "${planillaMes}" → registro de horas trabajadas (hoy corresponde a ${planillaMes})
-- "BASE_PLANILLA" → copia plana de planilla
-- "INVENTARIO" → compra para bodega
-- "SUBCONTRATOS" → pago a subcontratista
-
-REGLAS PARA PLANILLA (cuando alguien dice "X trabajó N horas"):
-- tipo = "PLANILLA"
-- pestaña_principal = "${planillaMes}"
-- pestanas_adicionales = ["BASE_PLANILLA"] (sin CAJA_GENERAL, el monto se calcula después)
-- monto = 0
-- horas = número de horas trabajadas (campo extra obligatorio)
-- dia_semana = "${diaSemana}" (día de hoy)
-- num_semana = ${numSemana} (semana del mes de hoy)
-- vale_colones = monto del vale si hay, 0 si no
-- Cada trabajador = un objeto separado en el array
-- Si hay vale, agregá UN objeto extra de tipo GASTO: descripcion="Vale planilla [nombre]", monto=[vale], pestaña_principal="GASTOS_PROYECTO", pestanas_adicionales=["CAJA_GENERAL"]
-
-REGLA CRÍTICA — pago de planilla SIN mención de horas trabajadas:
-Si el mensaje dice "pago de planilla a [nombre] por [monto]" o similar, y NO menciona
-horas trabajadas ("trabajó X horas"), es un VALE/ADELANTO, NO un registro de horas.
-Tratalo así:
-{
-  "tipo": "GASTO",
-  "monto": [el monto mencionado],
-  "moneda": "CRC" (o "USD" si aplica),
-  "categoria": "Mano de obra",
-  "descripcion": "Vale planilla [nombre]",
-  "responsable": "[nombre]",
-  "proyecto_codigo": "[código si el mensaje menciona proyecto, si no 'SSR']",
-  "pestaña_principal": "GASTOS_PROYECTO",
-  "pestanas_adicionales": ["CAJA_GENERAL"],
-  "confianza": 90
-}
-NUNCA uses tipo="PLANILLA" con monto=0 para este caso — el monto es real y si lo
-forzás a 0, el gasto desaparece silenciosamente sin que nadie se entere.
-
-INSTRUCCIONES MÚLTIPLES:
-Siempre devolvés un ARRAY JSON. Un objeto por operación o trabajador.
-
-Formato objeto planilla:
-{
-  "fecha": "${TODAY()}",
-  "monto": 0,
-  "moneda": "CRC",
-  "horas": 9,
-  "dia_semana": "${diaSemana}",
-  "num_semana": ${numSemana},
-  "vale_colones": 0,
-  "tipo": "PLANILLA",
-  "proyecto": "nombre o SS Remodelaciones",
-  "proyecto_codigo": "PROY XXX/YYYY o SSR",
-  "categoria": "Mano de obra",
-  "descripcion": "Planilla Fernando - 9h ${diaSemana}",
-  "responsable": "Fernando",
-  "proveedor": null,
-  "forma_pago": null,
-  "cliente": null,
-  "es_personal": false,
-  "pestaña_principal": "${planillaMes}",
-  "pestanas_adicionales": ["BASE_PLANILLA"],
-  "confianza": 95,
-  "observaciones": null
+// ─── Normalización ───────────────────────────────────────────
+function norm(t) {
+  return String(t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 }
 
-Formato objeto gasto/ingreso normal:
-{
-  "fecha": "${TODAY()}",
-  "monto": 45000,
-  "moneda": "CRC",
-  "tipo": "GASTO",
-  "proyecto": "nombre o SS Remodelaciones",
-  "proyecto_codigo": "SSR",
-  "cliente": null,
-  "categoria": "Gasolina",
-  "descripcion": "3-8 palabras claras",
-  "proveedor": null,
-  "forma_pago": null,
-  "responsable": null,
-  "es_personal": false,
-  "pestaña_principal": "GASTOS_PROYECTO",
-  "pestanas_adicionales": ["CAJA_GENERAL"],
-  "confianza": 95,
-  "observaciones": null
-}
-REGLA CRÍTICA — INGRESO vs GASTO:
-Si el mensaje contiene la palabra "ingreso", o describe que alguien PAGÓ/COBRÓ algo A
-SS Remodelaciones (ej. "ingreso de visita técnica", "pago de cliente", "cobro de..."),
-es SIEMPRE tipo="INGRESO", pestaña_principal="INGRESOS_CLIENTES" — NUNCA "GASTO" ni
-"GASTOS_PROYECTO", sin importar que el proyecto sea "SSR" (operativo/interno).
-"A nombre de SSR" se refiere al PROYECTO al que se asocia el dinero, no cambia si es
-ingreso o gasto — eso lo decide la palabra "ingreso"/"pagó"/"cobró" vs "gasto"/"pagué"/"compré".
-
-Formato objeto INGRESO (ejemplo completo, igual de importante que el de GASTO):
-{
-  "fecha": "${TODAY()}",
-  "monto": 50000,
-  "moneda": "CRC",
-  "tipo": "INGRESO",
-  "proyecto": "SS Remodelaciones",
-  "proyecto_codigo": "SSR",
-  "cliente": "nombre del cliente si se menciona, si no null",
-  "categoria": "Ingreso cliente",
-  "descripcion": "Visita técnica — cobro",
-  "proveedor": null,
-  "forma_pago": "Transferencia",
-  "responsable": null,
-  "es_personal": false,
-  "pestaña_principal": "INGRESOS_CLIENTES",
-  "pestanas_adicionales": ["CAJA_GENERAL"],
-  "confianza": 95,
-  "observaciones": null
-}
-Respondé ÚNICAMENTE con JSON array válido, sin markdown, sin texto extra.`;
-};
-
-function esComandoFinanciero(texto) {
-  if (!texto) return false;
-  const t = texto.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  return KEYWORDS_FINANZAS.some(kw =>
-    t.includes(kw.normalize("NFD").replace(/[\u0300-\u036f]/g, ""))
-  );
+// ─── Detección de trabajador ─────────────────────────────────
+function detectarTrabajador(texto) {
+  const t = norm(texto);
+  for (const w of TRABAJADORES) {
+    for (const a of w.alias) {
+      if (new RegExp(`\\b${a}\\b`, "i").test(t)) return { ...w, aliasMatch: a };
+    }
+  }
+  return null;
 }
 
-// ─── Detección de moneda ─────────────────────────────────────────────────────
+// ¿El mensaje es un vale / pago de planilla / adelanto a un trabajador?
+function esContextoPlanilla(texto) {
+  const t = norm(texto);
+  return /\b(vale|planilla|adelanto|quincena|salario|sueldo|semana)\b/.test(t);
+}
+
+// Trabajador mencionado justo después de vale/planilla/adelanto/pago ... (para|de|a)
+function trabajadorEnContextoPlanilla(texto) {
+  const t = norm(texto);
+  const m = t.match(/\b(?:vale|planilla|adelanto|quincena|salario|sueldo|pago)\b[^.]{0,40}?\b(?:para|de|a|al)\s+([a-z]+(?:\s+[a-z]+)?)/);
+  if (!m) return null;
+  return detectarTrabajador(m[1]);
+}
+
+// ─── Detección de moneda ─────────────────────────────────────
 function detectarMonedaLocal(texto) {
-  const t = String(texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const t = norm(texto);
   if (/\busd\b/.test(t) || /\bdolar(es)?\b/.test(t) || /\$\s*\d/.test(t) || /\d\s*\$/.test(t)) {
     return "USD";
   }
   return "CRC";
 }
 
-// ─── Parser local de montos CR ──────────────────────────────────────────────
+function cuentaSegunMoneda(moneda) {
+  return moneda === "USD" ? "BAC USD" : "BAC CRC";
+}
+
+// ─── Parser local de montos CR ───────────────────────────────
 function parseMontoFinancieroLocal(valor) {
   if (valor === null || valor === undefined) return 0;
 
-  let txt = String(valor)
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  let txt = norm(valor)
     .replace(/₡/g, "")
     .replace(/\$/g, "")
     .replace(/\busd\b/g, "")
@@ -303,58 +209,41 @@ function parseMontoFinancieroLocal(valor) {
   return 0;
 }
 
-function normalizarTextoFinancieroLocal(texto) {
-  if (!texto) return "";
-  return String(texto)
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .trim();
-}
-
 function extraerMontoDeTextoFinanciero(texto) {
-  const t = normalizarTextoFinancieroLocal(texto);
+  const t = norm(texto);
 
-  let m = t.match(/\$\s*\d+(?:[.,]\d+)?/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/\d+(?:[.,]\d+)?\s*\$/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/\d+(?:[.,]\d+)?\s*(?:usd|dolares|dolar)\b/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/(?:usd|dolares|dolar)\s*\d+(?:[.,]\d+)?/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/(\d+(?:[.,]\d+)?)\s*(?:mil|k)\b/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/(\d+(?:[.,]\d+)?)\s*(?:millones?|millon)\b/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/\d{1,3}(?:[.,]\d{3})+/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/\d{4,}/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
-  m = t.match(/\d+(?:[.,]\d+)?/);
-  if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
-
+  const patrones = [
+    /\$\s*\d+(?:[.,]\d+)?/,
+    /\d+(?:[.,]\d+)?\s*\$/,
+    /\d+(?:[.,]\d+)?\s*(?:usd|dolares|dolar)\b/,
+    /(?:usd|dolares|dolar)\s*\d+(?:[.,]\d+)?/,
+    /(\d+(?:[.,]\d+)?)\s*(?:mil|k)\b/,
+    /(\d+(?:[.,]\d+)?)\s*(?:millones?|millon)\b/,
+    /\d{1,3}(?:[.,]\d{3})+/,
+    /\d{4,}/,
+    /\d+(?:[.,]\d+)?/,
+  ];
+  for (const p of patrones) {
+    const m = t.match(p);
+    if (m) return { raw: m[0], monto: parseMontoFinancieroLocal(m[0]) };
+  }
   return { raw: "", monto: 0 };
 }
 
 function categorizarGastoLocal(desc) {
-  const t = String(desc || "").toLowerCase();
-  if (/gasolina|combustible|diesel|diésel|aceite|pick up|pickup|veh[ií]culo|transporte/.test(t)) return "Transporte";
+  const t = norm(desc);
+  if (/gasolina|combustible|diesel|aceite|pick up|pickup|vehiculo|transporte/.test(t)) return "Transporte";
   if (/material|ferreter|epa|construplaza|lagar|colono/.test(t)) return "Material";
   if (/comida|almuerzo|desayuno|cena|alimentaci/.test(t)) return "Alimentación";
-  if (/herramient|equipo|maquina|máquina/.test(t)) return "Herramienta";
+  if (/herramient|equipo|maquina/.test(t)) return "Herramienta";
   if (/subcontrat|contratista/.test(t)) return "Subcontrato";
+  if (/vale|planilla|quincena|salario|sueldo/.test(t)) return "Mano de obra";
+  if (/seguro|ccss|poliza/.test(t)) return "Seguros";
+  if (/internet|luz|electricidad|agua|telefono/.test(t)) return "Servicios";
   return "Gasto";
 }
 
-// ─── Detección de proyecto robusta (Levenshtein) ─────────────────────────────
+// ─── Levenshtein para typos ──────────────────────────────────
 function levenshtein(a, b) {
   if (a === b) return 0;
   const al = a.length, bl = b.length;
@@ -372,22 +261,30 @@ function levenshtein(a, b) {
   return dp[al][bl];
 }
 
+// ─── Detección de proyecto (con guardia de trabajadores) ─────
+// Si el nombre viene en contexto de planilla/vale y coincide con un
+// TRABAJADOR, ese nombre NO cuenta para detectar proyecto.
 function detectarProyectoLocal(texto) {
-  const t = String(texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  let t = norm(texto);
+
+  const trabPlanilla = trabajadorEnContextoPlanilla(texto);
+  if (trabPlanilla) {
+    // borrar el alias del trabajador del texto antes de buscar proyecto
+    t = t.replace(new RegExp(`\\b${trabPlanilla.aliasMatch}\\b`, "gi"), " ");
+  }
+
   const palabras = t.split(/[^a-z0-9]+/).filter(Boolean);
 
-  // 1) Match exacto por substring
   for (const p of PROYECTOS) {
-    const nombre = p.nombre.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-    const aliases = (p.alias || []).map(a => a.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+    const nombre = norm(p.nombre);
+    const aliases = (p.alias || []).map(norm);
     if (t.includes(nombre) || aliases.some(a => a && t.includes(a))) return p;
   }
 
-  // 2) Match tolerante a typos
   for (const p of PROYECTOS) {
-    const aliases = (p.alias || []).map(a => a.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+    const aliases = (p.alias || []).map(norm);
     for (const alias of aliases) {
-      if (alias.length < 4) continue;
+      if (alias.length < 4 || alias.includes(" ")) continue;
       for (const palabra of palabras) {
         if (palabra.length < 4) continue;
         const dist = levenshtein(alias, palabra);
@@ -399,49 +296,56 @@ function detectarProyectoLocal(texto) {
   return { codigo: "SSR", nombre: "SS Remodelaciones" };
 }
 
-function extraerComandoFinancieroCrudo(texto) {
-  if (!texto) return null;
-  const m = String(texto).match(/\[(GASTO|INGRESO)\s*:\s*([^\]]+)\]/i);
-  if (!m) return null;
-
-  const tipo = m[1].toUpperCase();
-  const partes = m[2].split("|").map(p => p.trim()).filter(Boolean);
-  const moneda = detectarMonedaLocal(partes[0] || "");
-  const monto = parseMontoFinancieroLocal(partes[0] || "");
-  const descripcion = partes[1] || (tipo === "GASTO" ? "Gasto registrado" : "Ingreso registrado");
-  const proyectoTexto = partes[2] || "";
-
-  const proy = detectarProyectoLocal(proyectoTexto || `${descripcion} ${texto}`);
-  const montoCRC = moneda === "USD" ? Math.round(monto * TIPO_CAMBIO_USD) : monto;
-
-  return [{
-    fecha: TODAY(),
-    monto: montoCRC,
-    monto_original: monto,
-    moneda,
-    tipo,
-    proyecto: proy.nombre || proyectoTexto || "SS Remodelaciones",
-    proyecto_codigo: proy.codigo || "SSR",
-    cliente: tipo === "INGRESO" ? (proy.nombre || proyectoTexto || "") : null,
-    categoria: tipo === "GASTO" ? categorizarGastoLocal(descripcion) : "Ingreso cliente",
-    descripcion,
-    proveedor: null,
-    forma_pago: "Transferencia",
-    responsable: null,
-    es_personal: false,
-    "pestaña_principal": tipo === "INGRESO" ? "INGRESOS_CLIENTES" : "GASTOS_PROYECTO",
-    pestanas_adicionales: ["CAJA_GENERAL"],
-    confianza: 90,
-    observaciones: moneda === "USD"
-      ? `Monto original: $${monto} USD (TC ₡${TIPO_CAMBIO_USD})${proyectoTexto ? ` | Proyecto detectado: ${proyectoTexto}` : ""}`
-      : (proyectoTexto ? `Proyecto detectado: ${proyectoTexto}` : null),
-  }];
+// ─── Clasificación determinística INGRESO / GASTO ────────────
+// Devuelve "INGRESO", "GASTO" o null (ambiguo).
+function clasificarTipoLocal(texto) {
+  const t = norm(texto);
+  const ingreso = /\b(ingreso|ingresos|me pagaron|nos pagaron|pagaron|cobre|cobro de|cobramos|abono del cliente|abonaron|deposito recibido|depositaron|transferencia recibida|recibi|recibimos)\b/.test(t);
+  const gasto = /\b(gasto|gaste|pague|compre|compra de|descuenta|desconta|rebaja|saca|vale|salida)\b/.test(t)
+    || /\bpago (?:de|a|al|del|para)\b/.test(t);
+  if (ingreso && !gasto) return "INGRESO";
+  if (gasto && !ingreso) return "GASTO";
+  if (ingreso && gasto) {
+    // "ingreso" gana: nadie dice "ingreso" para registrar un gasto
+    if (/\bingresos?\b/.test(t)) return "INGRESO";
+    return null;
+  }
+  return null;
 }
 
+// ─── Calidad de descripción ──────────────────────────────────
 const CONECTORES_SIN_CONTENIDO = new Set([
   "el","la","los","las","un","una","unos","unas","de","del","al","a","en",
   "para","por","con","y","o","que","su","sus","lo","le","se","es","son",
+  "nombre","monto","proyecto","cliente","srr","ssr",
 ]);
+
+function descripcionEsPobre(desc) {
+  if (!desc) return true;
+  const palabras = norm(desc).split(/\s+/).filter(w => w.length > 1 && !CONECTORES_SIN_CONTENIDO.has(w));
+  if (palabras.length < 1) return true;
+  // termina en preposición/artículo colgante → quedó cortada
+  if (/\b(de|del|para|por|en|al|a|el|la|un|una|nombre)\s*\.?$/i.test(String(desc).trim())) return true;
+  return false;
+}
+
+function repararDescripcion(mov, textoOriginal) {
+  if (!descripcionEsPobre(mov.descripcion)) return mov.descripcion;
+  const partes = [];
+  if (mov.categoria && mov.categoria !== "Gasto") partes.push(mov.categoria);
+  else partes.push(mov.tipo === "INGRESO" ? "Ingreso" : "Gasto");
+  if (mov.responsable) partes.push(mov.responsable);
+  else if (mov.cliente) partes.push(mov.cliente);
+  else if (mov.proyecto && mov.proyecto !== "SS Remodelaciones") partes.push(mov.proyecto);
+  else {
+    // último recurso: primeras palabras con contenido del mensaje original
+    const contenido = norm(textoOriginal).split(/\s+/)
+      .filter(w => w.length > 3 && !CONECTORES_SIN_CONTENIDO.has(w) && !/^\d/.test(w))
+      .slice(0, 4);
+    if (contenido.length) partes.push(contenido.join(" "));
+  }
+  return partes.join(" — ");
+}
 
 function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
   let desc = original;
@@ -456,6 +360,7 @@ function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
     .replace(/^(apunta|anota|anotame|registra|registrame|carga|cargame|descuenta|desconta|rebaja|saca|gasto|pago|pague|compr[eé]|compra|ingreso|me pagaron|pagaron|abono|abonaron)\b\s*/i, "")
     .replace(/\b(el|un|la|una)\s+(pago|gasto|ingreso|abono|adelanto)\s+de\b/ig, "")
     .replace(/\b(pague|pago|gasto|ingreso|abono|adelanto)\s+de\b/ig, "")
+    .replace(/\ben caja general\b/ig, "")
     .replace(/\bcolones?\b/ig, "")
     .trim();
 
@@ -479,69 +384,276 @@ function construirDescripcionLocal(original, raw, proyectoTextoExtraido) {
       .trim();
   } while (desc !== prev && desc.length > 0);
 
-  if (!desc) return null;
-
-  const palabrasConContenido = desc
-    .toLowerCase()
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .split(/\s+/)
-    .filter(w => w.length > 1 && !CONECTORES_SIN_CONTENIDO.has(w));
-
-  if (palabrasConContenido.length < 1) return null;
-
+  if (descripcionEsPobre(desc)) return null;
   return desc;
 }
 
+// ─── Filtro de comandos financieros ──────────────────────────
+function esComandoFinanciero(texto) {
+  if (!texto) return false;
+  const t = norm(texto);
+  return KEYWORDS_FINANZAS.some(kw => t.includes(norm(kw)));
+}
+
+// ─── Post-procesamiento común (moneda, cuenta, tipo, descripción) ──
+function postProcesarMovimiento(m, textoOriginal) {
+  const moneda = m.moneda === "USD" ? "USD" : "CRC";
+  const montoOriginal = Number(m.monto_original ?? m.monto) || 0;
+  const montoCRC = moneda === "USD" ? Math.round(montoOriginal * TIPO_CAMBIO_USD) : montoOriginal;
+
+  const out = {
+    ...m,
+    moneda,
+    monto: montoCRC,
+    monto_original: montoOriginal,
+    cuenta: m.cuenta || cuentaSegunMoneda(moneda),
+    tipo_cambio: moneda === "USD" ? TIPO_CAMBIO_USD : 1,
+  };
+
+  // 1) FORZAR tipo si el texto es inequívoco (aunque Claude diga otra cosa)
+  if (out.tipo !== "PLANILLA") {
+    const tipoLocal = clasificarTipoLocal(textoOriginal);
+    if (tipoLocal && tipoLocal !== out.tipo) {
+      out.tipo = tipoLocal;
+      out.observaciones = [(out.observaciones || ""), "Tipo corregido por regla local"].filter(Boolean).join(" | ");
+    }
+    if (out.tipo === "INGRESO") {
+      out["pestaña_principal"] = "INGRESOS_CLIENTES";
+      out.categoria = out.categoria && /ingreso/i.test(out.categoria) ? out.categoria : "Ingreso cliente";
+    } else if (out.tipo === "GASTO" && out["pestaña_principal"] === "INGRESOS_CLIENTES") {
+      out["pestaña_principal"] = "GASTOS_PROYECTO";
+    }
+  }
+
+  // 2) Guardia de trabajadores: vale/planilla para X (X = trabajador)
+  const trab = trabajadorEnContextoPlanilla(textoOriginal);
+  if (trab && out.tipo === "GASTO") {
+    out.responsable = out.responsable || trab.nombre;
+    out.categoria = "Mano de obra";
+    // si el proyecto detectado salió SOLO por el nombre del trabajador → SSR
+    const proySinTrab = detectarProyectoLocal(textoOriginal); // ya excluye el alias del trabajador
+    out.proyecto_codigo = proySinTrab.codigo;
+    out.proyecto = proySinTrab.nombre;
+    if (!out.descripcion || descripcionEsPobre(out.descripcion) || norm(out.descripcion) === "vale") {
+      out.descripcion = `Vale planilla ${trab.nombre.split(" ")[0]}`;
+    }
+  }
+
+  // 3) Reparar descripción pobre
+  out.descripcion = repararDescripcion(out, textoOriginal);
+
+  // 4) Observaciones de moneda
+  if (moneda === "USD") {
+    const nota = `Monto original: $${montoOriginal} USD (TC ₡${TIPO_CAMBIO_USD})`;
+    out.observaciones = out.observaciones ? `${nota} | ${out.observaciones}` : nota;
+  }
+
+  return out;
+}
+
+// ─── System prompt para Claude ───────────────────────────────
+const buildSystemPrompt = () => {
+  const proyectosCtx = PROYECTOS
+    .map(p => `- ${p.codigo}: ${p.nombre} (alias: ${p.alias.join(", ")})`)
+    .join("\n");
+  const trabajadoresCtx = TRABAJADORES
+    .map(w => `- ${w.nombre} (alias: ${w.alias.join(", ")})`)
+    .join("\n");
+
+  const mesActual   = getMesActual();
+  const diaSemana   = getDiaSemana();
+  const numSemana   = getSemanaDelMes();
+  const planillaMes = `PLANILLA_${mesActual}`;
+
+  return `Sos el agente financiero IA de SS Remodelaciones, empresa costarricense de construcción.
+
+PROYECTOS (activos y cerrados — ambos reciben gastos):
+${proyectosCtx}
+
+TRABAJADORES DE PLANILLA (NO son proyectos ni clientes):
+${trabajadoresCtx}
+
+CONTEXTO HOY: ${TODAY()} | Día: ${diaSemana} | Semana del mes: ${numSemana} | Mes planilla: ${planillaMes}
+
+REGLAS DE INTERPRETACIÓN:
+- NÚMEROS COSTARRICENSES: punto = separador de miles → "4.500"=4500, "1.200.000"=1200000
+- "X mil" = X*1000. "medio millón" = 500000
+- MONEDA: si el mensaje menciona "usd", "dólares", "dolares" o "$" antes/después del número,
+  el monto está en USD. Devolvé "moneda": "USD" y "monto" en USD (NO conviertas).
+  Si no se menciona moneda extranjera, asumí colones y "moneda": "CRC".
+- Sin fecha = hoy: ${TODAY()}
+- Detectá proyecto por nombre o alias EN CUALQUIER PARTE del mensaje, incluso con errores
+  de tipeo leves. Si no encontrás el proyecto por ningún alias → proyecto_codigo = "SSR".
+- Gastos operativos sin proyecto claro → proyecto_codigo = "SSR"
+- SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales (excepto planillas de horas)
+
+REGLA CRÍTICA #1 — INGRESO vs GASTO (la regla MÁS importante):
+Si el mensaje contiene la palabra "ingreso", o describe dinero que ENTRA a SS
+Remodelaciones ("me pagaron", "cobré", "el cliente abonó", "pago de visita técnica
+DEL cliente", "adelanto del cliente"), es SIEMPRE tipo="INGRESO" con
+pestaña_principal="INGRESOS_CLIENTES". NUNCA lo marques como GASTO.
+"A nombre de SSR" indica el PROYECTO al que se asocia — NO cambia ingreso/gasto.
+Ejemplo obligatorio:
+  "Apunta el ingreso de 25.000 de José Guillermo Flores por visita técnica a nombre de SSR"
+  → {"tipo":"INGRESO","monto":25000,"cliente":"José Guillermo Flores",
+     "descripcion":"Visita técnica — cobro","proyecto_codigo":"SSR",
+     "pestaña_principal":"INGRESOS_CLIENTES"}
+
+REGLA CRÍTICA #2 — VALES Y PLANILLA A TRABAJADORES:
+Si el mensaje dice "vale para [nombre]", "pago de planilla a [nombre]", "adelanto a
+[nombre]" y [nombre] está en la lista de TRABAJADORES, entonces:
+- Es un GASTO, categoria="Mano de obra", responsable=[nombre completo del trabajador]
+- El proyecto es "SSR" SALVO que el mensaje mencione EXPLÍCITAMENTE otro proyecto
+  ("vale para Christhian en el proyecto de Miriam" → PROY 043/2026).
+- El nombre del trabajador NUNCA sirve para detectar el proyecto. "Vale para
+  Christhian" NO es el proyecto del cliente Christian Alfaro.
+- descripcion = "Vale planilla [nombre]" o "Pago planilla [nombre]"
+
+REGLA CRÍTICA #3 — CALIDAD DE DESCRIPCIÓN:
+La descripción debe ser un resumen claro de 3-8 palabras del MOTIVO ("Transporte
+operarios Marriott", "Materiales gypsum", "Vale planilla Fernando"). PROHIBIDO
+devolver fragmentos sueltos como "el", "nombre", "Yader en el". Si dudás,
+construíla como "[Categoría] [persona o proyecto]".
+
+REGLAS PARA PLANILLA (cuando alguien dice "X trabajó N horas"):
+- tipo = "PLANILLA"
+- pestaña_principal = "${planillaMes}"
+- pestanas_adicionales = ["BASE_PLANILLA"] (sin CAJA_GENERAL, el monto se calcula después)
+- monto = 0
+- horas = número de horas trabajadas (campo extra obligatorio)
+- dia_semana = "${diaSemana}" | num_semana = ${numSemana}
+- vale_colones = monto del vale si hay, 0 si no
+- Cada trabajador = un objeto separado en el array
+- Si hay vale, agregá UN objeto extra de tipo GASTO: descripcion="Vale planilla [nombre]",
+  monto=[vale], categoria="Mano de obra", pestaña_principal="GASTOS_PROYECTO",
+  pestanas_adicionales=["CAJA_GENERAL"]
+
+REGLA CRÍTICA #4 — pago de planilla SIN mención de horas trabajadas:
+"pago de planilla a [nombre] por [monto]" sin horas = VALE/ADELANTO (GASTO real con
+monto real, categoria "Mano de obra"). NUNCA tipo="PLANILLA" con monto=0 — el gasto
+desaparecería en silencio.
+
+PESTAÑAS VÁLIDAS — SOLO ESTOS NOMBRES:
+- "GASTOS_PROYECTO" → cualquier gasto
+- "INGRESOS_CLIENTES" → pago de cliente
+- "${planillaMes}" → registro de horas trabajadas
+- "BASE_PLANILLA" → copia plana de planilla
+- "INVENTARIO" → compra para bodega
+- "SUBCONTRATOS" → pago a subcontratista
+
+INSTRUCCIONES MÚLTIPLES: siempre devolvés un ARRAY JSON. Un objeto por operación o trabajador.
+
+Formato objeto gasto/ingreso:
+{
+  "fecha": "${TODAY()}",
+  "monto": 45000,
+  "moneda": "CRC",
+  "tipo": "GASTO",
+  "proyecto": "nombre o SS Remodelaciones",
+  "proyecto_codigo": "PROY XXX/YYYY o SSR",
+  "cliente": null,
+  "categoria": "Transporte",
+  "descripcion": "3-8 palabras claras",
+  "proveedor": null,
+  "forma_pago": "Transferencia",
+  "responsable": null,
+  "es_personal": false,
+  "pestaña_principal": "GASTOS_PROYECTO",
+  "pestanas_adicionales": ["CAJA_GENERAL"],
+  "confianza": 95,
+  "observaciones": null
+}
+
+Formato objeto planilla:
+{
+  "fecha": "${TODAY()}", "monto": 0, "moneda": "CRC", "horas": 9,
+  "dia_semana": "${diaSemana}", "num_semana": ${numSemana}, "vale_colones": 0,
+  "tipo": "PLANILLA", "proyecto": "nombre o SS Remodelaciones",
+  "proyecto_codigo": "PROY XXX/YYYY o SSR", "categoria": "Mano de obra",
+  "descripcion": "Planilla Fernando - 9h ${diaSemana}", "responsable": "Fernando",
+  "proveedor": null, "forma_pago": null, "cliente": null, "es_personal": false,
+  "pestaña_principal": "${planillaMes}", "pestanas_adicionales": ["BASE_PLANILLA"],
+  "confianza": 95, "observaciones": null
+}
+
+Respondé ÚNICAMENTE con JSON array válido, sin markdown, sin texto extra.`;
+};
+
+// ─── Comando crudo [GASTO:...] / [INGRESO:...] ───────────────
+function extraerComandoFinancieroCrudo(texto) {
+  if (!texto) return null;
+  const m = String(texto).match(/\[(GASTO|INGRESO)\s*:\s*([^\]]+)\]/i);
+  if (!m) return null;
+
+  const tipo = m[1].toUpperCase();
+  const partes = m[2].split("|").map(p => p.trim()).filter(Boolean);
+  const moneda = detectarMonedaLocal(partes[0] || "");
+  const monto = parseMontoFinancieroLocal(partes[0] || "");
+  const descripcion = partes[1] || (tipo === "GASTO" ? "Gasto registrado" : "Ingreso registrado");
+  const proyectoTexto = partes[2] || "";
+
+  const proy = detectarProyectoLocal(proyectoTexto || `${descripcion} ${texto}`);
+
+  return [postProcesarMovimiento({
+    fecha: TODAY(),
+    monto,
+    monto_original: monto,
+    moneda,
+    tipo,
+    proyecto: proy.nombre || proyectoTexto || "SS Remodelaciones",
+    proyecto_codigo: proy.codigo || "SSR",
+    cliente: tipo === "INGRESO" ? (proy.nombre || proyectoTexto || null) : null,
+    categoria: tipo === "GASTO" ? categorizarGastoLocal(descripcion) : "Ingreso cliente",
+    descripcion,
+    proveedor: null,
+    forma_pago: "Transferencia",
+    responsable: null,
+    es_personal: false,
+    "pestaña_principal": tipo === "INGRESO" ? "INGRESOS_CLIENTES" : "GASTOS_PROYECTO",
+    pestanas_adicionales: ["CAJA_GENERAL"],
+    confianza: 90,
+    observaciones: proyectoTexto ? `Proyecto detectado: ${proyectoTexto}` : null,
+  }, texto)];
+}
+
+// ─── Parser natural local (mensajes cortos e inequívocos) ────
 const MAX_PALABRAS_PARSER_LOCAL = 11;
 
 function extraerMovimientoNaturalLocal(texto) {
   if (!texto) return null;
 
   const original = String(texto).trim();
-  const t = normalizarTextoFinancieroLocal(original);
-
-  const esGasto = /\b(gasto|gaste|pague|pago|compra|compre|descuenta|desconta|rebaja|saca)\b/.test(t);
-  const esIngreso = /\b(ingreso|me pagaron|pagaron|abono|abonaron|adelanto|deposito|depositaron|transferencia recibida)\b/.test(t);
-  const esComandoNeutro = /\b(apunta|anota|registra|carga)\b/.test(t);
-
-  if (!esGasto && !esIngreso && !esComandoNeutro) return null;
-
   const cantidadPalabras = original.split(/\s+/).filter(Boolean).length;
   if (cantidadPalabras > MAX_PALABRAS_PARSER_LOCAL) return null;
+
+  const tipo = clasificarTipoLocal(original);
+  const esComandoNeutro = /\b(apunta|anota|registra|carga)\b/.test(norm(original));
+  if (!tipo && !esComandoNeutro) return null;
+  if (!tipo) return null; // neutro sin tipo claro → que lo resuelva Claude
 
   const { raw, monto } = extraerMontoDeTextoFinanciero(original);
   if (!monto || monto <= 0 || !raw) return null;
 
   const moneda = detectarMonedaLocal(original);
-  const montoCRC = moneda === "USD" ? Math.round(monto * TIPO_CAMBIO_USD) : monto;
 
   let proyectoTexto = "";
   const pm = original.match(/\b(?:proyecto|obra|cliente)\s+(?:de\s+|del\s+)?([a-záéíóúñ0-9\s/.-]+?)(?:\s+(?:para|por|en|de)\b|$)/i);
   if (pm) proyectoTexto = pm[1].trim().replace(/[,.]+$/g, "").replace(/^(de|del)\s+/i, "");
 
   const desc = construirDescripcionLocal(original, raw, proyectoTexto);
+  if (!desc) return null; // descripción pobre → mejor que lo arme Claude
+
   const proy = detectarProyectoLocal(proyectoTexto || original);
 
-  let tipo;
-  if (esIngreso && !esGasto) {
-    tipo = "INGRESO";
-  } else if (esGasto && !esIngreso) {
-    tipo = "GASTO";
-  } else {
-    return null; // ambiguo → fallback a Claude
-  }
-
-  if (!desc) return null;
-
-  return [{
+  return [postProcesarMovimiento({
     fecha: TODAY(),
-    monto: montoCRC,
+    monto,
     monto_original: monto,
     moneda,
     tipo,
     proyecto: proy.nombre || proyectoTexto || "SS Remodelaciones",
     proyecto_codigo: proy.codigo || "SSR",
-    cliente: tipo === "INGRESO" ? (proy.nombre || proyectoTexto || "") : null,
+    cliente: tipo === "INGRESO" ? (proy.nombre || proyectoTexto || null) : null,
     categoria: tipo === "GASTO" ? categorizarGastoLocal(desc) : "Ingreso cliente",
     descripcion: desc,
     proveedor: null,
@@ -551,16 +663,15 @@ function extraerMovimientoNaturalLocal(texto) {
     "pestaña_principal": tipo === "INGRESO" ? "INGRESOS_CLIENTES" : "GASTOS_PROYECTO",
     pestanas_adicionales: ["CAJA_GENERAL"],
     confianza: 95,
-    observaciones: moneda === "USD"
-      ? `Monto original: $${monto} USD (TC ₡${TIPO_CAMBIO_USD})${proyectoTexto ? ` | Proyecto detectado: ${proyectoTexto}` : ""}`
-      : (proyectoTexto ? `Proyecto detectado: ${proyectoTexto}` : null),
-  }];
+    observaciones: proyectoTexto ? `Proyecto detectado: ${proyectoTexto}` : null,
+  }, original)];
 }
 
+// ─── Interpretación con Claude + corrección local ────────────
 async function interpretarMovimientos(texto) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const response = await client.messages.create({
-    model: process.env.ANTHROPIC_FINANCE_MODEL || "claude-sonnet-4-5-20250929",
+    model: process.env.ANTHROPIC_FINANCE_MODEL || "claude-sonnet-4-6",
     max_tokens: 1500,
     system: buildSystemPrompt(),
     messages: [{ role: "user", content: texto }],
@@ -570,22 +681,12 @@ async function interpretarMovimientos(texto) {
   const parsed = JSON.parse(clean);
   const movimientos = Array.isArray(parsed) ? parsed : [parsed];
 
-  return movimientos.map(m => {
-    const moneda = m.moneda === "USD" ? "USD" : "CRC";
-    const montoOriginal = Number(m.monto) || 0;
-    const montoCRC = moneda === "USD" ? Math.round(montoOriginal * TIPO_CAMBIO_USD) : montoOriginal;
-    return {
-      ...m,
-      moneda,
-      monto: montoCRC,
-      monto_original: montoOriginal,
-      observaciones: moneda === "USD"
-        ? `Monto original: $${montoOriginal} USD (TC ₡${TIPO_CAMBIO_USD})${m.observaciones ? ` | ${m.observaciones}` : ""}`
-        : (m.observaciones || null),
-    };
-  });
+  // Todo lo que devuelve Claude pasa por la corrección determinística:
+  // tipo, cuenta, descripción, moneda, trabajador vs proyecto.
+  return movimientos.map(m => postProcesarMovimiento(m, texto));
 }
 
+// ─── Registro en Sheets ──────────────────────────────────────
 async function registrarEnSheets(data) {
   if (!APPS_SCRIPT_URL) return { success: true, simulated: true };
   const res = await fetch(APPS_SCRIPT_URL, {
@@ -606,6 +707,7 @@ function formatCRC(n) {
   return `₡${Number(n).toLocaleString("es-CR")}`;
 }
 
+// ─── Confirmación WhatsApp ───────────────────────────────────
 function generarConfirmacionItem(data, index, total) {
   const tipos = {
     GASTO:      { emoji: "💸", label: "Gasto" },
@@ -629,17 +731,20 @@ function generarConfirmacionItem(data, index, total) {
     } else {
       lineas.push(`💵 *${formatCRC(data.monto)}*`);
     }
+    lineas.push(`🏦 ${data.cuenta || "BAC CRC"}`);
     if (data.proyecto_codigo && data.proyecto_codigo !== "SSR")
       lineas.push(`🏗️ ${data.proyecto_codigo}`);
-    else if (data.proyecto_codigo === "SSR")
+    else
       lineas.push(`🏢 SSR`);
-    if (data.cliente) lineas.push(`👤 ${data.cliente}`);
+    if (data.cliente)     lineas.push(`👤 ${data.cliente}`);
+    if (data.responsable) lineas.push(`👷 ${data.responsable}`);
   }
   lineas.push(`📊 ${data.pestaña_principal}`);
   if (data.observaciones) lineas.push(`📌 ${data.observaciones}`);
   return lineas.join("\n");
 }
 
+// ─── Pipeline principal ──────────────────────────────────────
 async function procesarComandoFinanciero(texto) {
   if (!esComandoFinanciero(texto)) return null;
 
@@ -665,7 +770,7 @@ async function procesarComandoFinanciero(texto) {
       try {
         const resultado = await registrarEnSheets({
           ...datos,
-          audit_id: `SSR-${Date.now()}`,
+          audit_id: `SSR-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           canal: "whatsapp",
         });
 
@@ -713,18 +818,20 @@ CONTEXTO HOY: ${TODAY()}
 PROYECTOS (para detectar si el "Detalle" menciona alguno):
 ${PROYECTOS.map(p => `- ${p.codigo}: ${p.nombre} (alias: ${p.alias.join(", ")})`).join("\n")}
 
+TRABAJADORES (si el detalle menciona a uno, es "Mano de obra", responsable=trabajador,
+y su nombre NO sirve para detectar proyecto):
+${TRABAJADORES.map(w => `- ${w.nombre} (alias: ${w.alias.join(", ")})`).join("\n")}
+
 CÓMO LEER LA NOTIFICACIÓN:
 - "SOLO SENSO SOCIEDAD ANONIMA realizó una transferencia..." → SALIDA de dinero (GASTO).
 - "...recibió una transferencia..." o similar → ENTRADA (INGRESO).
 - "Monto debitado" en $ (dólares) → la cuenta de origen es "BAC USD".
 - "Monto debitado" en ₡ (colones) → la cuenta de origen es "BAC CRC".
-- Si ADEMÁS aparece "Monto enviado" en ₡, ESE es el monto real del gasto en colones
-  (lo que efectivamente costó), aunque la cuenta se haya debitado en dólares por
-  conversión. Usá ese monto con moneda="CRC" — la cuenta queda "BAC USD" igual.
+- Si ADEMÁS aparece "Monto enviado" en ₡, ESE es el monto real del gasto en colones,
+  aunque la cuenta se haya debitado en dólares por conversión. Usá ese monto con
+  moneda="CRC" — la cuenta queda "BAC USD" igual.
 - Si NO hay "Monto enviado" separado, usá "Monto debitado" tal cual, con su moneda.
 - "Detalle" = descripción/motivo. Usalo para "descripcion" y para detectar proyecto.
-- Si el detalle menciona "planilla", "vale", o un nombre de trabajador sin proyecto
-  claro → categoria "Mano de obra", proyecto_codigo "SSR" salvo que mencione proyecto.
 
 Devolvé SOLO este JSON (un objeto, no array):
 {
@@ -750,7 +857,7 @@ Si la imagen no es una notificación bancaria legible, devolvé:
 Respondé ÚNICAMENTE con el JSON, sin markdown, sin texto extra.`;
 
   const response = await client.messages.create({
-    model: process.env.ANTHROPIC_FINANCE_MODEL || "claude-sonnet-4-5-20250929",
+    model: process.env.ANTHROPIC_FINANCE_MODEL || "claude-sonnet-4-6",
     max_tokens: 1000,
     system: systemPrompt,
     messages: [{
@@ -768,11 +875,7 @@ Respondé ÚNICAMENTE con el JSON, sin markdown, sin texto extra.`;
 
   if (parsed.error) return { error: parsed.error };
 
-  const moneda        = parsed.moneda === "USD" ? "USD" : "CRC";
-  const montoOriginal  = Number(parsed.monto) || 0;
-  const montoCRC       = moneda === "USD" ? Math.round(montoOriginal * TIPO_CAMBIO_USD) : montoOriginal;
-
-  return { ...parsed, moneda, monto: montoCRC, monto_original: montoOriginal };
+  return postProcesarMovimiento(parsed, textoAdicional || parsed.descripcion || "");
 }
 
 async function procesarComprobanteImagen(imageBase64, mimeType, textoAdicional) {
