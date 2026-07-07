@@ -36,6 +36,21 @@
  *   como comprobante bancario (SINPE/BAC) ANTES de cualquier otro flujo.
  *   Si la imagen no es un comprobante reconocible, cae al flujo normal
  *   (foto de obra, conversación con Claude, etc.) sin interrumpir nada.
+ *
+ * ── CAMBIOS v5 — SANITIZACIÓN DE ERRORES DEL WEBHOOK (Apps Script) ────────────
+ * BUG: cuando el webhook de Apps Script devuelve error (404 por URL de
+ *   implementación vieja, redirect de login, etc.), finanzas.js incrusta el
+ *   HTML completo de Google en el mensaje de error, y Sasha se lo mandaba
+ *   tal cual al supervisor (páginas enteras de <!DOCTYPE html>... en WhatsApp).
+ * FIX: sanitizarRespuestaFinanciera() detecta HTML en cualquier respuesta
+ *   financiera ANTES de enviarla por WhatsApp y la reemplaza por un mensaje
+ *   corto y accionable. El HTML crudo queda solo en los logs de Railway para
+ *   diagnóstico. Se aplica en TODOS los puntos de salida financieros:
+ *   comprobantes por imagen (v4), finanzas naturales (PASO 1B) y comandos
+ *   estructurados [GASTO]/[INGRESO].
+ * BONUS: corregido doble-escape en registrarFinanzasConCopia /
+ *   extraerComandoEstructurado ("\\n" literal en mensajes de ayuda y regex
+ *   /\\]\\s*$/ que nunca quitaba el "]" final del comando).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -67,6 +82,41 @@ function desenvolverInstruccionVoz(texto) {
   if (!texto) return texto;
   const m = texto.match(/^\[Instrucci[oó]n de voz de supervisor\s*\([^)]*\):\s*"([\s\S]*)"\]$/i);
   return m ? m[1].trim() : texto;
+}
+
+// ── NUEVO v5 — Sanitizar respuestas financieras antes de enviarlas ───────────
+// Si el webhook de Apps Script falla (404 por URL de implementación vieja,
+// redirect de login de Google, error 500, etc.), finanzas.js puede devolver
+// un error que incluye el HTML completo de la página de Google. Enviar eso
+// por WhatsApp es ilegible y confunde al supervisor. Esta función detecta
+// HTML en la respuesta y lo reemplaza por un mensaje corto y accionable.
+// El detalle técnico completo queda en los logs de Railway.
+function sanitizarRespuestaFinanciera(respuesta) {
+  if (!respuesta) return respuesta;
+
+  const contieneHTML = /<!DOCTYPE|<html|<head|<body|<meta\s/i.test(respuesta);
+
+  if (!contieneHTML) {
+    // Aun sin HTML, truncar errores absurdamente largos por si acaso.
+    return respuesta.length > 1500 ? respuesta.slice(0, 1500) + "…" : respuesta;
+  }
+
+  // Loguear el error crudo para diagnóstico (solo los primeros 500 chars).
+  console.error("⚠️ Webhook Apps Script devolvió HTML (URL rota o sin acceso):", respuesta.slice(0, 500));
+
+  return [
+    "❌ *Error de conexión con el ERP*",
+    "",
+    "El movimiento se interpretó bien, pero no se pudo guardar en la planilla.",
+    "Causa probable: la URL del webhook de Apps Script cambió o la implementación no está publicada.",
+    "",
+    "🔧 *Cómo arreglarlo:*",
+    "1. Apps Script → Implementar → Administrar implementaciones",
+    "2. Copiar la URL /exec de la implementación activa",
+    "3. Actualizar la variable en Railway y redeploy",
+    "",
+    "⚠️ Registrá este movimiento manualmente en la planilla mientras tanto.",
+  ].join("\n");
 }
 
 // Envía una copia de la confirmación financiera a Darwin cuando OTRO supervisor
@@ -142,7 +192,7 @@ function fmtColones(n) {
 
 function extraerComandoEstructurado(cmd, tipo) {
   const re = new RegExp("^\\[" + tipo + ":\\s*", "i");
-  return String(cmd || "").replace(re, "").replace(/\\]\\s*$/, "").trim();
+  return String(cmd || "").replace(re, "").replace(/\]\s*$/, "").trim();
 }
 
 async function registrarFinanzasConCopia(tipo, cmd, supervisorPhone) {
@@ -150,26 +200,27 @@ async function registrarFinanzasConCopia(tipo, cmd, supervisorPhone) {
     const contenido = extraerComandoEstructurado(cmd, tipo);
     if (!contenido) {
       return tipo === "GASTO"
-        ? "⚠️ Formato correcto:\\n`[GASTO: 50000 | descripción | proyecto opcional]`"
-        : "⚠️ Formato correcto:\\n`[INGRESO: 50000 | descripción | proyecto opcional]`";
+        ? "⚠️ Formato correcto:\n`[GASTO: 50000 | descripción | proyecto opcional]`"
+        : "⚠️ Formato correcto:\n`[INGRESO: 50000 | descripción | proyecto opcional]`";
     }
 
     const comando = `[${tipo}: ${contenido}]`;
     const respuesta = await procesarComandoFinanciero(comando);
 
     if (!respuesta) {
-      return `⚠️ No pude interpretar el ${tipo.toLowerCase()}. Probá con:\\n${comando}`;
+      return `⚠️ No pude interpretar el ${tipo.toLowerCase()}. Probá con:\n${comando}`;
     }
 
-    return respuesta;
+    // v5: nunca dejar pasar HTML del webhook hacia WhatsApp
+    return sanitizarRespuestaFinanciera(respuesta);
   } catch (err) {
     console.error(`❌ registrarFinanzasConCopia ${tipo}:`, err.message, err.stack);
-    return `❌ No se pudo registrar el ${tipo.toLowerCase()}: ${err.message}`;
+    return sanitizarRespuestaFinanciera(`❌ No se pudo registrar el ${tipo.toLowerCase()}: ${err.message}`);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// HANDLER — [GASTO: monto | descripcion | proyecto?]
+// HANDLER — [GASTO: monto | descripcion]
 // ═══════════════════════════════════════════════════════════════════════════════
 async function handleGasto(cmd, supervisorPhone) {
   return await registrarFinanzasConCopia("GASTO", cmd, supervisorPhone);
@@ -474,8 +525,10 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         const respuestaComprobante = await procesarComprobanteImagen(imgData.base64, imgData.mimeType, normalized);
 
         if (respuestaComprobante && !respuestaComprobante.startsWith("📭")) {
-          await sendText(from, respuestaComprobante);
-          await copiaFinancieraADarwin(fromE164, respuestaComprobante);
+          // v5: nunca mandar HTML del webhook al chat
+          const respuestaLimpia = sanitizarRespuestaFinanciera(respuestaComprobante);
+          await sendText(from, respuestaLimpia);
+          await copiaFinancieraADarwin(fromE164, respuestaLimpia);
           return;
         }
         // Si no era comprobante bancario, seguimos al flujo normal (foto de obra, chat, etc.)
@@ -517,8 +570,10 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(textoFinanciero)) {
       const respuesta = await procesarComandoFinanciero(textoFinanciero);
       if (respuesta) {
-        await sendText(from, respuesta);
-        await copiaFinancieraADarwin(fromE164, respuesta);
+        // v5: nunca mandar HTML del webhook al chat
+        const respuestaLimpia = sanitizarRespuestaFinanciera(respuesta);
+        await sendText(from, respuestaLimpia);
+        await copiaFinancieraADarwin(fromE164, respuestaLimpia);
         return;
       }
     }
