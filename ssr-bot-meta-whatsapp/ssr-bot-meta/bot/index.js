@@ -37,6 +37,21 @@
  *   Si la imagen no es un comprobante reconocible, cae al flujo normal
  *   (foto de obra, conversación con Claude, etc.) sin interrumpir nada.
  *
+ * ── CAMBIOS v6 — LENGUAJE NATURAL FINANCIERO DIRECTO A FINANZAS.JS ────────────
+ * BUG: el PASO 1 usaba memoria.detectarComandoVoz() para convertir frases
+ *   naturales a comandos [GASTO: ...] con regex ANTES de llegar a finanzas.js.
+ *   Ese pre-parser masticaba mal los mensajes: "Registra en el proyecto de
+ *   Christian la compra de Herrajes de muebles por 89.535,27 Colones" terminó
+ *   con descripción ",27", proyecto SSR (perdió "proyecto de Christian") y
+ *   monto sin decimales — porque el comando estructurado resultante se procesa
+ *   con el parser local simple y NUNCA pasa por Claude.
+ * FIX: se elimina la conversión del PASO 1. Todo lenguaje natural financiero
+ *   va directo a finanzas.js (procesarComandoFinanciero), que decide solo:
+ *   parser local para mensajes cortos e inequívocos, Claude con contexto
+ *   completo de proyectos/trabajadores para todo lo demás. Los comandos
+ *   estructurados [GASTO:]/[INGRESO:] escritos a mano siguen funcionando
+ *   igual (PASO 3).
+ *
  * ── CAMBIOS v5 — SANITIZACIÓN DE ERRORES DEL WEBHOOK (Apps Script) ────────────
  * BUG: cuando el webhook de Apps Script devuelve error (404 por URL de
  *   implementación vieja, redirect de login, etc.), finanzas.js incrusta el
@@ -552,21 +567,14 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // de "esto es audio de supervisor" sigue siendo útil.
     const textoFinanciero = desenvolverInstruccionVoz(normalized);
 
-    // ── PASO 1: Normalizar comandos de voz (audio transcrito) ─────────────────
-    // Si el texto viene de un audio transcrito en lenguaje natural,
-    // lo convierte al formato de comando estructurado.
-    // Ejemplo: "gasto de cincuenta mil en materiales" → "[GASTO: 50000 | materiales]"
-    let cmd = normalized;
-    const cmdVoz = memoria.detectarComandoVoz(textoFinanciero);
-    if (cmdVoz) {
-      cmd = `[${cmdVoz.tipo}: ${cmdVoz.payload}]`;
-      console.log(`🎙️ Comando voz normalizado: "${textoFinanciero}" → "${cmd}"`);
-    }
+    // ── PASO 1 (v6): Finanzas en lenguaje natural → DIRECTO a finanzas.js ─────
+    // Ya NO se pre-convierte con memoria.detectarComandoVoz() — ese pre-parser
+    // de regex masticaba mal los mensajes (descripción ",27", proyecto perdido)
+    // y el comando resultante se saltaba a Claude. finanzas.js decide solo:
+    // parser local para mensajes cortos e inequívocos, Claude con contexto
+    // completo de proyectos para todo lo demás.
+    const cmd = normalized;
 
-    // ── PASO 1B: Finanzas naturales como respaldo ─────────────────────────────
-    // Si memoria.js no lo convirtió, finanzas.js puede interpretar:
-    // "descuenta 200mil de gas y aceite para Pick Up, proyecto Marriot"
-    // y registrarlo en Apps Script.
     if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(textoFinanciero)) {
       const respuesta = await procesarComandoFinanciero(textoFinanciero);
       if (respuesta) {
