@@ -82,7 +82,7 @@ const { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImage
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
 // ── Constantes ────────────────────────────────────────────────────────────────
-const SUPERVISORES = ["+50683091817", "+50671981370"];
+const SUPERVISORES = ["+50683091817", "+50671981370", "+50671951695"];
 
 // Número de Darwin — recibe copia de todo movimiento financiero registrado por otros.
 const DARWIN_PHONE = "+50683091817";
@@ -137,11 +137,13 @@ function sanitizarRespuestaFinanciera(respuesta) {
 // Envía una copia de la confirmación financiera a Darwin cuando OTRO supervisor
 // (ej: Melvin) registra un gasto/ingreso. Si lo registró Darwin, no se duplica.
 async function copiaFinancieraADarwin(quienRegistro, respuesta) {
-  if (quienRegistro === DARWIN_PHONE) return;
-  if (!respuesta) return;
-  const esConfirmacion = /^[✅💸💰]/.test(respuesta.trim());
-  if (!esConfirmacion) return;
-  // ...
+  if (quienRegistro === DARWIN_PHONE) return;            // no copiar lo propio
+  if (!respuesta || !respuesta.startsWith("✅")) return;  // solo registros exitosos
+  const quien = nombreSupervisor(quienRegistro);
+  const copia = `📋 *Copia — movimiento registrado por ${quien}*\n\n${respuesta}`;
+  sendText(DARWIN_PHONE, copia).catch(err =>
+    console.warn("⚠️ No se pudo enviar copia financiera a Darwin:", err.message)
+  );
 }
 
 // Planilla madre del sistema operativo SSR
