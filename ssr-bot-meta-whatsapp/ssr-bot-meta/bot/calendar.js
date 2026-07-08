@@ -107,6 +107,31 @@ async function getCalendarClient() {
   return google.calendar({ version: "v3", auth });
 }
 
+// ── NUEVO v7: extraer teléfono del cliente de la descripción del evento ──────
+// Los eventos creados por Sasha llevan "📱 WhatsApp: +506XXXXXXXX" en la
+// descripción. Esto permite notificar al cliente cuando un supervisor
+// cancela o reagenda su cita.
+function extraerTelefonoDeEvento(description) {
+  if (!description) return null;
+  const m = description.match(/WhatsApp:\s*\+?(\d{8,15})/i);
+  if (m) {
+    const digits = m[1];
+    return digits.startsWith("506") ? `+${digits}` : `+506${digits}`;
+  }
+  // fallback: cualquier número de 11+ dígitos que empiece con 506
+  const m2 = description.match(/\+?(506\d{8})/);
+  return m2 ? `+${m2[1]}` : null;
+}
+
+// ── Formatear fecha de evento para mensajes ──────────────────────────────────
+function formatearFechaEvento(startRaw) {
+  return new Date(startRaw).toLocaleString("es-CR", {
+    timeZone: "America/Costa_Rica",
+    weekday: "long", day: "numeric", month: "long",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // getAvailableSlots — verifica disponibilidad real incluyendo eventos manuales
 // ─────────────────────────────────────────────────────────────────────────────
@@ -214,12 +239,10 @@ async function cancelClientEvents(calendar, phone) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// cancelEventByNameAndDate
-// Busca y elimina eventos por nombre de cliente y/o fecha.
-// Usado por supervisores (Darwin / Melvin) via WhatsApp.
-// ─────────────────────────────────────────────────────────────────────────────
-async function cancelEventByNameAndDate({ nameHint, dateHint }) {
+// ── Búsqueda común de eventos por nombre y/o fecha ───────────────────────────
+// Usada por cancelar, reagendar y consultar. Devuelve eventos "matched" con
+// datos ya extraídos (teléfono del cliente incluido).
+async function buscarEventos({ nameHint, dateHint }) {
   const calendar = await getCalendarClient();
 
   const now    = new Date();
@@ -252,11 +275,6 @@ async function cancelEventByNameAndDate({ nameHint, dateHint }) {
 
   const events = (response.data.items || []).filter(e => e.status !== "cancelled");
 
-  if (events.length === 0) {
-    return { deleted: 0, events: [] };
-  }
-
-  // Filtro adicional por nombre en summary y description
   const normalizeStr = s => (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const hintNorm = normalizeStr(nameHint || "");
 
@@ -267,6 +285,19 @@ async function cancelEventByNameAndDate({ nameHint, dateHint }) {
       )
     : events;
 
+  return { calendar, matched };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cancelEventByNameAndDate
+// Busca y elimina eventos por nombre de cliente y/o fecha.
+// Usado por supervisores (Darwin / Melvin) via WhatsApp.
+// v7: ahora devuelve también el teléfono del cliente de cada evento
+// eliminado, para poder notificarle automáticamente.
+// ─────────────────────────────────────────────────────────────────────────────
+async function cancelEventByNameAndDate({ nameHint, dateHint }) {
+  const { calendar, matched } = await buscarEventos({ nameHint, dateHint });
+
   if (matched.length === 0) {
     return { deleted: 0, events: [] };
   }
@@ -274,11 +305,7 @@ async function cancelEventByNameAndDate({ nameHint, dateHint }) {
   const deleted = [];
   for (const event of matched) {
     const startRaw = event.start.dateTime || event.start.date;
-    const dateStr  = new Date(startRaw).toLocaleString("es-CR", {
-      timeZone: "America/Costa_Rica",
-      weekday: "long", day: "numeric", month: "long",
-      hour: "2-digit", minute: "2-digit",
-    });
+    const dateStr  = formatearFechaEvento(startRaw);
 
     await calendar.events.delete({
       calendarId: process.env.GOOGLE_CALENDAR_ID,
@@ -287,10 +314,172 @@ async function cancelEventByNameAndDate({ nameHint, dateHint }) {
     });
 
     console.log(`🗑️ Evento cancelado por supervisor: "${event.summary}" (${dateStr})`);
-    deleted.push({ summary: event.summary, dateStr });
+    deleted.push({
+      summary:     event.summary,
+      dateStr,
+      clientPhone: extraerTelefonoDeEvento(event.description),
+    });
   }
 
   return { deleted: deleted.length, events: deleted };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NUEVO v7 — rescheduleEventByNameAndDate
+// Busca un evento por nombre y/o fecha actual, y lo mueve a una nueva
+// fecha/hora. Usado por supervisores via WhatsApp:
+//   "cambia la cita de Gabriela para el viernes a las 10"
+//   "mueve la visita del martes al 15 de julio a las 2pm"
+//
+// Si hay más de un evento que coincide, NO mueve nada y devuelve la lista
+// para que el supervisor especifique mejor (evita mover la cita equivocada).
+// ─────────────────────────────────────────────────────────────────────────────
+async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, newHour }) {
+  const { calendar, matched } = await buscarEventos({ nameHint, dateHint });
+
+  if (matched.length === 0) {
+    return { moved: 0, ambiguous: false, events: [] };
+  }
+
+  if (matched.length > 1) {
+    // Ambiguo: devolver candidatos sin tocar nada
+    const candidatos = matched.map(e => ({
+      summary: e.summary,
+      dateStr: formatearFechaEvento(e.start.dateTime || e.start.date),
+    }));
+    return { moved: 0, ambiguous: true, events: candidatos };
+  }
+
+  const event = matched[0];
+  const oldDateStr = formatearFechaEvento(event.start.dateTime || event.start.date);
+
+  // ── Resolver nueva fecha ───────────────────────────────────────────────────
+  let nuevaFecha = newDateHint ? resolveDateHint(newDateHint) : null;
+
+  if (!nuevaFecha && !newHour) {
+    return { moved: 0, ambiguous: false, events: [], error: "sin_nueva_fecha" };
+  }
+
+  // Si solo cambia la hora, mantener el día actual del evento
+  if (!nuevaFecha) {
+    nuevaFecha = new Date(new Date(event.start.dateTime || event.start.date)
+      .toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  }
+
+  // ── Resolver nueva hora ────────────────────────────────────────────────────
+  let hour = 9, minute = 0;
+  if (newHour) {
+    const parsed = parsearHora(newHour);
+    hour   = parsed.hour;
+    minute = parsed.minute;
+  } else if (event.start.dateTime) {
+    // Mantener la hora original del evento (en hora CR)
+    const minCR = toCRMinutes(event.start.dateTime);
+    hour   = Math.floor(minCR / 60);
+    minute = minCR % 60;
+  }
+
+  nuevaFecha.setHours(hour, minute, 0, 0);
+
+  // Validar que la nueva fecha sea futura
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  if (nuevaFecha <= now) {
+    return { moved: 0, ambiguous: false, events: [], error: "fecha_pasada" };
+  }
+
+  const nuevoFin = new Date(nuevaFecha.getTime() + 60 * 60 * 1000);
+
+  await calendar.events.patch({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    eventId:    event.id,
+    resource: {
+      start: { dateTime: toLocalDateTimeString(nuevaFecha), timeZone: "America/Costa_Rica" },
+      end:   { dateTime: toLocalDateTimeString(nuevoFin),   timeZone: "America/Costa_Rica" },
+    },
+    sendUpdates: "none",
+  });
+
+  const newDateStr = nuevaFecha.toLocaleString("es-CR", {
+    timeZone: "America/Costa_Rica",
+    weekday: "long", day: "numeric", month: "long",
+    hour: "2-digit", minute: "2-digit",
+  });
+
+  console.log(`🔄 Evento reagendado por supervisor: "${event.summary}" ${oldDateStr} → ${newDateStr}`);
+
+  return {
+    moved: 1,
+    ambiguous: false,
+    events: [{
+      summary:     event.summary,
+      oldDateStr,
+      newDateStr,
+      clientPhone: extraerTelefonoDeEvento(event.description),
+    }],
+  };
+}
+
+// ── Parsear hora en formatos comunes: "10:00", "10", "2pm", "2:30 pm", "14.30"
+function parsearHora(str) {
+  const s = String(str || "").trim().toLowerCase();
+  const m = s.match(/(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?/);
+  if (!m) return { hour: 9, minute: 0 };
+
+  let hour   = parseInt(m[1]) || 9;
+  const minute = parseInt(m[2]) || 0;
+  const sufijo = m[3] || "";
+
+  if (/p/.test(sufijo) && hour < 12) hour += 12;
+  if (/a/.test(sufijo) && hour === 12) hour = 0;
+  // Sin sufijo: horas 1-6 se asumen de la tarde (nadie agenda visitas a las 2am)
+  if (!sufijo && hour >= 1 && hour <= 6) hour += 12;
+
+  if (hour < 7)  hour = 9;
+  if (hour > 17) hour = 16;
+
+  return { hour, minute };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NUEVO v7 — listUpcomingEvents
+// Lista las citas próximas (opcionalmente de un día específico) para que el
+// supervisor consulte la agenda: "qué citas hay mañana", "agenda del viernes".
+// ─────────────────────────────────────────────────────────────────────────────
+async function listUpcomingEvents({ dateHint } = {}) {
+  const calendar = await getCalendarClient();
+
+  const now = new Date();
+  let timeMin = now.toISOString();
+  let timeMax = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString();
+
+  if (dateHint) {
+    const targetDate = resolveDateHint(dateHint);
+    if (targetDate) {
+      const dayStart = new Date(targetDate);
+      dayStart.setHours(0, 0, 0, 0);
+      const dayEnd = new Date(targetDate);
+      dayEnd.setHours(23, 59, 59, 999);
+      timeMin = dayStart.toISOString();
+      timeMax = dayEnd.toISOString();
+    }
+  }
+
+  const response = await calendar.events.list({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    timeMin,
+    timeMax,
+    singleEvents: true,
+    orderBy: "startTime",
+    maxResults: 20,
+  });
+
+  const events = (response.data.items || []).filter(e => e.status !== "cancelled");
+
+  return events.map(e => ({
+    summary: e.summary,
+    dateStr: formatearFechaEvento(e.start.dateTime || e.start.date),
+    clientPhone: extraerTelefonoDeEvento(e.description),
+  }));
 }
 
 // ── Resolver referencia de fecha en lenguaje natural ────────────────────────
@@ -306,10 +495,17 @@ function resolveDateHint(hint) {
     d.setDate(d.getDate() + 1);
     return d;
   }
+  if (s === "pasado manana" || s === "pasado mañana") {
+    const d = new Date(now);
+    d.setDate(d.getDate() + 2);
+    return d;
+  }
 
   const DAY_MAP = { lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6, domingo: 0 };
-  if (DAY_MAP[s] !== undefined) {
-    const target = DAY_MAP[s];
+  // Aceptar "el viernes", "proximo viernes", "este viernes"
+  const sDia = s.replace(/^(el|este|proximo|próximo|la)\s+/, "");
+  if (DAY_MAP[sDia] !== undefined) {
+    const target = DAY_MAP[sDia];
     const d = new Date(now);
     let diff = (target - d.getDay() + 7) % 7;
     if (diff === 0) diff = 7;
@@ -318,7 +514,7 @@ function resolveDateHint(hint) {
   }
 
   // Fecha específica ("5 de junio", "5/06", etc.) — reusar parseSpecificDate
-  return parseSpecificDate(s);
+  return parseSpecificDate(sDia) || parseSpecificDate(s);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,4 +581,10 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   };
 }
 
-module.exports = { createVisitEvent, getAvailableSlots, cancelEventByNameAndDate };
+module.exports = {
+  createVisitEvent,
+  getAvailableSlots,
+  cancelEventByNameAndDate,
+  rescheduleEventByNameAndDate,
+  listUpcomingEvents,
+};
