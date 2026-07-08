@@ -1,57 +1,73 @@
-const status = resultado?.resultado?.status || resultado?.status;
-if (status && status !== "OK") {
-    errores.push(`❌ Rechazado por el sistema...`);
-}
-Tu Apps Script V13 probablemente devuelve un campo estado: "REGISTRADO" o status: "EXITO" en vez de status: "OK". La v10.3 espera "OK" exactamente, por eso el falso rechazo aunque el gasto sí se escribió.
-
-Además, hay otros bugs que encontré y ya corregí en los archivos que te adjunto:
-
-Meta API error (#100): +50671951695 está en SUPERVISORES y es el número de Sasha misma, causando que el bot intente enviarse mensajes a sí mismo.
-
-Respuesta no-JSON de Claude: Cuando el mensaje no tiene monto claro, Claude devuelve texto en prosa y JSON.parse revienta.
-
-Copia financiera a Darwin: La función copiaFinancieraADarwin solo enviaba si la respuesta empezaba con "✅", pero las respuestas reales empiezan con "💸 Gasto registrado" o "💰 Ingreso registrado".
-
-Logs silenciosos: Con HTTP 200 + JSON válido pero formato diferente, el catch no se activa y no se loguea nada. Ya agregué logs más detallados.
-
-Archivos corregidos y completos
-Te paso ambos archivos completos, listos para copiar y pegar directamente en Railway. Solo reemplazá los existentes y reiniciá el contenedor. No tocan nada de lo que ya funciona bien.
-
-1. finanzas.js (v10.4)
-javascript
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
-// v10.4 — FIX DEFINITIVO (8 julio 2026):
-//        1. El chequeo de respuesta del Apps Script ya NO exige "OK"
-//           exacto. Acepta cualquier respuesta sin error (estado:
-//           "REGISTRADO", "EXITO", "OK", etc.) — elimina el falso
-//           rechazo que venía reportando movimientos ya escritos.
-//        2. Logs detallados del body crudo del Apps Script (solo
-//           primeros 500 chars) para diagnóstico.
-//        3. Protección contra respuesta de Claude en prosa cuando
-//           el mensaje no tiene monto claro — atrapa JSON.parse.
-//        4. Error "Unexpected token 'P'" ya no explota: si falla
-//           el parseo, se loguea y se devuelve null elegante.
-// v10.3 — FIX (7 julio 2026):
+// v10.3 — FIX (7 julio 2026, tarde):
 //        1. MONTOS CON DECIMALES: "89.535,27" ya se lee como 89535.27
-//           (formato tico: miles con punto, decimales con coma).
-//        2. DESCRIPCIONES SIN LETRAS: ",27", "0,27", "123" ahora
-//           cuentan como descripción pobre y se reconstruyen.
-// v10.2 — FIX (7 julio 2026): APPS_SCRIPT_URL de respaldo actualizada.
+//           (formato tico: miles con punto, decimales con coma). Antes el
+//           parser agarraba solo "89.535" y el ",27" quedaba huérfano en
+//           el texto, contaminando la descripción. También soporta formato
+//           US "89,535.27".
+//        2. DESCRIPCIONES SIN LETRAS: ",27", "0,27", "123" ahora cuentan
+//           como descripción pobre y se reconstruyen automáticamente
+//           ("Categoría — Proyecto/Responsable").
+//        NOTA: junto con index.js v6, TODO el lenguaje natural financiero
+//        pasa ahora por este pipeline (parser local corto o Claude con
+//        contexto completo de proyectos) — el pre-parser de voz de
+//        memoria.js ya no pre-mastica los mensajes.
+// v10.2 — FIX (7 julio 2026):
+//        1. APPS_SCRIPT_URL de respaldo actualizada a la implementación
+//           vigente del ERP V13 (la anterior AKfycbxpOjox... fue eliminada
+//           al re-implementar el script → causaba HTTP 404 con página HTML
+//           de Google). La URL real SIEMPRE debe vivir en la variable
+//           APPS_SCRIPT_URL de Railway; el hardcode es solo respaldo.
+//        2. registrarEnSheets ya no incrusta el HTML completo de Google en
+//           los errores: detecta respuestas HTML (404, login redirect) y
+//           lanza un mensaje corto y accionable. El cuerpo crudo queda
+//           truncado en los logs para diagnóstico.
+// v10.1 — FIX (7 julio 2026): moneda forzada por regla local (10 USD ya
+//        no puede quedar como ₡10), "Sin descripción" se repara antes de
+//        enviar, y los rechazos del Apps Script (ERROR_VALIDACION) ya no
+//        se confirman como éxito.
+// v10 — FIX MAYOR (julio 2026):
+//   1. INGRESO vs GASTO: corrección determinística post-Claude.
+//      "Apunta el ingreso de 25.000 de José Guillermo..." ya no
+//      puede terminar como GASTO aunque Claude se equivoque.
+//   2. VALES/PLANILLA a TRABAJADORES: "vale para Christhian" ya no
+//      se asigna al proyecto del cliente Christian. Si el nombre
+//      después de vale/planilla/adelanto es un TRABAJADOR, se usa
+//      como responsable y el proyecto solo se detecta con OTRO alias.
+//   3. DESCRIPCIONES: validación de calidad. Nunca más "el",
+//      "Yader en el", "nombre" — si la descripción queda pobre,
+//      se reconstruye como "Categoría — Responsable/Proyecto".
+//   4. CUENTA BANCARIA: cada movimiento lleva "cuenta" (BAC CRC /
+//      BAC USD) para la nueva CAJA_GENERAL de dos monedas.
+//   5. Payload COMPLETO a Apps Script: entrada_crc, salida_crc,
+//      entrada_usd, salida_usd, cuenta, tipo_cambio, responsable,
+//      id_movimiento — el Apps Script ya no tiene que adivinar
+//      columnas (ver Code_AppsScript_Caja.gs).
 // ============================================================
 
 const Anthropic = require("@anthropic-ai/sdk");
 
+// ⚠️ v10.2 — Implementación vigente del ERP V13 (7 jul 2026).
+// Si volvés a crear una implementación NUEVA en Apps Script, actualizá la
+// variable APPS_SCRIPT_URL en Railway (y este respaldo). Mejor práctica:
+// actualizar la implementación existente con "Editar → Nueva versión" para
+// que la URL nunca cambie.
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL ||
   "https://script.google.com/macros/s/AKfycbyMP4_cyxuB4oCNqh5SGZepnSujePha-tOcVOKbeo9y6BGOxhP-C86dT18JP0r0CvkkLQ/exec";
 
 const SHEETS_ID = process.env.SHEETS_ID ||
   "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
 
+// Tipo de cambio USD → CRC. El mensaje de confirmación siempre muestra
+// el monto original en USD Y su equivalente en ₡.
 const TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 530;
 
-// ─── PROYECTOS ────────────────────────────────────────────────
+// ⚠️ Códigos VERIFICADOS contra la hoja PROYECTOS (julio 2026).
+// OJO: el proyecto del panel acanalado de Leonardo es PROY SC1/2026
+// (PROY 001/2026 es de Sergio Gonzales Pauta — pintura exterior).
 const PROYECTOS = [
+  // ── Activos / recientes ──────────────────────────────────────────────────
   { codigo: "PROY 060/2026", nombre: "María José",               alias: ["maria jose", "mariajose", "balcon", "balcon maria jose"] },
   { codigo: "PROY 059/2026", nombre: "Rosalía Granados",         alias: ["rosalia", "granados", "closet rosalia"] },
   { codigo: "PROY 049/2026", nombre: "Laura Víquez",             alias: ["laura", "viquez", "consultorio laura"] },
@@ -70,6 +86,7 @@ const PROYECTOS = [
   { codigo: "PROY 002/2026", nombre: "Kevin Chanto",             alias: ["kevin", "chanto"] },
   { codigo: "PROY 001/2026", nombre: "Sergio Gonzales Pauta",    alias: ["sergio", "gonzales pauta", "pintura sergio"] },
   { codigo: "PROY SC1/2026", nombre: "Leonardo Álvarez",         alias: ["leonardo", "leo", "alvarez", "panel acanalado"] },
+  // ── Históricos cerrados (siguen recibiendo gastos de garantía) ───────────
   { codigo: "PROY 166/2025", nombre: "César Adrián Montenegro",  alias: ["cesar", "adrian", "montenegro"] },
   { codigo: "PROY 154/2025", nombre: "Ruth Valverde Aguilar",    alias: ["ruth", "valverde", "escazu"] },
   { codigo: "PROY 151/2025", nombre: "Daniel Marín Ortega",      alias: ["daniel", "marin", "cocina daniel"] },
@@ -79,7 +96,9 @@ const PROYECTOS = [
   { codigo: "PROY 004/2025", nombre: "Franxi Solano",            alias: ["franxi"] },
 ];
 
-// ─── TRABAJADORES ─────────────────────────────────────────────
+// ⚠️ TRABAJADORES — sincronizado con la hoja TRABAJADORES.
+// Sirve para que "vale para Christhian" NO se confunda con el
+// cliente Christian (PROY 019/2026), y para llenar "responsable".
 const TRABAJADORES = [
   { nombre: "Fernando Chevez Sandino", alias: ["fernando", "fercho"] },
   { nombre: "Melvin Zúñiga",           alias: ["melvin", "cuñis", "cunis"] },
@@ -159,11 +178,13 @@ function detectarTrabajador(texto) {
   return null;
 }
 
+// ¿El mensaje es un vale / pago de planilla / adelanto a un trabajador?
 function esContextoPlanilla(texto) {
   const t = norm(texto);
   return /\b(vale|planilla|adelanto|quincena|salario|sueldo|semana)\b/.test(t);
 }
 
+// Trabajador mencionado justo después de vale/planilla/adelanto/pago ... (para|de|a)
 function trabajadorEnContextoPlanilla(texto) {
   const t = norm(texto);
   const m = t.match(/\b(?:vale|planilla|adelanto|quincena|salario|sueldo|pago)\b[^.]{0,40}?\b(?:para|de|a|al)\s+([a-z]+(?:\s+[a-z]+)?)/);
@@ -211,9 +232,11 @@ function parseMontoFinancieroLocal(valor) {
     return isNaN(n) ? 0 : Math.round(n * 1000);
   }
 
+  // v10.3 — Formato tico: miles con punto, decimales con coma → "89.535,27" = 89535.27
   m = txt.match(/\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?/);
   if (m) return Number(m[0].replace(/\./g, "").replace(",", ".")) || 0;
 
+  // v10.3 — Formato US: miles con coma, decimales con punto → "89,535.27" = 89535.27
   m = txt.match(/\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?/);
   if (m) return Number(m[0].replace(/,/g, "")) || 0;
 
@@ -236,6 +259,8 @@ function extraerMontoDeTextoFinanciero(texto) {
     /(?:usd|dolares|dolar)\s*\d+(?:[.,]\d+)?/,
     /(\d+(?:[.,]\d+)?)\s*(?:mil|k)\b/,
     /(\d+(?:[.,]\d+)?)\s*(?:millones?|millon)\b/,
+    // v10.3 — capturan el número COMPLETO incluyendo decimales ("89.535,27"),
+    // para que al limpiar la descripción no quede un ",27" huérfano.
     /\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?/,
     /\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?/,
     /\d{1,3}(?:[.,]\d{3})+/,
@@ -262,7 +287,7 @@ function categorizarGastoLocal(desc) {
   return "Gasto";
 }
 
-// ─── Levenshtein ──────────────────────────────────────────────
+// ─── Levenshtein para typos ──────────────────────────────────
 function levenshtein(a, b) {
   if (a === b) return 0;
   const al = a.length, bl = b.length;
@@ -280,12 +305,15 @@ function levenshtein(a, b) {
   return dp[al][bl];
 }
 
-// ─── Detección de proyecto ────────────────────────────────────
+// ─── Detección de proyecto (con guardia de trabajadores) ─────
+// Si el nombre viene en contexto de planilla/vale y coincide con un
+// TRABAJADOR, ese nombre NO cuenta para detectar proyecto.
 function detectarProyectoLocal(texto) {
   let t = norm(texto);
 
   const trabPlanilla = trabajadorEnContextoPlanilla(texto);
   if (trabPlanilla) {
+    // borrar el alias del trabajador del texto antes de buscar proyecto
     t = t.replace(new RegExp(`\\b${trabPlanilla.aliasMatch}\\b`, "gi"), " ");
   }
 
@@ -313,6 +341,7 @@ function detectarProyectoLocal(texto) {
 }
 
 // ─── Clasificación determinística INGRESO / GASTO ────────────
+// Devuelve "INGRESO", "GASTO" o null (ambiguo).
 function clasificarTipoLocal(texto) {
   const t = norm(texto);
   const ingreso = /\b(ingreso|ingresos|me pagaron|nos pagaron|pagaron|cobre|cobro de|cobramos|abono del cliente|abonaron|deposito recibido|depositaron|transferencia recibida|recibi|recibimos)\b/.test(t);
@@ -321,6 +350,7 @@ function clasificarTipoLocal(texto) {
   if (ingreso && !gasto) return "INGRESO";
   if (gasto && !ingreso) return "GASTO";
   if (ingreso && gasto) {
+    // "ingreso" gana: nadie dice "ingreso" para registrar un gasto
     if (/\bingresos?\b/.test(t)) return "INGRESO";
     return null;
   }
@@ -336,10 +366,14 @@ const CONECTORES_SIN_CONTENIDO = new Set([
 
 function descripcionEsPobre(desc) {
   if (!desc) return true;
+  // "Sin descripción" era la vía de escape favorita de Claude y el Apps
+  // Script la rechaza (ERROR_VALIDACION) — se repara ANTES de enviar.
   if (/^sin\s+descripci/i.test(String(desc).trim())) return true;
+  // v10.3 — sin ninguna letra (",27", "0,27", "123") no es una descripción
   if (!/[a-z]/i.test(norm(desc))) return true;
   const palabras = norm(desc).split(/\s+/).filter(w => w.length > 1 && !CONECTORES_SIN_CONTENIDO.has(w));
   if (palabras.length < 1) return true;
+  // termina en preposición/artículo colgante → quedó cortada
   if (/\b(de|del|para|por|en|al|a|el|la|un|una|nombre)\s*\.?$/i.test(String(desc).trim())) return true;
   return false;
 }
@@ -353,6 +387,7 @@ function repararDescripcion(mov, textoOriginal) {
   else if (mov.cliente) partes.push(mov.cliente);
   else if (mov.proyecto && mov.proyecto !== "SS Remodelaciones") partes.push(mov.proyecto);
   else {
+    // último recurso: primeras palabras con contenido del mensaje original
     const contenido = norm(textoOriginal).split(/\s+/)
       .filter(w => w.length > 3 && !CONECTORES_SIN_CONTENIDO.has(w) && !/^\d/.test(w))
       .slice(0, 4);
@@ -409,8 +444,12 @@ function esComandoFinanciero(texto) {
   return KEYWORDS_FINANZAS.some(kw => t.includes(norm(kw)));
 }
 
-// ─── Post-procesamiento común ────────────────────────────────
+// ─── Post-procesamiento común (moneda, cuenta, tipo, descripción) ──
 function postProcesarMovimiento(m, textoOriginal) {
+  // FIX v10.1 — la moneda también se verifica localmente, no solo con Claude.
+  // "Registra un ingreso de 10 USD" se registró como ₡10 porque Claude
+  // devolvió CRC y nadie lo cuestionó. Si el texto dice usd/dólares/$,
+  // la moneda ES USD sin importar lo que haya dicho el modelo.
   let moneda = m.moneda === "USD" ? "USD" : "CRC";
   const monedaLocal = detectarMonedaLocal(textoOriginal);
   let monedaCorregida = false;
@@ -426,6 +465,8 @@ function postProcesarMovimiento(m, textoOriginal) {
     moneda,
     monto: montoCRC,
     monto_original: montoOriginal,
+    // Si la moneda fue corregida localmente, la cuenta del modelo ya no
+    // vale (habría dicho BAC CRC para un movimiento USD) — se recalcula.
     cuenta: monedaCorregida ? cuentaSegunMoneda(moneda) : (m.cuenta || cuentaSegunMoneda(moneda)),
     tipo_cambio: moneda === "USD" ? TIPO_CAMBIO_USD : 1,
   };
@@ -434,6 +475,7 @@ function postProcesarMovimiento(m, textoOriginal) {
       .filter(Boolean).join(" | ");
   }
 
+  // 1) FORZAR tipo si el texto es inequívoco (aunque Claude diga otra cosa)
   if (out.tipo !== "PLANILLA") {
     const tipoLocal = clasificarTipoLocal(textoOriginal);
     if (tipoLocal && tipoLocal !== out.tipo) {
@@ -448,11 +490,13 @@ function postProcesarMovimiento(m, textoOriginal) {
     }
   }
 
+  // 2) Guardia de trabajadores: vale/planilla para X (X = trabajador)
   const trab = trabajadorEnContextoPlanilla(textoOriginal);
   if (trab && out.tipo === "GASTO") {
     out.responsable = out.responsable || trab.nombre;
     out.categoria = "Mano de obra";
-    const proySinTrab = detectarProyectoLocal(textoOriginal);
+    // si el proyecto detectado salió SOLO por el nombre del trabajador → SSR
+    const proySinTrab = detectarProyectoLocal(textoOriginal); // ya excluye el alias del trabajador
     out.proyecto_codigo = proySinTrab.codigo;
     out.proyecto = proySinTrab.nombre;
     if (!out.descripcion || descripcionEsPobre(out.descripcion) || norm(out.descripcion) === "vale") {
@@ -460,8 +504,10 @@ function postProcesarMovimiento(m, textoOriginal) {
     }
   }
 
+  // 3) Reparar descripción pobre
   out.descripcion = repararDescripcion(out, textoOriginal);
 
+  // 4) Observaciones de moneda
   if (moneda === "USD") {
     const nota = `Monto original: $${montoOriginal} USD (TC ₡${TIPO_CAMBIO_USD})`;
     out.observaciones = out.observaciones ? `${nota} | ${out.observaciones}` : nota;
@@ -506,34 +552,61 @@ REGLAS DE INTERPRETACIÓN:
 - Gastos operativos sin proyecto claro → proyecto_codigo = "SSR"
 - SIEMPRE incluir "CAJA_GENERAL" en pestanas_adicionales (excepto planillas de horas)
 
-REGLA CRÍTICA #1 — INGRESO vs GASTO:
+REGLA CRÍTICA #1 — INGRESO vs GASTO (la regla MÁS importante):
 Si el mensaje contiene la palabra "ingreso", o describe dinero que ENTRA a SS
-Remodelaciones ("me pagaron", "cobré", "el cliente abonó"), es SIEMPRE tipo="INGRESO".
-NUNCA lo marques como GASTO.
+Remodelaciones ("me pagaron", "cobré", "el cliente abonó", "pago de visita técnica
+DEL cliente", "adelanto del cliente"), es SIEMPRE tipo="INGRESO" con
+pestaña_principal="INGRESOS_CLIENTES". NUNCA lo marques como GASTO.
+"A nombre de SSR" indica el PROYECTO al que se asocia — NO cambia ingreso/gasto.
 Ejemplo obligatorio:
   "Apunta el ingreso de 25.000 de José Guillermo Flores por visita técnica a nombre de SSR"
   → {"tipo":"INGRESO","monto":25000,"cliente":"José Guillermo Flores",
-     "descripcion":"Visita técnica — cobro","proyecto_codigo":"SSR"}
+     "descripcion":"Visita técnica — cobro","proyecto_codigo":"SSR",
+     "pestaña_principal":"INGRESOS_CLIENTES"}
 
 REGLA CRÍTICA #2 — VALES Y PLANILLA A TRABAJADORES:
-Si el mensaje dice "vale para [nombre]" y [nombre] está en TRABAJADORES:
-- GASTO, categoria="Mano de obra", responsable=[nombre completo]
-- El proyecto es "SSR" SALVO que el mensaje mencione EXPLÍCITAMENTE otro proyecto.
-- descripcion = "Vale planilla [nombre]"
+Si el mensaje dice "vale para [nombre]", "pago de planilla a [nombre]", "adelanto a
+[nombre]" y [nombre] está en la lista de TRABAJADORES, entonces:
+- Es un GASTO, categoria="Mano de obra", responsable=[nombre completo del trabajador]
+- El proyecto es "SSR" SALVO que el mensaje mencione EXPLÍCITAMENTE otro proyecto
+  ("vale para Christhian en el proyecto de Miriam" → PROY 043/2026).
+- El nombre del trabajador NUNCA sirve para detectar el proyecto. "Vale para
+  Christhian" NO es el proyecto del cliente Christian Alfaro.
+- descripcion = "Vale planilla [nombre]" o "Pago planilla [nombre]"
 
 REGLA CRÍTICA #3 — CALIDAD DE DESCRIPCIÓN:
-Descripción clara de 3-8 palabras. PROHIBIDO "el", "nombre", "Yader en el".
-Construíla como "[Categoría] [persona o proyecto]".
+La descripción debe ser un resumen claro de 3-8 palabras del MOTIVO ("Transporte
+operarios Marriott", "Materiales gypsum", "Vale planilla Fernando"). PROHIBIDO
+devolver fragmentos sueltos como "el", "nombre", "Yader en el". Si dudás,
+construíla como "[Categoría] [persona o proyecto]".
 
-REGLAS PARA PLANILLA:
-- tipo = "PLANILLA", monto=0, pestaña_principal="${planillaMes}"
-- pestanas_adicionales=["BASE_PLANILLA"] (sin CAJA_GENERAL)
-- Cada trabajador = un objeto separado
+REGLAS PARA PLANILLA (cuando alguien dice "X trabajó N horas"):
+- tipo = "PLANILLA"
+- pestaña_principal = "${planillaMes}"
+- pestanas_adicionales = ["BASE_PLANILLA"] (sin CAJA_GENERAL, el monto se calcula después)
+- monto = 0
+- horas = número de horas trabajadas (campo extra obligatorio)
+- dia_semana = "${diaSemana}" | num_semana = ${numSemana}
+- vale_colones = monto del vale si hay, 0 si no
+- Cada trabajador = un objeto separado en el array
+- Si hay vale, agregá UN objeto extra de tipo GASTO: descripcion="Vale planilla [nombre]",
+  monto=[vale], categoria="Mano de obra", pestaña_principal="GASTOS_PROYECTO",
+  pestanas_adicionales=["CAJA_GENERAL"]
 
-PESTAÑAS VÁLIDAS:
-- "GASTOS_PROYECTO", "INGRESOS_CLIENTES", "${planillaMes}", "BASE_PLANILLA", "INVENTARIO", "SUBCONTRATOS"
+REGLA CRÍTICA #4 — pago de planilla SIN mención de horas trabajadas:
+"pago de planilla a [nombre] por [monto]" sin horas = VALE/ADELANTO (GASTO real con
+monto real, categoria "Mano de obra"). NUNCA tipo="PLANILLA" con monto=0 — el gasto
+desaparecería en silencio.
 
-INSTRUCCIONES MÚLTIPLES: devolvés un ARRAY JSON. Un objeto por operación o trabajador.
+PESTAÑAS VÁLIDAS — SOLO ESTOS NOMBRES:
+- "GASTOS_PROYECTO" → cualquier gasto
+- "INGRESOS_CLIENTES" → pago de cliente
+- "${planillaMes}" → registro de horas trabajadas
+- "BASE_PLANILLA" → copia plana de planilla
+- "INVENTARIO" → compra para bodega
+- "SUBCONTRATOS" → pago a subcontratista
+
+INSTRUCCIONES MÚLTIPLES: siempre devolvés un ARRAY JSON. Un objeto por operación o trabajador.
 
 Formato objeto gasto/ingreso:
 {
@@ -571,7 +644,7 @@ Formato objeto planilla:
 Respondé ÚNICAMENTE con JSON array válido, sin markdown, sin texto extra.`;
 };
 
-// ─── Comando crudo ────────────────────────────────────────────
+// ─── Comando crudo [GASTO:...] / [INGRESO:...] ───────────────
 function extraerComandoFinancieroCrudo(texto) {
   if (!texto) return null;
   const m = String(texto).match(/\[(GASTO|INGRESO)\s*:\s*([^\]]+)\]/i);
@@ -608,7 +681,7 @@ function extraerComandoFinancieroCrudo(texto) {
   }, texto)];
 }
 
-// ─── Parser natural local ────────────────────────────────────
+// ─── Parser natural local (mensajes cortos e inequívocos) ────
 const MAX_PALABRAS_PARSER_LOCAL = 11;
 
 function extraerMovimientoNaturalLocal(texto) {
@@ -621,7 +694,7 @@ function extraerMovimientoNaturalLocal(texto) {
   const tipo = clasificarTipoLocal(original);
   const esComandoNeutro = /\b(apunta|anota|registra|carga)\b/.test(norm(original));
   if (!tipo && !esComandoNeutro) return null;
-  if (!tipo) return null;
+  if (!tipo) return null; // neutro sin tipo claro → que lo resuelva Claude
 
   const { raw, monto } = extraerMontoDeTextoFinanciero(original);
   if (!monto || monto <= 0 || !raw) return null;
@@ -633,7 +706,7 @@ function extraerMovimientoNaturalLocal(texto) {
   if (pm) proyectoTexto = pm[1].trim().replace(/[,.]+$/g, "").replace(/^(de|del)\s+/i, "");
 
   const desc = construirDescripcionLocal(original, raw, proyectoTexto);
-  if (!desc) return null;
+  if (!desc) return null; // descripción pobre → mejor que lo arme Claude
 
   const proy = detectarProyectoLocal(proyectoTexto || original);
 
@@ -659,7 +732,7 @@ function extraerMovimientoNaturalLocal(texto) {
   }, original)];
 }
 
-// ─── Interpretación con Claude ──────────────────────────────
+// ─── Interpretación con Claude + corrección local ────────────
 async function interpretarMovimientos(texto) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const response = await client.messages.create({
@@ -670,30 +743,25 @@ async function interpretarMovimientos(texto) {
   });
   const raw    = response.content[0]?.text || "[]";
   const clean  = raw.replace(/```json\n?|\n?```/g, "").trim();
-  
-  // v10.4 — Protección contra respuesta en prosa (no JSON)
-  let parsed;
-  try {
-    parsed = JSON.parse(clean);
-  } catch (e) {
-    console.error("❌ Claude no devolvió JSON válido. Respuesta cruda (primeros 200 chars):", clean.slice(0, 200));
-    return null;
-  }
-  
+  const parsed = JSON.parse(clean);
   const movimientos = Array.isArray(parsed) ? parsed : [parsed];
+
+  // Todo lo que devuelve Claude pasa por la corrección determinística:
+  // tipo, cuenta, descripción, moneda, trabajador vs proyecto.
   return movimientos.map(m => postProcesarMovimiento(m, texto));
 }
 
 // ─── Registro en Sheets ──────────────────────────────────────
+// v10.2 — Los errores del webhook ya NO incluyen el HTML completo de Google.
+// Si la respuesta es HTML (404 de implementación borrada, redirect de login,
+// error 500 de Google), se lanza un mensaje corto y accionable. El cuerpo
+// crudo queda truncado en los logs de Railway para diagnóstico.
 function esRespuestaHTML(texto) {
   return /<!DOCTYPE|<html|<head|<body/i.test(String(texto || ""));
 }
 
 async function registrarEnSheets(data) {
   if (!APPS_SCRIPT_URL) return { success: true, simulated: true };
-  
-  console.log(`📤 Enviando a Apps Script: ${data.tipo} — ${data.descripcion} (₡${data.monto})`);
-  
   const res = await fetch(APPS_SCRIPT_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -701,15 +769,13 @@ async function registrarEnSheets(data) {
   });
   const bodyText = await res.text();
 
-  // v10.4 — Log detallado para diagnóstico
-  console.log(`📥 Apps Script HTTP ${res.status}, body (primeros 500 chars):`, bodyText.slice(0, 500));
-
   if (!res.ok) {
     console.error(`❌ Apps Script HTTP ${res.status}. Cuerpo (truncado):`, bodyText.slice(0, 400));
     if (esRespuestaHTML(bodyText)) {
       throw new Error(
         `Apps Script HTTP ${res.status} — la URL del webhook apunta a una implementación ` +
-        `que ya no existe o sin acceso público. Revisá APPS_SCRIPT_URL en Railway.`
+        `que ya no existe o sin acceso público. Revisá APPS_SCRIPT_URL en Railway ` +
+        `(Administrar implementaciones → URL /exec vigente).`
       );
     }
     throw new Error(`Apps Script HTTP ${res.status}: ${bodyText.slice(0, 200)}`);
@@ -801,17 +867,18 @@ async function procesarComandoFinanciero(texto) {
           canal: "whatsapp",
         });
 
-        // v10.4 — FIX DEFINITIVO: aceptar cualquier respuesta sin error.
-        // Ya NO exige "OK" exacto. Si no hay error explícito, es éxito.
-        const status = resultado?.resultado?.status || resultado?.status || "";
+        // FIX v10.1 — antes solo se revisaba DUPLICADO, así que si el Apps
+        // Script RECHAZABA el movimiento (ERROR_VALIDACION, success:false),
+        // Sasha igual confirmaba "registrado" y el dato nunca existió.
+        const status = resultado?.resultado?.status || resultado?.status;
         const mensajeAS = resultado?.resultado?.mensaje || resultado?.error || "";
 
-        // Si el resultado tiene error explícito (success:false, ok:false, o error:true)
-        if (resultado?.success === false || resultado?.ok === false || resultado?.error === true) {
+        if (status === "DUPLICADO") {
+          errores.push(`⚠️ Duplicado: ${datos.descripcion}`);
+        } else if (resultado?.success === false || resultado?.ok === false ||
+                   (status && status !== "OK")) {
           errores.push(`❌ Rechazado por el sistema: ${datos.descripcion}` +
             (mensajeAS ? ` — ${mensajeAS}` : ""));
-        } else if (status === "DUPLICADO") {
-          errores.push(`⚠️ Duplicado: ${datos.descripcion}`);
         } else {
           confirmaciones.push(
             generarConfirmacionItem(datos, confirmaciones.length, movimientos.length)
@@ -839,7 +906,7 @@ async function procesarComandoFinanciero(texto) {
 }
 
 // ============================================================
-// LECTURA DE COMPROBANTES BANCARIOS POR IMAGEN
+// LECTURA DE COMPROBANTES BANCARIOS POR IMAGEN (SINPE/BAC)
 // ============================================================
 
 async function interpretarComprobante(imageBase64, mimeType, textoAdicional) {
@@ -931,14 +998,13 @@ async function procesarComprobanteImagen(imageBase64, mimeType, textoAdicional) 
       canal: "whatsapp_imagen",
     });
 
-    // v10.4 — mismo fix que arriba
-    const status = resultado?.resultado?.status || resultado?.status || "";
-    if (resultado?.success === false || resultado?.ok === false || resultado?.error === true) {
-      const mensajeAS = resultado?.resultado?.mensaje || resultado?.error || "";
-      return `❌ El sistema rechazó el comprobante${mensajeAS ? `: ${mensajeAS}` : "."} Registralo a mano si querés.`;
-    }
+    const status = resultado?.resultado?.status || resultado?.status;
     if (status === "DUPLICADO") {
       return `⚠️ Este comprobante parece duplicado — ya hay un movimiento similar registrado.`;
+    }
+    if (resultado?.success === false || resultado?.ok === false || (status && status !== "OK")) {
+      const mensajeAS = resultado?.resultado?.mensaje || resultado?.error || "";
+      return `❌ El sistema rechazó el comprobante${mensajeAS ? `: ${mensajeAS}` : "."} Registralo a mano si querés.`;
     }
 
     return generarConfirmacionItem(datos, 0, 1) + "\n\n📸 _Registrado desde comprobante bancario_";
