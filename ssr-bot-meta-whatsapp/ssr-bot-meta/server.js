@@ -70,6 +70,43 @@ const NUMEROS_INTERNOS = new Set([
   "50670068477",  // Mauricio
 ]);
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIX v7 — ANTI-LOOP DE LEADS (bucle Make ↔ /meta-lead)
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUG: cuando llegaba un lead a /meta-lead, el bot le mandaba WhatsApp al
+//   cliente y LUEGO hacía POST a MAKE_WEBHOOK_META_LEADS "para registrar en
+//   CRM". Pero ese webhook es EL MISMO que dispara el escenario de Make que
+//   llama a /meta-lead → bucle infinito:
+//   Web → Make → /meta-lead → WhatsApp → POST a Make → Make → /meta-lead → ...
+//   Cada vuelta = 1 mensaje al cliente + 3 a supervisores = "miles de mensajes".
+//
+// FIX (3 capas de protección):
+//   1. MARCADOR DE ORIGEN: el POST que el bot manda a Make lleva
+//      origen: "sasha-bot". Si un lead entrante trae ese marcador, se ignora
+//      (era nuestro propio eco rebotando).
+//   2. DEDUPLICACIÓN POR TELÉFONO: caché en memoria — si el mismo teléfono
+//      llega de nuevo dentro de 10 minutos, se ignora silenciosamente.
+//      Corta cualquier reintento de Make, Meta o la web.
+//   3. RESPUESTA 200 INMEDIATA: /meta-lead responde 200 {ok:true} ANTES de
+//      procesar. Así Make nunca marca error ("Source is not valid JSON"),
+//      nunca guarda ejecuciones incompletas y nunca reintenta.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const leadsRecientes    = new Map();           // telefonoNorm → timestamp
+const LEAD_DEDUP_MS     = 10 * 60 * 1000;      // ventana de 10 minutos
+
+function esLeadDuplicado(telefonoNorm) {
+  const ahora  = Date.now();
+  // Limpieza de entradas viejas para que el Map no crezca indefinidamente
+  for (const [tel, ts] of leadsRecientes) {
+    if (ahora - ts > LEAD_DEDUP_MS) leadsRecientes.delete(tel);
+  }
+  const ultimo = leadsRecientes.get(telefonoNorm);
+  if (ultimo && ahora - ultimo < LEAD_DEDUP_MS) return true;
+  leadsRecientes.set(telefonoNorm, ahora);
+  return false;
+}
+
 // ── Transcripción de audio vía OpenAI Whisper ─────────────────────────────────
 async function transcribirAudio(audioId, esInterno) {
   try {
@@ -287,11 +324,27 @@ app.get("/meta-lead", (req, res) => {
 });
 
 app.post("/meta-lead", async (req, res) => {
+  // ── FIX v7 (capa 3): responder 200 JSON INMEDIATAMENTE ─────────────────────
+  // Make marca "Source is not valid JSON" y reintenta si la respuesta demora
+  // o falla. Respondiendo primero, Make siempre queda en Success y jamás
+  // acumula ejecuciones incompletas ni reintentos.
+  res.status(200).json({ ok: true });
+
   try {
-    console.log("🔥 Nuevo lead Meta recibido:", JSON.stringify(req.body, null, 2));
+    const body = req.body;
+
+    // ── FIX v7 (capa 1): ignorar nuestro propio eco ───────────────────────────
+    // El POST que este mismo endpoint manda a MAKE_WEBHOOK_META_LEADS lleva
+    // origen: "sasha-bot". Si Make nos lo devuelve (mismo webhook que dispara
+    // el escenario), lo descartamos acá y el bucle muere.
+    if (body?.origen === "sasha-bot" || body?.fuente === "Meta Ads") {
+      console.log("🔁 Lead ignorado: eco del propio bot (origen sasha-bot / fuente Meta Ads). Anti-loop v7.");
+      return;
+    }
+
+    console.log("🔥 Nuevo lead Meta recibido:", JSON.stringify(body, null, 2));
 
     let nombre, telefono, interes, zona;
-    const body = req.body;
 
     if (body?.entry?.[0]?.changes?.[0]?.value?.leads) {
       const lead   = body.entry[0].changes[0].value.leads[0];
@@ -308,13 +361,21 @@ app.post("/meta-lead", async (req, res) => {
     }
 
     if (!telefono) {
-      console.warn("⚠️ Lead recibido sin teléfono");
-      return res.status(400).json({ ok: false, error: "Sin teléfono" });
+      console.warn("⚠️ Lead recibido sin teléfono — descartado");
+      return;
     }
 
     let telefonoNorm = telefono.replace(/\D/g, "");
     if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
       telefonoNorm = "506" + telefonoNorm;
+    }
+
+    // ── FIX v7 (capa 2): deduplicación por teléfono (ventana 10 min) ──────────
+    // Aunque Make, Meta o la web reintenten, el mismo lead solo se procesa
+    // UNA vez cada 10 minutos. Corta cualquier bucle o reintento residual.
+    if (esLeadDuplicado(telefonoNorm)) {
+      console.log(`🔁 Lead duplicado ignorado: +${telefonoNorm} (ya procesado hace <10 min). Anti-loop v7.`);
+      return;
     }
 
     console.log(`📲 Procesando lead: ${nombre} | +${telefonoNorm} | ${interes} | ${zona}`);
@@ -353,12 +414,22 @@ app.post("/meta-lead", async (req, res) => {
       sendText(sup, notifSup).catch(e => console.warn(`⚠️ No se pudo notificar a ${sup}:`, e.message));
     }
 
+    // ── FIX v7: el POST de registro a Make lleva marcador de origen ───────────
+    // Si MAKE_WEBHOOK_META_LEADS apunta al MISMO webhook que dispara el
+    // escenario que llama a /meta-lead, el marcador origen: "sasha-bot" hace
+    // que la capa 1 lo descarte al volver — sin bucle.
+    // RECOMENDACIÓN: idealmente MAKE_WEBHOOK_META_LEADS debe apuntar a un
+    // webhook de Make DISTINTO (uno solo para CRM que NO llame a /meta-lead),
+    // o eliminarse si el escenario de Make ya escribe el lead en el Sheet
+    // ANTES de llamar a /meta-lead (que es tu caso actual: Webhooks →
+    // Google Sheets → HTTP). En ese caso este POST es redundante.
     if (process.env.MAKE_WEBHOOK_META_LEADS) {
       try {
         await fetch(process.env.MAKE_WEBHOOK_META_LEADS, {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            origen:   "sasha-bot",          // ← marcador anti-loop v7
             nombre,
             telefono: "+" + telefonoNorm,
             interes,
@@ -368,17 +439,15 @@ app.post("/meta-lead", async (req, res) => {
             estado: "Nuevo lead"
           })
         });
-        console.log("✅ Lead registrado en CRM via Make");
+        console.log("✅ Lead registrado en CRM via Make (con marcador anti-loop)");
       } catch (errMake) {
         console.warn("⚠️ No se pudo registrar en CRM:", errMake.message);
       }
     }
 
-    res.json({ ok: true, telefono: "+" + telefonoNorm });
-
   } catch (err) {
     console.error("❌ Error en /meta-lead:", err.message);
-    res.status(500).json({ ok: false, error: err.message });
+    // Ya respondimos 200 arriba — el error queda solo en logs, Make no reintenta.
   }
 });
 
@@ -701,6 +770,7 @@ app.listen(PORT, () => {
 │  🤖  IA: Claude Sonnet 4.6 (visión) + Whisper (audio)      │
 │  ⏰  Recordatorios: 8:00 AM CR diario                      │
 │  💓  KeepAlive: ping cada 14 min (siempre activa)          │
+│  🛡️  Anti-loop leads v7: dedup 10 min + marcador origen    │
 │  🚀  Puerto: ${PORT}                                           │
 │  📌  Webhook WhatsApp: GET|POST /webhook                   │
 │  🔥  Webhook Meta Leads: GET|POST /meta-lead               │
