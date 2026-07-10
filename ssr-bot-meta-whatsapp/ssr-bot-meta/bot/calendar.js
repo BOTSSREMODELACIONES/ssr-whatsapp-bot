@@ -34,8 +34,6 @@ function parseSpecificDate(str) {
 }
 
 // ── Convertir cualquier dateTime a minutos desde medianoche en hora CR ────────
-// Fix de zona horaria: no importa si Google devuelve UTC o -06:00,
-// siempre extraemos la hora local en Costa Rica antes de comparar.
 function toCRMinutes(dateTimeStr) {
   const d = new Date(dateTimeStr);
   const crStr = d.toLocaleString("en-US", {
@@ -107,10 +105,6 @@ async function getCalendarClient() {
   return google.calendar({ version: "v3", auth });
 }
 
-// ── NUEVO v7: extraer teléfono del cliente de la descripción del evento ──────
-// Los eventos creados por Sasha llevan "📱 WhatsApp: +506XXXXXXXX" en la
-// descripción. Esto permite notificar al cliente cuando un supervisor
-// cancela o reagenda su cita.
 function extraerTelefonoDeEvento(description) {
   if (!description) return null;
   const m = description.match(/WhatsApp:\s*\+?(\d{8,15})/i);
@@ -118,12 +112,10 @@ function extraerTelefonoDeEvento(description) {
     const digits = m[1];
     return digits.startsWith("506") ? `+${digits}` : `+506${digits}`;
   }
-  // fallback: cualquier número de 11+ dígitos que empiece con 506
   const m2 = description.match(/\+?(506\d{8})/);
   return m2 ? `+${m2[1]}` : null;
 }
 
-// ── Formatear fecha de evento para mensajes ──────────────────────────────────
 function formatearFechaEvento(startRaw) {
   return new Date(startRaw).toLocaleString("es-CR", {
     timeZone: "America/Costa_Rica",
@@ -161,15 +153,12 @@ async function getAvailableSlots(dayName) {
 
     console.log(`📅 Eventos encontrados para ${dayName}: ${events.length}`);
 
-    // Convertir cada evento a rango en minutos CR (zona horaria correcta)
     const occupiedRanges = events.map(event => {
-      // Evento de todo el día → bloquea todo
       if (event.start.date && !event.start.dateTime) {
         console.log(`🔒 Día completo bloqueado: "${event.summary}"`);
         return { startMin: 0, endMin: 24 * 60, allDay: true };
       }
 
-      // FIX: convertir a hora CR usando toCRMinutes, no timestamps crudos
       const startMin = toCRMinutes(event.start.dateTime);
       const endMin   = toCRMinutes(event.end.dateTime);
       const safeEndMin = endMin < startMin ? 23 * 60 + 59 : endMin;
@@ -178,11 +167,9 @@ async function getAvailableSlots(dayName) {
       return { startMin, endMin: safeEndMin, allDay: false };
     });
 
-    // Filtrar slots que NO se solapan con ningún evento
     const available = SLOTS.filter(slot => {
       const bloqueado = occupiedRanges.some(({ startMin, endMin, allDay }) => {
         if (allDay) return true;
-        // Solapamiento con margen de 30 min antes y después
         return (slot.startMin - 30) < endMin && (slot.endMin + 30) > startMin;
       });
 
@@ -196,8 +183,73 @@ async function getAvailableSlots(dayName) {
 
   } catch (err) {
     console.error("❌ Error consultando disponibilidad:", err.message);
-    // SEGURIDAD: si falla el calendario, NO ofrecer slots a ciegas
     return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NUEVO v8 — verificarDisponibilidadExacta
+// Verifica si una fecha/hora concreta está libre ANTES de crear el evento.
+// A diferencia de getAvailableSlots (que trabaja sobre 3 slots fijos), esta
+// función chequea el rango real [inicio, inicio+60min] de la cita que se va a
+// crear, contra TODOS los eventos de ese día — incluyendo bloqueos de día
+// completo (ej: Melvin reservó el día para instalar muebles).
+//
+// Devuelve:
+//   { disponible: true }                            → se puede agendar
+//   { disponible: false, motivo: "dia_bloqueado" }  → día completo reservado
+//   { disponible: false, motivo: "slot_ocupado", conflicto: "..." }
+//   { disponible: false, motivo: "error_calendario" } → falla al consultar
+//     (por seguridad se trata como NO disponible; nunca se agenda a ciegas)
+// ─────────────────────────────────────────────────────────────────────────────
+async function verificarDisponibilidadExacta(startDate) {
+  try {
+    const calendar = await getCalendarClient();
+
+    const dayStart = new Date(startDate);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayEnd = new Date(startDate);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const response = await calendar.events.list({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      timeMin: toLocalDateTimeString(dayStart) + "-06:00",
+      timeMax: toLocalDateTimeString(dayEnd)   + "-06:00",
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const events = (response.data.items || []).filter(e => e.status !== "cancelled");
+
+    // Rango de la cita que se quiere crear, en minutos CR
+    const nuevoInicioMin = startDate.getHours() * 60 + startDate.getMinutes();
+    const nuevoFinMin    = nuevoInicioMin + 60;
+
+    for (const event of events) {
+      // Evento de día completo → día bloqueado, no se agenda nada
+      if (event.start.date && !event.start.dateTime) {
+        console.log(`⛔ verificarDisponibilidadExacta: día bloqueado por "${event.summary}"`);
+        return { disponible: false, motivo: "dia_bloqueado", conflicto: event.summary || "Día reservado" };
+      }
+
+      const evInicioMin = toCRMinutes(event.start.dateTime);
+      let   evFinMin    = toCRMinutes(event.end.dateTime);
+      if (evFinMin < evInicioMin) evFinMin = 23 * 60 + 59;
+
+      // Solapamiento con margen de 30 min antes y después (igual que getAvailableSlots)
+      const solapa = (nuevoInicioMin - 30) < evFinMin && (nuevoFinMin + 30) > evInicioMin;
+      if (solapa) {
+        console.log(`⛔ verificarDisponibilidadExacta: choca con "${event.summary}"`);
+        return { disponible: false, motivo: "slot_ocupado", conflicto: event.summary || "Otra cita" };
+      }
+    }
+
+    return { disponible: true };
+
+  } catch (err) {
+    console.error("❌ verificarDisponibilidadExacta error:", err.message);
+    // SEGURIDAD: si no podemos verificar, NO agendamos a ciegas.
+    return { disponible: false, motivo: "error_calendario" };
   }
 }
 
@@ -240,8 +292,6 @@ async function cancelClientEvents(calendar, phone) {
 }
 
 // ── Búsqueda común de eventos por nombre y/o fecha ───────────────────────────
-// Usada por cancelar, reagendar y consultar. Devuelve eventos "matched" con
-// datos ya extraídos (teléfono del cliente incluido).
 async function buscarEventos({ nameHint, dateHint }) {
   const calendar = await getCalendarClient();
 
@@ -288,13 +338,6 @@ async function buscarEventos({ nameHint, dateHint }) {
   return { calendar, matched };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// cancelEventByNameAndDate
-// Busca y elimina eventos por nombre de cliente y/o fecha.
-// Usado por supervisores (Darwin / Melvin) via WhatsApp.
-// v7: ahora devuelve también el teléfono del cliente de cada evento
-// eliminado, para poder notificarle automáticamente.
-// ─────────────────────────────────────────────────────────────────────────────
 async function cancelEventByNameAndDate({ nameHint, dateHint }) {
   const { calendar, matched } = await buscarEventos({ nameHint, dateHint });
 
@@ -324,16 +367,6 @@ async function cancelEventByNameAndDate({ nameHint, dateHint }) {
   return { deleted: deleted.length, events: deleted };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// NUEVO v7 — rescheduleEventByNameAndDate
-// Busca un evento por nombre y/o fecha actual, y lo mueve a una nueva
-// fecha/hora. Usado por supervisores via WhatsApp:
-//   "cambia la cita de Gabriela para el viernes a las 10"
-//   "mueve la visita del martes al 15 de julio a las 2pm"
-//
-// Si hay más de un evento que coincide, NO mueve nada y devuelve la lista
-// para que el supervisor especifique mejor (evita mover la cita equivocada).
-// ─────────────────────────────────────────────────────────────────────────────
 async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, newHour }) {
   const { calendar, matched } = await buscarEventos({ nameHint, dateHint });
 
@@ -342,7 +375,6 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
   }
 
   if (matched.length > 1) {
-    // Ambiguo: devolver candidatos sin tocar nada
     const candidatos = matched.map(e => ({
       summary: e.summary,
       dateStr: formatearFechaEvento(e.start.dateTime || e.start.date),
@@ -353,27 +385,23 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
   const event = matched[0];
   const oldDateStr = formatearFechaEvento(event.start.dateTime || event.start.date);
 
-  // ── Resolver nueva fecha ───────────────────────────────────────────────────
   let nuevaFecha = newDateHint ? resolveDateHint(newDateHint) : null;
 
   if (!nuevaFecha && !newHour) {
     return { moved: 0, ambiguous: false, events: [], error: "sin_nueva_fecha" };
   }
 
-  // Si solo cambia la hora, mantener el día actual del evento
   if (!nuevaFecha) {
     nuevaFecha = new Date(new Date(event.start.dateTime || event.start.date)
       .toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
   }
 
-  // ── Resolver nueva hora ────────────────────────────────────────────────────
   let hour = 9, minute = 0;
   if (newHour) {
     const parsed = parsearHora(newHour);
     hour   = parsed.hour;
     minute = parsed.minute;
   } else if (event.start.dateTime) {
-    // Mantener la hora original del evento (en hora CR)
     const minCR = toCRMinutes(event.start.dateTime);
     hour   = Math.floor(minCR / 60);
     minute = minCR % 60;
@@ -381,10 +409,15 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
 
   nuevaFecha.setHours(hour, minute, 0, 0);
 
-  // Validar que la nueva fecha sea futura
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
   if (nuevaFecha <= now) {
     return { moved: 0, ambiguous: false, events: [], error: "fecha_pasada" };
+  }
+
+  // v8: verificar que el destino esté libre antes de mover (respeta bloqueos)
+  const dispo = await verificarDisponibilidadExacta(nuevaFecha);
+  if (!dispo.disponible) {
+    return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: dispo.motivo, conflicto: dispo.conflicto };
   }
 
   const nuevoFin = new Date(nuevaFecha.getTime() + 60 * 60 * 1000);
@@ -419,7 +452,6 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
   };
 }
 
-// ── Parsear hora en formatos comunes: "10:00", "10", "2pm", "2:30 pm", "14.30"
 function parsearHora(str) {
   const s = String(str || "").trim().toLowerCase();
   const m = s.match(/(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?/);
@@ -431,7 +463,6 @@ function parsearHora(str) {
 
   if (/p/.test(sufijo) && hour < 12) hour += 12;
   if (/a/.test(sufijo) && hour === 12) hour = 0;
-  // Sin sufijo: horas 1-6 se asumen de la tarde (nadie agenda visitas a las 2am)
   if (!sufijo && hour >= 1 && hour <= 6) hour += 12;
 
   if (hour < 7)  hour = 9;
@@ -440,11 +471,6 @@ function parsearHora(str) {
   return { hour, minute };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// NUEVO v7 — listUpcomingEvents
-// Lista las citas próximas (opcionalmente de un día específico) para que el
-// supervisor consulte la agenda: "qué citas hay mañana", "agenda del viernes".
-// ─────────────────────────────────────────────────────────────────────────────
 async function listUpcomingEvents({ dateHint } = {}) {
   const calendar = await getCalendarClient();
 
@@ -482,7 +508,6 @@ async function listUpcomingEvents({ dateHint } = {}) {
   }));
 }
 
-// ── Resolver referencia de fecha en lenguaje natural ────────────────────────
 function resolveDateHint(hint) {
   if (!hint) return null;
 
@@ -502,7 +527,6 @@ function resolveDateHint(hint) {
   }
 
   const DAY_MAP = { lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6, domingo: 0 };
-  // Aceptar "el viernes", "proximo viernes", "este viernes"
   const sDia = s.replace(/^(el|este|proximo|próximo|la)\s+/, "");
   if (DAY_MAP[sDia] !== undefined) {
     const target = DAY_MAP[sDia];
@@ -513,25 +537,47 @@ function resolveDateHint(hint) {
     return d;
   }
 
-  // Fecha específica ("5 de junio", "5/06", etc.) — reusar parseSpecificDate
   return parseSpecificDate(sDia) || parseSpecificDate(s);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-
-async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail }) {
+// createVisitEvent
+// v8: ahora VERIFICA disponibilidad antes de insertar. Si el día está
+// bloqueado (ej: Melvin reservó el día completo) o el slot ya está ocupado,
+// NO crea el evento y devuelve { ok:false, motivo, conflicto } para que el
+// llamador (flujo cliente o [VISITA:] de supervisor) informe en vez de
+// duplicar/pisar la agenda.
+// ─────────────────────────────────────────────────────────────────────────────
+async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail, skipAvailabilityCheck = false }) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
   if (!process.env.GOOGLE_CALENDAR_ID)     throw new Error("GOOGLE_CALENDAR_ID no configurado");
 
   const calendar = await getCalendarClient();
+
+  const startDate = getNextAvailableDate(day, hour);
+
+  // ── v8: VERIFICACIÓN DE DISPONIBILIDAD (respeta bloqueos y slots ocupados) ──
+  // Se ejecuta ANTES de borrar citas previas o insertar nada. Si el destino
+  // no está libre, abortamos sin tocar la agenda.
+  if (!skipAvailabilityCheck) {
+    const dispo = await verificarDisponibilidadExacta(startDate);
+    if (!dispo.disponible) {
+      console.warn(`⛔ createVisitEvent abortado: ${dispo.motivo} (${dispo.conflicto || "—"})`);
+      return {
+        ok: false,
+        motivo: dispo.motivo,          // "dia_bloqueado" | "slot_ocupado" | "error_calendario"
+        conflicto: dispo.conflicto || null,
+        startDate,
+      };
+    }
+  }
 
   const deleted = await cancelClientEvents(calendar, phone);
   if (deleted > 0) {
     console.log(`🔄 Reagendamiento: ${deleted} cita(s) anterior(es) eliminada(s) para ${phone}`);
   }
 
-  const startDate = getNextAvailableDate(day, hour);
-  const endDate   = new Date(startDate.getTime() + 60 * 60 * 1000);
+  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
 
   const hoursUntilEvent = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
   const reminderMinutes = hoursUntilEvent > 24 ? 1440 : 180;
@@ -574,6 +620,7 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
 
   console.log(`📅 Evento creado: ${response.data.htmlLink}`);
   return {
+    ok:           true,
     eventId:      response.data.id,
     eventLink:    response.data.htmlLink,
     startDate,
@@ -584,6 +631,7 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
 module.exports = {
   createVisitEvent,
   getAvailableSlots,
+  verificarDisponibilidadExacta,
   cancelEventByNameAndDate,
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
