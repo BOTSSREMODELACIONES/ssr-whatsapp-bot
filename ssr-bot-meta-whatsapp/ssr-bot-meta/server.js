@@ -67,7 +67,7 @@ console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
 const NUMEROS_INTERNOS = new Set([
   "50683091817",  // Darwin
   "50671981370",  // Melvin
-  "50670068477",  // Mauricio
+  "50670068477",  // Oficina SSR (WhatsApp corporativo Solo Senso S.A.)
 ]);
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -141,7 +141,7 @@ async function transcribirAudio(audioId, esInterno) {
       "prompt",
       esInterno
         ? "Instrucción interna de SS Remodelaciones en Costa Rica. Vocabulario: gasto, ingreso, " +
-          "planilla, proyecto, materiales, colones, visita técnica, cliente, Darwin, Melvin, Mauricio."
+          "planilla, proyecto, materiales, colones, visita técnica, cliente, Darwin, Melvin, Oficina SSR."
         : "Mensaje de un cliente de SS Remodelaciones en Costa Rica sobre remodelación, " +
           "construcción, pintura, gypsum, cocina, baño."
     );
