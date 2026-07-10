@@ -2,24 +2,42 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
- * (Historial de cambios v2–v7: ver versiones anteriores.)
+ * ── CAMBIOS v2 ────────────────────────────────────────────────────────────────
+ * NUEVOS handlers para supervisores:
+ *   [GASTO: monto | descripcion | proyecto?]   → escribe en CAJA_GENERAL + AUDIT_LOG
+ *   [INGRESO: monto | descripcion | proyecto?] → escribe en CAJA_GENERAL + AUDIT_LOG
+ *   [MSG_CLIENTE: nombre_o_tel | msg]    → envía mensaje directo a un cliente
+ *   [VISITA: tel_cliente | ...]          → agenda visita asociada a teléfono de cliente
+ *   [RESUMEN_CLIENTE: nombre]            → acceso directo al resumen IA
  *
- * ── CAMBIOS v8 — DISPONIBILIDAD REAL + COLA DE VERIFICACIÓN MANUAL ────────────
- * BUG CALENDARIO: Sasha agendaba visitas encima de días bloqueados por un
- *   supervisor (ej: Melvin reservó el día completo para instalar muebles). La
- *   causa: createVisitEvent insertaba el evento sin verificar disponibilidad.
- *   FIX: createVisitEvent (en calendar.js) ahora verifica ANTES de insertar y
- *   devuelve { ok:false, motivo } si el día está bloqueado o el slot ocupado.
- *   Aquí manejamos ese resultado en las 2 rutas que crean visitas (flujo
- *   cliente por flag [VISITA:] y comando de supervisor [VISITA:...]).
+ * ── CAMBIOS v3 — FIX AUDIO SUPERVISOR ──────────────────────────────────────────
+ * desenvolverInstruccionVoz(texto) extrae solo la transcripción real del
+ * envoltorio [Instrucción de voz de supervisor (tel): "texto"] ANTES de
+ * evaluar comandos financieros.
  *
- * VERIFICACIÓN MANUAL DE VISITAS REMOTAS / EXTRANJERAS (seguridad de personal):
- *   En vez de bloquear países por prefijo (que pierde clientes legítimos y no
- *   protege de verdad), las solicitudes de visita que (a) vienen de un prefijo
- *   telefónico extranjero, o (b) mencionan finca / rancho / zona remota, NO se
- *   auto-agendan: se marcan para revisión humana y se avisa a los supervisores
- *   con los datos, para que un humano apruebe antes de enviar a cualquier
- *   funcionario. Se conserva trazabilidad completa (útil ante una denuncia).
+ * ── CAMBIOS v4 — LECTURA DE COMPROBANTES BANCARIOS POR IMAGEN ──────────────────
+ * ── CAMBIOS v5 — SANITIZACIÓN DE ERRORES DEL WEBHOOK (Apps Script) ────────────
+ * ── CAMBIOS v6 — LENGUAJE NATURAL FINANCIERO DIRECTO A FINANZAS.JS ────────────
+ * (ver historial en versiones anteriores)
+ *
+ * ── CAMBIOS v7 — GESTIÓN DE CALENDARIO PARA SUPERVISORES ──────────────────────
+ * BUG 1: detectarYCancelarCita() recibía el texto CON el envoltorio de voz
+ *   [Instrucción de voz de supervisor (506...): "cancela la cita..."] — los
+ *   corchetes/paréntesis rompían la extracción de nombre y fecha. Por eso
+ *   los comandos de calendario por AUDIO nunca funcionaban.
+ * BUG 2: no existía ninguna función para REAGENDAR una cita. "Cambia la cita
+ *   de Gabriela para el viernes" no hacía nada.
+ * FIX: nuevo módulo gestionarCalendarioSupervisor() que:
+ *   - Usa el texto DESENVUELTO (igual que finanzas) → funciona por audio.
+ *   - Detecta 3 intenciones: CANCELAR, REAGENDAR y CONSULTAR agenda.
+ *   - Interpreta con Claude (JSON estructurado) cuando el mensaje menciona
+ *     citas/visitas/agenda — entiende lenguaje natural real, no solo regex.
+ *   - Fallback a regex local si Claude falla (sin API no se cae nada).
+ *   - REAGENDAR: usa rescheduleEventByNameAndDate() nueva en calendar.js.
+ *     Si hay varias citas que coinciden, pide especificar (no mueve a ciegas).
+ *   - Notifica automáticamente al cliente por WhatsApp cuando su cita se
+ *     cancela o se mueve (el teléfono se extrae de la descripción del evento).
+ *     Se puede silenciar diciendo "sin avisar al cliente".
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -39,88 +57,8 @@ const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR
 // ── Constantes ────────────────────────────────────────────────────────────────
 const SUPERVISORES = ["+50683091817", "+50671981370", "+50671951695"];
 
+// Número de Darwin — recibe copia de todo movimiento financiero registrado por otros.
 const DARWIN_PHONE = "+50683091817";
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// v8 — VERIFICACIÓN MANUAL DE VISITAS DE RIESGO
-// ═══════════════════════════════════════════════════════════════════════════════
-// Prefijos telefónicos considerados EXTRANJEROS para efectos de verificación.
-// Costa Rica es +506. Una solicitud de visita desde otro prefijo no se bloquea
-// ni se ignora: se manda a revisión humana antes de agendar.
-// (Se puede ampliar esta lista según haga falta.)
-const PREFIJOS_EXTRANJEROS = ["+52", "+57"];  // México, Colombia
-
-// Palabras que sugieren una visita a zona remota/aislada, donde el riesgo para
-// el personal es mayor y conviene verificación humana previa.
-const PALABRAS_ZONA_REMOTA = [
-  "finca", "fincas", "rancho", "ranchos", "hacienda", "parcela", "parcelas",
-  "lote baldio", "zona rural", "montaña", "montana", "potrero", "quinta",
-];
-
-function tienePrefijoExtranjero(phoneE164) {
-  return PREFIJOS_EXTRANJEROS.some(p => (phoneE164 || "").startsWith(p));
-}
-
-function mencionaZonaRemota(texto) {
-  const n = (texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  return PALABRAS_ZONA_REMOTA.some(w =>
-    new RegExp(`\\b${w.normalize("NFD").replace(/[\u0300-\u036f]/g, "")}\\b`).test(n)
-  );
-}
-
-// Decide si una solicitud de visita necesita revisión humana antes de agendar.
-// Devuelve null si no hace falta, o un objeto con el/los motivo(s) si sí.
-function requiereVerificacionManual({ phoneE164, texto, zona, proyecto }) {
-  const motivos = [];
-  if (tienePrefijoExtranjero(phoneE164)) motivos.push("número internacional");
-  const textoCompleto = [texto, zona, proyecto].filter(Boolean).join(" ");
-  if (mencionaZonaRemota(textoCompleto)) motivos.push("visita en zona remota (finca/rancho)");
-  return motivos.length ? motivos : null;
-}
-
-// Avisa a todos los supervisores que un lead quedó en espera de verificación,
-// con los datos para decidir. NO se agenda nada hasta que un humano apruebe.
-async function notificarVerificacionManual({ from, session, motivos, ultimoMensaje }) {
-  const lines = [
-    "🛑 *VISITA EN ESPERA — REQUIERE VERIFICACIÓN HUMANA*",
-    "",
-    `⚠️ Motivo: ${motivos.join(" + ")}`,
-    "",
-    `📱 ${from}`,
-    session.name         && `👤 ${session.name}`,
-    session.project_desc && `🏗️ ${session.project_desc}`,
-    session.zone         && `📍 ${session.zone}`,
-    session.visit_day    && `📅 Día solicitado: ${session.visit_day}`,
-    session.visit_hour   && `🕐 Hora solicitada: ${session.visit_hour}`,
-    session.waze_link    && `🗺️ Ubicación: ${session.waze_link}`,
-    "",
-    ultimoMensaje && `💬 "${ultimoMensaje}"`,
-    "",
-    "🔒 *No se agendó automáticamente.* Verifiquen identidad y ubicación antes",
-    "de enviar a cualquier compañero. Para agendar tras confirmar, usen:",
-    "`[VISITA: número | nombre | proyecto | zona | día | hora | ubicación | email]`",
-    "",
-    "_Sasha — Bot SSR_",
-  ].filter(Boolean).join("\n");
-
-  const resultados = await Promise.allSettled(SUPERVISORES.map(num => sendText(num, lines)));
-  resultados.forEach((r, i) => {
-    if (r.status === "fulfilled") console.log(`✅ Supervisor [${SUPERVISORES[i]}] avisado de verificación manual`);
-    else console.error(`❌ Error avisando verificación a ${SUPERVISORES[i]}: ${r.reason?.message}`);
-  });
-}
-
-// Mensaje neutral al cliente cuando su visita queda en revisión. No revela el
-// motivo (no acusa a nadie); simplemente dice que el equipo confirmará.
-function mensajeClienteEnRevision(nombre) {
-  return [
-    nombre ? `Gracias ${nombre}. 🙏` : "¡Gracias! 🙏",
-    "",
-    "Su solicitud de visita quedó registrada. Para este tipo de proyecto, un",
-    "miembro de nuestro equipo le contactará personalmente para confirmar los",
-    "detalles y coordinar la fecha. Le escribimos muy pronto 😊",
-  ].join("\n");
-}
 
 // ── FIX v3 — Desenvolver instrucciones de voz antes del parser financiero ────
 function desenvolverInstruccionVoz(texto) {
@@ -156,9 +94,11 @@ function sanitizarRespuestaFinanciera(respuesta) {
   ].join("\n");
 }
 
+// Envía una copia de la confirmación financiera a Darwin cuando OTRO supervisor
+// (ej: Melvin) registra un gasto/ingreso. Si lo registró Darwin, no se duplica.
 async function copiaFinancieraADarwin(quienRegistro, respuesta) {
-  if (quienRegistro === DARWIN_PHONE) return;
-  if (!respuesta || !respuesta.startsWith("✅")) return;
+  if (quienRegistro === DARWIN_PHONE) return;            // no copiar lo propio
+  if (!respuesta || !respuesta.startsWith("✅")) return;  // solo registros exitosos
   const quien = nombreSupervisor(quienRegistro);
   const copia = `📋 *Copia — movimiento registrado por ${quien}*\n\n${respuesta}`;
   sendText(DARWIN_PHONE, copia).catch(err =>
@@ -166,6 +106,7 @@ async function copiaFinancieraADarwin(quienRegistro, respuesta) {
   );
 }
 
+// Planilla madre del sistema operativo SSR
 const PLANILLA_SHEET_ID = "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
 
 const CAJA_TAB  = "CAJA_GENERAL";
@@ -174,12 +115,11 @@ const AUDIT_TAB = "AUDIT_LOG";
 const TZ = "America/Costa_Rica";
 
 const IGNORAR         = [];
-// v8: ya NO se bloquean prefijos por país. Las visitas de riesgo (extranjeras
-// o remotas) se envían a verificación humana en vez de ignorarse en silencio.
-// Se conserva la lista de ignorados exactos por si hace falta silenciar un
-// número puntual abusivo (spam directo), pero NO se filtra por país.
-const IGNORAR_PREFIJOS = [];
+const IGNORAR_PREFIJOS = ["+57"];
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER — Google Sheets auth para planilla
+// ═══════════════════════════════════════════════════════════════════════════════
 async function getPlanillaSheets() {
   const raw = process.env.GOOGLE_SERVICE_ACCOUNT;
   if (!raw) throw new Error("Variable GOOGLE_SERVICE_ACCOUNT no configurada en Railway");
@@ -196,16 +136,21 @@ function nombreSupervisor(phone) {
   const map = {
     "+50683091817": "Darwin",
     "+50671981370": "Melvin",
-    "+50670068477": "Mauricio",
+    "+50670068477": "Oficina SSR",
   };
   return map[phone] || phone;
 }
 
+// Formatea un número a colones con punto como separador de miles (₡10.000),
+// independientemente del locale del servidor (Railway usa espacio con es-CR).
 function fmtColones(n) {
   if (n === null || n === undefined || isNaN(n)) return String(n ?? "");
   return Math.round(n).toLocaleString("de-DE");
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS — registro financiero vía finanzas.js → Apps Script
+// ═══════════════════════════════════════════════════════════════════════════════
 function extraerComandoEstructurado(cmd, tipo) {
   const re = new RegExp("^\\[" + tipo + ":\\s*", "i");
   return String(cmd || "").replace(re, "").replace(/\]\s*$/, "").trim();
@@ -227,6 +172,7 @@ async function registrarFinanzasConCopia(tipo, cmd, supervisorPhone) {
       return `⚠️ No pude interpretar el ${tipo.toLowerCase()}. Probá con:\n${comando}`;
     }
 
+    // v5: nunca dejar pasar HTML del webhook hacia WhatsApp
     return sanitizarRespuestaFinanciera(respuesta);
   } catch (err) {
     console.error(`❌ registrarFinanzasConCopia ${tipo}:`, err.message, err.stack);
@@ -234,14 +180,23 @@ async function registrarFinanzasConCopia(tipo, cmd, supervisorPhone) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [GASTO: monto | descripcion]
+// ═══════════════════════════════════════════════════════════════════════════════
 async function handleGasto(cmd, supervisorPhone) {
   return await registrarFinanzasConCopia("GASTO", cmd, supervisorPhone);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [INGRESO: monto | descripcion | proyecto?]
+// ═══════════════════════════════════════════════════════════════════════════════
 async function handleIngreso(cmd, supervisorPhone) {
   return await registrarFinanzasConCopia("INGRESO", cmd, supervisorPhone);
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HANDLER — [MSG_CLIENTE: nombre_o_tel | mensaje]
+// ═══════════════════════════════════════════════════════════════════════════════
 async function handleMsgCliente(cmd, supervisorPhone) {
   const contenido = cmd.replace(/^\[MSG_CLIENTE:\s*/i, "").replace(/\]$/, "").trim();
   const pipeIdx   = contenido.indexOf("|");
@@ -262,6 +217,7 @@ async function handleMsgCliente(cmd, supervisorPhone) {
 
   if (!mensaje) return "⚠️ El mensaje está vacío. Indicá qué querés enviarle al cliente.";
 
+  // ── Resolver teléfono del destinatario ───────────────────────────────────
   let phoneDestino  = null;
   let nombreCliente = destinatario;
   const soloDigitos = destinatario.replace(/\D/g, "");
@@ -294,6 +250,7 @@ async function handleMsgCliente(cmd, supervisorPhone) {
     ].join("\n");
   }
 
+  // ── Enviar mensaje ───────────────────────────────────────────────────────
   try {
     await sendText(phoneDestino, mensaje);
 
@@ -324,10 +281,6 @@ async function handleMsgCliente(cmd, supervisorPhone) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HANDLER — [VISITA: tel_cliente | nombre | proyecto | zona | dia | hora | ubicacion | email]
-// v8: maneja el resultado { ok:false } de createVisitEvent (día bloqueado /
-// slot ocupado). Este comando lo usa un SUPERVISOR, así que es una decisión
-// humana consciente — por eso NO se manda a verificación de riesgo, pero SÍ
-// se respeta el bloqueo de calendario para no duplicar/pisar citas.
 // ═══════════════════════════════════════════════════════════════════════════════
 async function handleVisitaSupervisor(cmd, supervisorPhone) {
   const contenido = cmd.replace(/^\[VISITA:\s*/i, "").replace(/\]$/, "").trim();
@@ -373,32 +326,6 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
       name, phone: telefonoCliente, project, zone, day, hour,
       wazeLink: ubicacion, clientEmail: email,
     });
-
-    // v8: el calendario rechazó la creación (día bloqueado o slot ocupado)
-    if (eventData && eventData.ok === false) {
-      if (eventData.motivo === "dia_bloqueado") {
-        return [
-          `⛔ *No se agendó — día bloqueado*`,
-          ``,
-          `El día solicitado está reservado${eventData.conflicto ? ` ("${eventData.conflicto}")` : ""}.`,
-          `Elegí otro día (lunes, martes o viernes) libre para *${name}*.`,
-        ].join("\n");
-      }
-      if (eventData.motivo === "slot_ocupado") {
-        return [
-          `⛔ *No se agendó — horario ocupado*`,
-          ``,
-          `Ya hay una cita en ese horario${eventData.conflicto ? ` ("${eventData.conflicto}")` : ""}.`,
-          `Probá con otra hora (09:00, 11:30 o 14:00) para *${name}*.`,
-        ].join("\n");
-      }
-      return [
-        `⚠️ *No se pudo verificar el calendario*`,
-        ``,
-        `Por seguridad no agendé la cita a ciegas. Revisá la conexión con Google`,
-        `Calendar e intentá de nuevo en un momento.`,
-      ].join("\n");
-    }
 
     const dateStr = eventData.startDate.toLocaleDateString("es-CR", {
       weekday: "long", day: "numeric", month: "long", timeZone: TZ,
@@ -448,8 +375,12 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// GESTIÓN DE CALENDARIO PARA SUPERVISORES (cancelar/reagendar/consultar)
+// NUEVO v7 — GESTIÓN DE CALENDARIO PARA SUPERVISORES
+// Cancelar, reagendar y consultar citas por lenguaje natural (texto o audio).
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// Detección rápida por palabras clave: ¿este mensaje habla del calendario?
+// Solo si pasa este filtro se llama a Claude para interpretar (ahorra API).
 function mencionaCalendario(texto) {
   const n = (texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const hablaDeCitas   = /\b(cita|citas|visita|visitas|evento|eventos|reunion|reuniones|agenda|calendario)\b/.test(n);
@@ -457,6 +388,9 @@ function mencionaCalendario(texto) {
   return hablaDeCitas && tieneAccion;
 }
 
+// Interpretar el comando con Claude → JSON estructurado.
+// Devuelve: { accion: "cancelar"|"reagendar"|"consultar"|"ninguna",
+//             nombre, fecha, nuevaFecha, nuevaHora, avisarCliente }
 async function interpretarComandoCalendario(texto) {
   try {
     const Anthropic = require("@anthropic-ai/sdk");
@@ -502,6 +436,7 @@ REGLAS:
   }
 }
 
+// Fallback sin API: regex simple (el detector viejo, mejorado). Solo cancelar.
 function interpretarCalendarioFallback(texto) {
   const n = (texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -536,6 +471,8 @@ function interpretarCalendarioFallback(texto) {
   };
 }
 
+// Ejecutor principal: interpreta y ejecuta. Devuelve texto para el supervisor
+// o null si el mensaje no era de calendario (para que siga al próximo paso).
 async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
   if (!mencionaCalendario(texto)) return null;
 
@@ -544,6 +481,7 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
 
   const quien = nombreSupervisor(supervisorPhone);
 
+  // ── CONSULTAR agenda ────────────────────────────────────────────────────────
   if (intent.accion === "consultar") {
     try {
       const eventos = await listUpcomingEvents({ dateHint: intent.fecha });
@@ -561,6 +499,7 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
     }
   }
 
+  // ── CANCELAR ────────────────────────────────────────────────────────────────
   if (intent.accion === "cancelar") {
     if (!intent.nombre && !intent.fecha) {
       return `⚠️ ¿Cuál cita cancelo? Decime el nombre del cliente o la fecha.\n\nEjemplos:\n• *cancela la cita de mañana con Gabriela*\n• *borra la visita del viernes*`;
@@ -573,6 +512,7 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
         return `📭 No encontré ninguna cita${q}${c}.\n\nVerificá el nombre o la fecha e intentá de nuevo.`;
       }
 
+      // Notificar a los clientes afectados
       let notificados = 0;
       if (intent.avisarCliente !== false) {
         for (const ev of result.events) {
@@ -604,6 +544,7 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
     }
   }
 
+  // ── REAGENDAR ───────────────────────────────────────────────────────────────
   if (intent.accion === "reagendar") {
     if (!intent.nombre && !intent.fecha) {
       return `⚠️ ¿Cuál cita muevo? Decime el nombre del cliente o la fecha actual.\n\nEjemplo:\n• *cambia la cita de Gabriela para el viernes a las 10*`;
@@ -628,17 +569,6 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
         return `⚠️ La nueva fecha ya pasó. Indicá una fecha futura.`;
       }
 
-      // v8: el destino del reagendamiento está bloqueado u ocupado
-      if (result.error === "destino_ocupado") {
-        if (result.motivo === "dia_bloqueado") {
-          return `⛔ No moví la cita: el día destino está reservado${result.conflicto ? ` ("${result.conflicto}")` : ""}.\n\nElegí otro día libre.`;
-        }
-        if (result.motivo === "slot_ocupado") {
-          return `⛔ No moví la cita: ya hay algo en ese horario${result.conflicto ? ` ("${result.conflicto}")` : ""}.\n\nProbá otra hora (09:00, 11:30 o 14:00).`;
-        }
-        return `⚠️ No pude verificar el calendario destino. Por seguridad no moví la cita a ciegas. Intentá de nuevo en un momento.`;
-      }
-
       if (result.moved === 0) {
         const q = intent.nombre ? ` de *${intent.nombre}*` : "";
         return `📭 No encontré la cita${q} para mover.\n\nVerificá el nombre o la fecha.`;
@@ -646,6 +576,7 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
 
       const ev = result.events[0];
 
+      // Notificar al cliente del cambio
       let clienteNotificado = false;
       if (intent.avisarCliente !== false && ev.clientPhone && !SUPERVISORES.includes(ev.clientPhone)) {
         const msg = `Hola, le escribimos de *SS Remodelaciones* 🏗️\n\nSu visita técnica fue *reprogramada*:\n\n❌ Antes: ${ev.oldDateStr}\n✅ Ahora: *${ev.newDateStr}*\n\nSi tiene alguna consulta, con gusto le atendemos. ¡Hasta pronto! 😊`;
@@ -694,17 +625,15 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   if (IGNORAR.includes(fromE164) || IGNORAR.includes(from)) return;
 
-  // v8: ya NO se bloquea por prefijo de país. Se conserva el mecanismo por si
-  // hace falta silenciar un número específico abusivo, pero IGNORAR_PREFIJOS
-  // está vacío. La gestión de riesgo de visitas ocurre al momento de agendar
-  // (verificación humana), no bloqueando conversaciones enteras.
-  if (IGNORAR_PREFIJOS.length && IGNORAR_PREFIJOS.some(p => fromE164.startsWith(p) || from.startsWith(p))) {
-    console.log(`🚫 Mensaje silenciado (número en lista): ${from}`);
+  if (IGNORAR_PREFIJOS.some(p => fromE164.startsWith(p) || from.startsWith(p))) {
+    console.log(`🚫 Mensaje bloqueado de país restringido: ${from}`);
     return;
   }
 
+  // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
 
+  // ── v4: lectura de comprobantes bancarios por imagen ─────────────────────────
   if (esSupervisor && mediaIds) {
     const idsComprobante = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
     for (const id of idsComprobante) {
@@ -728,8 +657,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   if (esSupervisor && normalized) {
 
+    // ── FIX v3: desenvolver instrucción de voz ANTES de evaluar comandos.
+    // v7: ahora se usa TAMBIÉN para calendario (antes solo finanzas), porque
+    // el envoltorio [Instrucción de voz...] rompía la detección de citas
+    // cuando el comando llegaba por audio.
     const textoLimpio = desenvolverInstruccionVoz(normalized);
 
+    // ── PASO 1 (v6): Finanzas en lenguaje natural → DIRECTO a finanzas.js ─────
     const cmd = normalized;
 
     if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(textoLimpio)) {
@@ -742,12 +676,17 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
+    // ── PASO 2 (v7): Gestión de calendario — cancelar/reagendar/consultar ─────
+    // Usa el texto DESENVUELTO → funciona igual por texto o por audio.
     const respCalendario = await gestionarCalendarioSupervisor(textoLimpio, fromE164);
     if (respCalendario !== null) {
       await sendText(from, respCalendario);
       return;
     }
 
+    // ── PASO 3: Comandos estructurados de supervisor ──────────────────────────
+
+    // [GASTO: monto | descripcion]
     if (/^\[GASTO:/i.test(cmd)) {
       const respuesta = await handleGasto(cmd, fromE164);
       await sendText(from, respuesta);
@@ -755,6 +694,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       return;
     }
 
+    // [INGRESO: monto | descripcion]
     if (/^\[INGRESO:/i.test(cmd)) {
       const respuesta = await handleIngreso(cmd, fromE164);
       await sendText(from, respuesta);
@@ -762,18 +702,21 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       return;
     }
 
+    // [MSG_CLIENTE: nombre_o_telefono | mensaje]
     if (/^\[MSG_CLIENTE:/i.test(cmd)) {
       const respuesta = await handleMsgCliente(cmd, fromE164);
       await sendText(from, respuesta);
       return;
     }
 
+    // [VISITA: tel_cliente | nombre | proyecto | zona | dia | hora | ubicacion | email]
     if (/^\[VISITA:/i.test(cmd)) {
       const respuesta = await handleVisitaSupervisor(cmd, fromE164);
       await sendText(from, respuesta);
       return;
     }
 
+    // [RESUMEN_CLIENTE: nombre] — acceso directo al resumen IA
     if (/^\[RESUMEN_CLIENTE:/i.test(cmd)) {
       const nombre   = cmd.replace(/^\[RESUMEN_CLIENTE:\s*/i, "").replace(/\]$/, "").trim();
       const busqueda = `resumen de ${nombre}`;
@@ -782,26 +725,32 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       return;
     }
 
+    // ── PASO 4: Consultas de memoria (lenguaje natural) ───────────────────────
     const respuestaMemoria = await memoria.procesarConsultaMemoria(cmd);
     if (respuestaMemoria) {
       await sendText(from, respuestaMemoria);
       return;
     }
+
+    // ── PASO 5: Si nada matcheó, cae al flujo normal de Sasha ─────────────────
   }
 
   if (session.escalated) return;
 
+  // ── MODO SOLICITANTE DE TRABAJO ──────────────────────────────────────────────
   if (session.modo === "solicitante") {
     await handleRRHHFlow(from, normalized, session, "solicitante");
     return;
   }
 
+  // ── MODO PROVEEDOR ───────────────────────────────────────────────────────────
   if (session.modo === "proveedor") {
     await handleRRHHFlow(from, normalized, session, "proveedor");
     return;
   }
 
   try {
+    // ── Descargar imágenes ────────────────────────────────────────────────────
     let imageDataArray = [];
     if (mediaIds) {
       const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
@@ -829,6 +778,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
     addMsg(from, "user", historyText);
 
+    // ── Guardar en memoria ────────────────────────────────────────────────────
     if (!esSupervisor) {
       const clientName = session.name || null;
       if (normalized) {
@@ -849,6 +799,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
+    // ── Detectar día/fecha para disponibilidad ────────────────────────────────
     const dayMentioned = detectDayOrDate(normalized);
     let availabilityContext = "";
 
@@ -869,6 +820,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
+    // ── Llamar a Claude ───────────────────────────────────────────────────────
     const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext, imageData);
     const { cleanMessage, flag, flagData } = parseFlags(rawResponse);
 
@@ -879,6 +831,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       memoria.guardarMensaje({ phone: fromE164, clientName: session.name || null, direction: "out", type: "text", content: cleanMessage, session }).catch(() => {});
     }
 
+    // ── Monitor supervisores ──────────────────────────────────────────────────
     const clientLabel    = session.name ? `${session.name} (${from})` : from;
     const clientMsgLabel = imageDataArray.length > 0
       ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
@@ -898,6 +851,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
+    // ── Procesar flags ────────────────────────────────────────────────────────
     if (flag === "ESCALAR") {
       update(from, { escalated: true });
       await sendText(from, `📞 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
@@ -948,28 +902,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         }).catch(() => {});
       }
 
-      // ── v8: ¿esta visita requiere verificación humana? ────────────────────
-      // Prefijo extranjero (México/Colombia) o mención de finca/rancho/zona
-      // remota → NO se auto-agenda. Se avisa a supervisores para que un humano
-      // verifique identidad y ubicación antes de enviar a cualquier funcionario.
-      const motivosVerif = requiereVerificacionManual({
-        phoneE164: fromE164,
-        texto:     [normalized, ...(session.history || []).map(h => h.content || "")].join(" "),
-        zona:      updated.zone,
-        proyecto:  updated.project_desc,
-      });
-
-      if (motivosVerif) {
-        console.warn(`🛑 Visita en espera de verificación (${motivosVerif.join(", ")}): ${fromE164}`);
-        update(from, { visita_en_revision: true, visit_confirmed: false });
-        await sendText(from, mensajeClienteEnRevision(updated.name));
-        await notificarVerificacionManual({
-          from, session: get(from), motivos: motivosVerif, ultimoMensaje: normalized,
-        });
-        logLead(from, updated, "visita_en_revision");
-        return;   // no se agenda, no se crea evento
-      }
-
       const visitHour = updated.visit_hour || "09:00";
       const [hh, mm]  = visitHour.split(":");
       const hourNum   = parseInt(hh);
@@ -977,8 +909,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       let timeStr     = `${hour12}:${mm} ${hourNum >= 12 ? "p.m." : "a.m."}`;
       let dateStr     = updated.visit_day;
 
-      // ── v8: crear la visita SOLO si el calendario está libre ──────────────
-      let visitaAgendada = false;
       try {
         const eventData = await createVisitEvent({
           name:        updated.name,
@@ -990,44 +920,12 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           wazeLink:    updated.waze_link,
           clientEmail: updated.client_email,
         });
-
-        if (eventData && eventData.ok === false) {
-          // Día bloqueado o slot ocupado: NO confirmamos al cliente. Le
-          // ofrecemos volver a elegir y avisamos a supervisores.
-          console.warn(`⛔ Visita no agendada (${eventData.motivo}) para ${from}`);
-          update(from, { visit_confirmed: false, slots_shown: null });
-
-          let msgCliente;
-          if (eventData.motivo === "dia_bloqueado") {
-            msgCliente = "¡Uy! Ese día justo no tenemos disponibilidad. ¿Le sirve otro día? Trabajamos lunes, martes o viernes 😊";
-          } else if (eventData.motivo === "slot_ocupado") {
-            msgCliente = "Ese horario ya se ocupó hace un momento. ¿Le sirve otra hora ese día? Tengo 9:00, 11:30 o 2:00 p.m. 😊";
-          } else {
-            msgCliente = "Disculpe, tuve un problema para confirmar la agenda en este momento. En un ratito le confirmo su cita, ¿le parece? 🙏";
-          }
-          await sendText(from, msgCliente);
-
-          // Avisar a supervisores del intento fallido (útil con campaña activa)
-          for (const sup of SUPERVISORES) {
-            sendText(sup, `⚠️ *Intento de cita no agendado*\n\n👤 ${updated.name || "Cliente"} (${from})\n📅 Pidió: ${updated.visit_day} ${timeStr}\n🚫 Motivo: ${eventData.motivo}${eventData.conflicto ? ` ("${eventData.conflicto}")` : ""}\n\nEl cliente puede reintentar con otro horario.`).catch(() => {});
-          }
-          return;
-        }
-
         dateStr = eventData.startDate.toLocaleDateString("es-CR", {
           weekday: "long", day: "numeric", month: "long", timeZone: TZ,
         });
-        visitaAgendada = true;
         console.log(`📅 Visita agendada: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`);
       } catch (calErr) {
         console.error("❌ Error Calendar:", calErr.message);
-      }
-
-      if (!visitaAgendada) {
-        // Falla dura de calendario (excepción). No confirmamos en falso.
-        await sendText(from, "Disculpe, tuve un inconveniente para confirmar su cita. Un compañero le contactará enseguida para coordinar 🙏");
-        await notifyAllSupervisors(from, updated, normalized, "visita_solicitada");
-        return;
       }
 
       try {
@@ -1060,6 +958,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// RRHH FLOW
+// ═══════════════════════════════════════════════════════════════════════════════
 async function handleRRHHFlow(from, normalized, session, tipo) {
   const PASOS  = tipo === "solicitante" ? PASOS_SOLICITANTE : PASOS_PROVEEDOR;
   const paso   = session.rrhh_paso || 0;
@@ -1112,6 +1013,9 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (n.includes("lunes"))   return "lunes";
