@@ -5,12 +5,6 @@ const KNOWLEDGE = require("./knowledge");
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ── FIX FECHA — Sasha no sabía qué día era hoy ────────────────────────────────
-// Antes, SYSTEM_PROMPT se armaba una sola vez al arrancar el servidor, sin
-// fecha, y Claude tenía que "adivinar" qué día de la semana correspondía a
-// una fecha futura fuera de su entrenamiento — de ahí que un cliente tuviera
-// que corregirle a Sasha qué día era hoy. Esta función calcula el día y la
-// fecha reales de Costa Rica EN CADA LLAMADA, y se inyecta directo en el
-// system prompt dentro de ask() (nunca queda congelada en el deploy).
 function contextoFechaHoy() {
   const dias = ["domingo","lunes","martes","miércoles","jueves","viernes","sábado"];
   const meses = ["enero","febrero","marzo","abril","mayo","junio","julio",
@@ -154,14 +148,29 @@ const SYSTEM_PROMPT = `Sos *Sasha*, asistente virtual de *SS Remodelaciones* (So
 Tu personalidad: cálida, profesional, inteligente. Hablás español costarricense natural. Sos eficiente — nunca pedís información que ya te dieron.
 
 ╔════════════════════════════════╗
-IDIOMA — MUY IMPORTANTE
+IDIOMA — REGLA CRÍTICA v2
 ╔════════════════════════════════╗
-Detectá automáticamente el idioma en que escribe el cliente y respondé SIEMPRE en ese mismo idioma.
-- Si escribe en español → respondé en español costarricense (usted, pura vida)
-- Si escribe en inglés → respondé en inglés profesional y cálido
+REGLA PRINCIPAL: Siempre respondé en ESPAÑOL COSTARRICENSE por defecto.
+
+EXCEPCIÓN IMPORTANTE — Primer mensaje automático de Meta:
+Cuando un lead llena un formulario de Meta Ads, el PRIMER mensaje que llega tiene este formato
+automático generado por Meta (viene en inglés aunque el cliente sea tico):
+  "Hello! I filled out your form and would like to know more about your business.
+   Full name: [nombre]
+   Phone number: [teléfono]"
+Este mensaje NO lo escribió el cliente — lo generó Meta automáticamente.
+Por lo tanto, IGNORÁ el idioma de ese primer mensaje y respondé SIEMPRE EN ESPAÑOL.
+
+ADAPTACIÓN AL IDIOMA REAL DEL CLIENTE:
+A partir del SEGUNDO mensaje en adelante, detectá el idioma real del cliente:
+- Si escribe en español → seguí en español costarricense (usted, pura vida)
+- Si escribe en inglés → cambiá a inglés profesional y cálido, y mantené ese idioma
 - Si escribe en otro idioma → respondé en ese idioma
-- Si mezcla idiomas → usá el idioma predominante
-- En inglés: use "you" (formal but friendly), never switch back to Spanish mid-conversation.
+- Si mezcla idiomas → usá el predominante
+- Una vez que el cliente establece su idioma, NO lo cambies más durante la conversación
+
+EN INGLÉS: use "you" (formal but friendly). Adapt the Costa Rican warmth to English naturally.
+EN ESPAÑOL: siempre "usted", nunca "vos", "te" o "tú" para dirigirte al cliente.
 
 ╔════════════════════════════════╗
 TONO — MUY IMPORTANTE
@@ -359,9 +368,10 @@ NOTA: los comandos de supervisor para gastos, ingresos, mensajes a clientes y
 resúmenes de cliente NO se manejan con flags de Claude — se interceptan y
 procesan en otro módulo del sistema antes de llegar a este prompt. No intentes
 emitir flags para esas acciones.
-${buildPreciosSection()}
-${buildAsesoriasSection()}
-${buildNuevasCapacidades()}`;
+`;
+
+// Esta función se ejecuta en tiempo de módulo para generar las secciones dinámicas
+const SYSTEM_PROMPT_FULL = SYSTEM_PROMPT + buildPreciosSection() + buildAsesoriasSection() + buildNuevasCapacidades();
 
 // ── ask() — soporta texto, una imagen o múltiples imágenes ────────────────────
 async function ask(history, userMessage, imageData = null) {
@@ -395,7 +405,7 @@ async function ask(history, userMessage, imageData = null) {
   const response = await client.messages.create({
     model:      "claude-sonnet-4-6",
     max_tokens: 600,
-    system:     SYSTEM_PROMPT + contextoFechaHoy(),
+    system:     SYSTEM_PROMPT_FULL + contextoFechaHoy(),
     messages,
   });
 
