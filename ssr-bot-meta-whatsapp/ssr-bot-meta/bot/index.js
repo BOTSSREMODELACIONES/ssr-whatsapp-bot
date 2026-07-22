@@ -38,6 +38,30 @@
  *   - Notifica automáticamente al cliente por WhatsApp cuando su cita se
  *     cancela o se mueve (el teléfono se extrae de la descripción del evento).
  *     Se puede silenciar diciendo "sin avisar al cliente".
+ *
+ * ── CAMBIOS v8 — CONTEXTO PUENTE TEXTO→IMAGEN PARA COMPROBANTES ───────────────
+ * BUG: cuando un supervisor escribe "Registra este gasto de combustible para
+ *   el proyecto de Christian" y LUEGO manda la foto del comprobante SINPE,
+ *   WhatsApp los entrega como DOS mensajes/webhooks independientes:
+ *     1) el texto solo → dispara procesarComandoFinanciero() SIN monto →
+ *        "❌ Monto inválido: ..." (Claude sí detecta el proyecto pero no
+ *        tiene el monto, que está en la imagen que aún no llegó).
+ *     2) la imagen sola → dispara procesarComprobanteImagen() SIN el texto
+ *        original (WhatsApp no reenvía el caption si se mandó por separado)
+ *        → el "Detalle" del banco casi nunca menciona el proyecto → cae a
+ *        SSR por defecto, aunque el supervisor SÍ dijo el proyecto.
+ * FIX: pendingReceiptContext — buffer en memoria por número de supervisor.
+ *   - Si un comando financiero de TEXTO no trae monto (esComandoFinanciero
+ *     true pero sin dígitos), NO se manda a procesarComandoFinanciero (que
+ *     generaría el error falso). En su lugar se guarda como contexto
+ *     pendiente con timestamp, y se responde con un acuse corto pidiendo
+ *     la foto — no un error.
+ *   - Cuando llega una IMAGEN de ese mismo supervisor dentro de los
+ *     siguientes 3 minutos, se fusiona el texto pendiente con el caption
+ *     de la imagen (si lo hay) antes de llamar a procesarComprobanteImagen,
+ *     y se limpia el buffer.
+ *   - Contexto pendiente > 3 min se descarta automáticamente (evita que un
+ *     comentario viejo se pegue a un comprobante no relacionado).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -59,6 +83,31 @@ const SUPERVISORES = ["+50683091817", "+50671981370", "+50671951695"];
 
 // Número de Darwin — recibe copia de todo movimiento financiero registrado por otros.
 const DARWIN_PHONE = "+50683091817";
+
+// ── v8 — Contexto puente texto→imagen para comprobantes ──────────────────────
+// Map<supervisorPhoneE164, { texto: string, ts: number }>
+const pendingReceiptContext = new Map();
+const PENDING_CONTEXT_TTL_MS = 3 * 60 * 1000; // 3 minutos
+
+function guardarContextoPendiente(phoneE164, texto) {
+  pendingReceiptContext.set(phoneE164, { texto, ts: Date.now() });
+}
+
+// Devuelve el texto pendiente vigente (y lo consume) o "" si no hay / expiró.
+function consumirContextoPendiente(phoneE164) {
+  const entry = pendingReceiptContext.get(phoneE164);
+  if (!entry) return "";
+  pendingReceiptContext.delete(phoneE164);
+  if (Date.now() - entry.ts > PENDING_CONTEXT_TTL_MS) return "";
+  return entry.texto;
+}
+
+// ¿El texto es un comando financiero pero SIN monto detectable? (típico:
+// "registra este gasto para el proyecto de X" seguido de una foto).
+function esComandoFinancieroSinMonto(texto) {
+  if (!esComandoFinanciero(texto)) return false;
+  return !/\d/.test(texto); // ningún dígito en el mensaje → no hay monto
+}
 
 // ── FIX v3 — Desenvolver instrucciones de voz antes del parser financiero ────
 function desenvolverInstruccionVoz(texto) {
@@ -633,7 +682,10 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
 
-  // ── v4: lectura de comprobantes bancarios por imagen ─────────────────────────
+  // ── v4/v8: lectura de comprobantes bancarios por imagen ──────────────────────
+  // v8: se fusiona con cualquier contexto de texto pendiente de ESTE supervisor
+  // (ej. "regístrame esto a nombre del proyecto de Christian" mandado como
+  // mensaje aparte, segundos antes de la foto).
   if (esSupervisor && mediaIds) {
     const idsComprobante = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
     for (const id of idsComprobante) {
@@ -641,7 +693,10 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         const imgData = await downloadMedia(id);
         if (!imgData) continue;
 
-        const respuestaComprobante = await procesarComprobanteImagen(imgData.base64, imgData.mimeType, normalized);
+        const contextoPrevio = consumirContextoPendiente(fromE164);
+        const textoParaImagen = [contextoPrevio, normalized].filter(Boolean).join(". ").trim();
+
+        const respuestaComprobante = await procesarComprobanteImagen(imgData.base64, imgData.mimeType, textoParaImagen);
 
         if (respuestaComprobante && !respuestaComprobante.startsWith("📭")) {
           const respuestaLimpia = sanitizarRespuestaFinanciera(respuestaComprobante);
@@ -667,6 +722,17 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     const cmd = normalized;
 
     if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(textoLimpio)) {
+
+      // v8 — si el comando NO trae ningún monto, lo más probable es que el
+      // supervisor va a mandar la foto del comprobante a continuación. En
+      // vez de generar un "Monto inválido" falso, lo guardamos como
+      // contexto pendiente y esperamos la imagen.
+      if (esComandoFinancieroSinMonto(textoLimpio)) {
+        guardarContextoPendiente(fromE164, textoLimpio);
+        await sendText(from, "📌 Anotado. Mandame la foto del comprobante para completar el registro.");
+        return;
+      }
+
       const respuesta = await procesarComandoFinanciero(textoLimpio);
       if (respuesta) {
         const respuestaLimpia = sanitizarRespuestaFinanciera(respuesta);
