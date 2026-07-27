@@ -726,6 +726,18 @@ app.post("/api/transcribir-voz", async (req, res) => {
   }
 });
 
+// ── Cotizador Web App ───────────────────────────────────────────────────────────
+// FIX 2026-07-27: faltaba esta ruta. express.static() solo servía el archivo en
+// /cotizador.html (con extensión), nunca en /cotizador (limpia). Por eso Melvin
+// recibía "Cannot GET /cotizador" al abrir el link — el archivo existía en
+// public/, pero ninguna ruta lo servía sin la extensión .html.
+app.get("/cotizador", (_req, res) => {
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.sendFile(path.join(__dirname, "public", "cotizador.html"));
+});
+
 // ── Servir archivos estáticos ──────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -775,6 +787,7 @@ app.listen(PORT, () => {
 │  📌  Webhook WhatsApp: GET|POST /webhook                   │
 │  🔥  Webhook Meta Leads: GET|POST /meta-lead               │
 │  🎙️  Audio interno: transcripción en tiempo real           │
+│  🧾  Cotizador: GET /cotizador                              │
 │  🩺  Health check: GET /health                             │
 │  🧪  Test leads: GET /test-meta-lead                       │
 └────────────────────────────────────────────────────────────┘
