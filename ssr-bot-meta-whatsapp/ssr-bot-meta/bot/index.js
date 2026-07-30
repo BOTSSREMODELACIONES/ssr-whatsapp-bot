@@ -83,6 +83,27 @@
  *   caía en el mensaje genérico "no encontré la cita" (engañoso — la cita SÍ
  *   existe, el problema es el destino). Ahora se informa el motivo real y se
  *   sugieren horarios alternativos.
+ *
+ * ── CAMBIOS v10 — SASHA YA NO CALCULA EL DÍA DE LA SEMANA "DE MEMORIA" ────────
+ * BUG REAL: un cliente dijo "miércoles 5 de agosto", Sasha (Claude) le explicó
+ *   que el miércoles no es día disponible y ofreció "el viernes 8 de agosto"
+ *   — pero el 8 de agosto de 2026 es SÁBADO, no viernes. El cliente confirmó
+ *   esa fecha y el sistema agendó una visita técnica en sábado, día que la
+ *   empresa no trabaja. La causa: el system prompt (claude.js) le pide a
+ *   Claude que verifique "de memoria" en qué día de la semana cae una fecha,
+ *   y el cálculo de calendario a mano es un punto ciego conocido de los LLM.
+ * FIX (dos capas):
+ *   1) calendar.js v9 ya bloquea a nivel de backend cualquier intento de
+ *      crear/mover una cita fuera de lunes/martes/viernes, sin importar lo
+ *      que haya dicho la conversación (ver createVisitEvent y
+ *      rescheduleEventByNameAndDate). Esa es la red de seguridad real.
+ *   2) Acá en index.js: cuando el cliente menciona una FECHA ESPECÍFICA
+ *      (no un nombre de día), calcularFechaYDiaSemana() calcula el día de la
+ *      semana real con JavaScript — no con la "memoria" de Claude — y si esa
+ *      fecha NO cae en día hábil, se inyecta como [SISTEMA: ...] el dato ya
+ *      calculado, igual que ya se hace con los slots disponibles. Así Claude
+ *      nunca tiene que adivinar: se le da el hecho y solo tiene que
+ *      comunicarlo bien.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -350,15 +371,57 @@ async function handleMsgCliente(cmd, supervisorPhone) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// HELPER v10 — Calcular el día de la semana REAL de una fecha específica
+// usando JavaScript (confiable), en vez de dejar que Claude lo calcule "de
+// memoria" en la conversación (punto ciego conocido de los LLM — así fue
+// como se ofreció "viernes 8 de agosto" siendo en realidad sábado).
+// Solo aplica a fechas específicas tipo "8 de agosto" o "8/8" — los nombres
+// de día (lunes/martes/viernes) ya son inequívocos y no necesitan esto.
+// ═══════════════════════════════════════════════════════════════════════════════
+const DIAS_SEMANA_ES = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
+const MESES_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto",
+                   "septiembre","octubre","noviembre","diciembre"];
+const DIAS_HABILES = ["lunes","martes","viernes"];
+
+function calcularFechaYDiaSemana(dayMentioned) {
+  if (!dayMentioned) return null;
+  if (/^(lunes|martes|viernes)$/i.test(dayMentioned)) return null; // nombre de día, no hace falta
+
+  const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
+  let candidate = null;
+
+  const mFecha = dayMentioned.match(/^(\d{1,2})\s+de\s+([a-záéíóúñ]+)$/i);
+  if (mFecha) {
+    const dia    = parseInt(mFecha[1]);
+    const mesIdx = MESES_ES.indexOf(mFecha[2].toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+    if (mesIdx >= 0) {
+      candidate = new Date(now.getFullYear(), mesIdx, dia);
+      if (candidate < now) candidate = new Date(now.getFullYear() + 1, mesIdx, dia);
+    }
+  } else {
+    const mSlash = dayMentioned.match(/^(\d{1,2})\/(\d{1,2})$/);
+    if (mSlash) {
+      candidate = new Date(now.getFullYear(), parseInt(mSlash[2]) - 1, parseInt(mSlash[1]));
+      if (candidate < now) candidate = new Date(now.getFullYear() + 1, parseInt(mSlash[2]) - 1, parseInt(mSlash[1]));
+    }
+  }
+
+  if (!candidate || isNaN(candidate.getTime())) return null;
+  return { date: candidate, diaSemana: DIAS_SEMANA_ES[candidate.getDay()] };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPER v9 — Formatear rechazo de disponibilidad (bloqueo/slot ocupado) y
 // sugerir horarios alternativos del mismo día para no dejar al supervisor
 // (ni al flujo automático) sin salida.
 // ═══════════════════════════════════════════════════════════════════════════════
 async function formatearRechazoDisponibilidad(eventData, day) {
   const motivoTexto = {
-    dia_bloqueado:    "el día está bloqueado internamente",
-    slot_ocupado:     "ese horario ya está ocupado",
-    error_calendario: "no se pudo consultar el calendario en este momento",
+    dia_bloqueado:     "el día está bloqueado internamente",
+    slot_ocupado:      "ese horario ya está ocupado",
+    dia_no_laborable:  "esa fecha no cae en un día de visitas (solo trabajamos lunes, martes y viernes)",
+    error_calendario:  "no se pudo consultar el calendario en este momento",
   }[eventData.motivo] || "no está disponible";
 
   const lineas = [
@@ -701,8 +764,9 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
       // horarios alternativos del día de destino.
       if (result.error === "destino_ocupado") {
         const motivoTexto = {
-          dia_bloqueado: "ese día está bloqueado internamente",
-          slot_ocupado:  "ese horario ya está ocupado",
+          dia_bloqueado:    "ese día está bloqueado internamente",
+          slot_ocupado:     "ese horario ya está ocupado",
+          dia_no_laborable: "esa fecha no cae en día de visitas (solo lunes, martes o viernes)",
         }[result.motivo] || "ese horario no está disponible";
 
         let sugerencia = "";
@@ -976,19 +1040,35 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     let availabilityContext = "";
 
     if (dayMentioned && dayMentioned !== session.slots_shown) {
-      const slots = await getAvailableSlots(dayMentioned);
-      update(from, { slots_shown: dayMentioned });
 
-      if (slots.length === 0) {
-        availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele los otros días disponibles: lunes, martes o viernes.]`;
+      // ── v10: si es una FECHA ESPECÍFICA (no un nombre de día), calculamos
+      // su día de la semana real con JS ANTES de consultar slots. Si cae en
+      // día no hábil, se lo decimos a Claude como hecho consumado — no le
+      // pedimos que lo calcule él, que es donde estaba el bug (confundió
+      // sábado 8 de agosto con viernes).
+      const infoFecha = calcularFechaYDiaSemana(dayMentioned);
+
+      if (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana)) {
+        update(from, { slots_shown: dayMentioned });
+        const fechaLegible = infoFecha.date.toLocaleDateString("es-CR", {
+          timeZone: TZ, day: "numeric", month: "long",
+        });
+        availabilityContext = `\n\n[SISTEMA: La fecha "${dayMentioned}" (${fechaLegible}) cae en ${infoFecha.diaSemana.toUpperCase()}, que NO es un día disponible. Días disponibles: lunes, martes y viernes. Explicale esto al cliente con claridad (mencioná el día real de la semana) y ofrecele el lunes, martes o viernes más cercano. NO confirmes ni digas que esa fecha quedó agendada bajo ninguna circunstancia.]`;
       } else {
-        const slotsText = slots.map(s => {
-          const [h, m] = s.split(":");
-          const hNum   = parseInt(h);
-          const h12    = hNum > 12 ? hNum - 12 : hNum;
-          return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
-        }).join(", ");
-        availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.]`;
+        const slots = await getAvailableSlots(dayMentioned);
+        update(from, { slots_shown: dayMentioned });
+
+        if (slots.length === 0) {
+          availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele los otros días disponibles: lunes, martes o viernes.]`;
+        } else {
+          const slotsText = slots.map(s => {
+            const [h, m] = s.split(":");
+            const hNum   = parseInt(h);
+            const h12    = hNum > 12 ? hNum - 12 : hNum;
+            return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
+          }).join(", ");
+          availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.]`;
+        }
       }
     }
 
