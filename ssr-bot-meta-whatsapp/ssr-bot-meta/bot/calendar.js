@@ -1,5 +1,25 @@
 const { google } = require("googleapis");
 
+// ── v9 — Blindaje de días hábiles ─────────────────────────────────────────────
+// BUG: getNextAvailableDate() solo validaba día hábil cuando recibía un
+// NOMBRE de día ("lunes"/"martes"/"viernes", vía DAY_MAP). Cuando recibía
+// una FECHA ESPECÍFICA (ej. "8 de agosto", vía parseSpecificDate), la usaba
+// tal cual sin verificar en qué día de la semana caía. Como Claude calcula el
+// día de la semana "de memoria" en la conversación y puede equivocarse (pasó
+// con "viernes 8 de agosto" cuando el 8 es sábado), el sistema terminó
+// agendando una visita en sábado — día que la empresa no trabaja — porque
+// verificarDisponibilidadExacta solo revisa conflictos con otros eventos,
+// no si el día es hábil.
+// FIX: esDiaLaborable() se aplica en createVisitEvent() y getAvailableSlots()
+// ANTES de cualquier consulta a Calendar. Si la fecha resultante no cae en
+// lunes/martes/viernes, se rechaza con motivo "dia_no_laborable" sin
+// necesidad de gastar una llamada a la API.
+const BUSINESS_DAYS = [1, 2, 5]; // 1=lunes, 2=martes, 5=viernes (0=domingo)
+
+function esDiaLaborable(date) {
+  return BUSINESS_DAYS.includes(date.getDay());
+}
+
 // ── Parsear fecha específica (ej: "19 de mayo", "19/05", "2026-05-19") ────────
 function parseSpecificDate(str) {
   if (!str) return null;
@@ -135,9 +155,17 @@ async function getAvailableSlots(dayName) {
   ];
 
   try {
+    const dayStart = getNextAvailableDate(dayName, "09:00");
+
+    // ── v9: si la fecha resuelta no cae en día hábil (lunes/martes/viernes),
+    // no tiene sentido ni siquiera consultar Calendar — no hay slots posibles.
+    if (!esDiaLaborable(dayStart)) {
+      console.warn(`⛔ getAvailableSlots: "${dayName}" cae en día NO laborable (${dayStart.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday: "long" })})`);
+      return [];
+    }
+
     const calendar = await getCalendarClient();
 
-    const dayStart = getNextAvailableDate(dayName, "09:00");
     const dayEnd   = new Date(dayStart);
     dayEnd.setHours(17, 0, 0, 0);
 
@@ -188,12 +216,17 @@ async function getAvailableSlots(dayName) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NUEVO v8 — verificarDisponibilidadExacta
+// verificarDisponibilidadExacta
 // Verifica si una fecha/hora concreta está libre ANTES de crear el evento.
 // A diferencia de getAvailableSlots (que trabaja sobre 3 slots fijos), esta
 // función chequea el rango real [inicio, inicio+60min] de la cita que se va a
 // crear, contra TODOS los eventos de ese día — incluyendo bloqueos de día
 // completo (ej: Melvin reservó el día para instalar muebles).
+//
+// NOTA v9: esta función SOLO revisa conflictos con otros eventos. La
+// validación de "¿es un día hábil?" vive en createVisitEvent() (se hace
+// ANTES de llamar a esta función, para no gastar una consulta a la API en
+// una fecha que de entrada nunca se iba a poder agendar).
 //
 // Devuelve:
 //   { disponible: true }                            → se puede agendar
@@ -414,6 +447,13 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
     return { moved: 0, ambiguous: false, events: [], error: "fecha_pasada" };
   }
 
+  // ── v9: si el destino cae en día NO laborable (lunes/martes/viernes),
+  // rechazar de una vez — mismo blindaje que createVisitEvent.
+  if (!esDiaLaborable(nuevaFecha)) {
+    console.warn(`⛔ rescheduleEventByNameAndDate: destino "${newDateHint}" cae en día NO laborable`);
+    return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: "dia_no_laborable", conflicto: null };
+  }
+
   // v8: verificar que el destino esté libre antes de mover (respeta bloqueos)
   const dispo = await verificarDisponibilidadExacta(nuevaFecha);
   if (!dispo.disponible) {
@@ -542,11 +582,15 @@ function resolveDateHint(hint) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // createVisitEvent
-// v8: ahora VERIFICA disponibilidad antes de insertar. Si el día está
-// bloqueado (ej: Melvin reservó el día completo) o el slot ya está ocupado,
-// NO crea el evento y devuelve { ok:false, motivo, conflicto } para que el
-// llamador (flujo cliente o [VISITA:] de supervisor) informe en vez de
-// duplicar/pisar la agenda.
+// v8: VERIFICA disponibilidad (bloqueos/citas) antes de insertar.
+// v9: TAMBIÉN verifica que el día resultante sea hábil (lunes/martes/viernes)
+//   antes de cualquier otra cosa — esto es lo que evita que una fecha
+//   específica mal etiquetada (ej. "viernes 8 de agosto" cuando el 8 es
+//   sábado) termine agendando una visita en un día que la empresa no trabaja.
+// Si el día no es hábil, o el slot está bloqueado/ocupado, NO crea el evento
+// y devuelve { ok:false, motivo, conflicto } para que el llamador (flujo
+// cliente o [VISITA:] de supervisor) informe en vez de duplicar/pisar la
+// agenda o confirmar algo que no existe.
 // ─────────────────────────────────────────────────────────────────────────────
 async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail, skipAvailabilityCheck = false }) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
@@ -556,10 +600,22 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
 
   const startDate = getNextAvailableDate(day, hour);
 
-  // ── v8: VERIFICACIÓN DE DISPONIBILIDAD (respeta bloqueos y slots ocupados) ──
-  // Se ejecuta ANTES de borrar citas previas o insertar nada. Si el destino
-  // no está libre, abortamos sin tocar la agenda.
   if (!skipAvailabilityCheck) {
+    // ── v9: PRIMERO validar día hábil (no gasta llamada a la API si ya de
+    // entrada la fecha no es agendable).
+    if (!esDiaLaborable(startDate)) {
+      console.warn(`⛔ createVisitEvent abortado: "${day}" cae en día NO laborable (${startDate.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday: "long" })})`);
+      return {
+        ok: false,
+        motivo: "dia_no_laborable",
+        conflicto: null,
+        startDate,
+      };
+    }
+
+    // ── v8: VERIFICACIÓN DE DISPONIBILIDAD (respeta bloqueos y slots ocupados) ──
+    // Se ejecuta ANTES de borrar citas previas o insertar nada. Si el destino
+    // no está libre, abortamos sin tocar la agenda.
     const dispo = await verificarDisponibilidadExacta(startDate);
     if (!dispo.disponible) {
       console.warn(`⛔ createVisitEvent abortado: ${dispo.motivo} (${dispo.conflicto || "—"})`);
@@ -635,4 +691,5 @@ module.exports = {
   cancelEventByNameAndDate,
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
+  esDiaLaborable,
 };
