@@ -62,6 +62,27 @@
  *     y se limpia el buffer.
  *   - Contexto pendiente > 3 min se descarta automáticamente (evita que un
  *     comentario viejo se pegue a un comprobante no relacionado).
+ *
+ * ── CAMBIOS v9 — RESPETAR BLOQUEOS MANUALES DE CALENDARIO ──────────────────────
+ * BUG: createVisitEvent() (calendar.js v8) YA verifica disponibilidad real
+ *   contra Google Calendar (día bloqueado por Darwin/Melvin, o slot ocupado)
+ *   y devuelve { ok:false, motivo, conflicto } sin crear el evento. Pero
+ *   index.js NUNCA revisaba ese campo `ok`: tanto el flujo automático de
+ *   cliente (flag VISITA) como el comando de supervisor [VISITA: ...]
+ *   confirmaban "✅ ¡Listo! Su cita quedó agendada" (y se lo avisaban al
+ *   cliente por WhatsApp) AUNQUE el evento no se hubiera creado realmente.
+ *   Resultado: falsos positivos — el cliente cree que tiene cita, no existe
+ *   en el calendario, y nadie se entera del conflicto.
+ * FIX: ambos call-sites ahora revisan `eventData.ok`. Si es false:
+ *   - NO se envía confirmación de éxito al cliente ni al supervisor.
+ *   - Se consultan slots alternativos con getAvailableSlots() para el mismo
+ *     día y se ofrecen como opción.
+ *   - Se notifica a los supervisores que hubo un intento de agendar sobre
+ *     un bloqueo, para que le den seguimiento manual si hace falta.
+ * También se corrige rescheduleEventByNameAndDate: el caso "destino_ocupado"
+ *   caía en el mensaje genérico "no encontré la cita" (engañoso — la cita SÍ
+ *   existe, el problema es el destino). Ahora se informa el motivo real y se
+ *   sugieren horarios alternativos.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -329,6 +350,46 @@ async function handleMsgCliente(cmd, supervisorPhone) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// HELPER v9 — Formatear rechazo de disponibilidad (bloqueo/slot ocupado) y
+// sugerir horarios alternativos del mismo día para no dejar al supervisor
+// (ni al flujo automático) sin salida.
+// ═══════════════════════════════════════════════════════════════════════════════
+async function formatearRechazoDisponibilidad(eventData, day) {
+  const motivoTexto = {
+    dia_bloqueado:    "el día está bloqueado internamente",
+    slot_ocupado:     "ese horario ya está ocupado",
+    error_calendario: "no se pudo consultar el calendario en este momento",
+  }[eventData.motivo] || "no está disponible";
+
+  const lineas = [
+    `⚠️ No se pudo agendar: ${motivoTexto}${eventData.conflicto ? ` (${eventData.conflicto})` : ""}.`,
+  ];
+
+  if (eventData.motivo !== "error_calendario") {
+    try {
+      const slots = await getAvailableSlots(day);
+      if (slots.length > 0) {
+        const slotsText = slots.map(s => {
+          const [h, m] = s.split(":");
+          const hNum   = parseInt(h);
+          const h12    = hNum > 12 ? hNum - 12 : hNum;
+          return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
+        }).join(", ");
+        lineas.push(`🕐 Horarios libres ese día: ${slotsText}`);
+      } else {
+        lineas.push(`📭 No hay horarios libres ese día. Probá otro día.`);
+      }
+    } catch {
+      lineas.push(`ℹ️ Probá con otro horario o día.`);
+    }
+  } else {
+    lineas.push(`ℹ️ Reintentá en unos minutos o agendá manualmente en Calendar.`);
+  }
+
+  return lineas.join("\n");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HANDLER — [VISITA: tel_cliente | nombre | proyecto | zona | dia | hora | ubicacion | email]
 // ═══════════════════════════════════════════════════════════════════════════════
 async function handleVisitaSupervisor(cmd, supervisorPhone) {
@@ -376,6 +437,21 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
       wazeLink: ubicacion, clientEmail: email,
     });
 
+    // ── v9: si el calendario rechazó la cita (bloqueo o slot ocupado), NO
+    // confirmamos éxito ni avisamos al cliente. Se informa el motivo y se
+    // sugieren horarios alternativos del mismo día.
+    if (!eventData.ok) {
+      console.warn(`⛔ handleVisitaSupervisor: no se creó el evento (${eventData.motivo})`);
+      const rechazo = await formatearRechazoDisponibilidad(eventData, day);
+      return [
+        `❌ *No se agendó la visita de ${name}*`,
+        ``,
+        rechazo,
+        ``,
+        `Reintentá con \`[VISITA: ...]\` usando otro día/hora, o coordinalo manualmente en Calendar.`,
+      ].join("\n");
+    }
+
     const dateStr = eventData.startDate.toLocaleDateString("es-CR", {
       weekday: "long", day: "numeric", month: "long", timeZone: TZ,
     });
@@ -411,6 +487,7 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
       `📅 Fecha: *${dateStr}*`,
       `🕐 Hora: *${timeStr}*`,
       ubicacion && `🗺️ Ubicación: ${ubicacion}`,
+      eventData.rescheduled ? `🔄 Se reemplazó una cita anterior de este cliente.` : "",
       ``,
       esTelefono
         ? `✉️ Cliente notificado automáticamente por WhatsApp.`
@@ -616,6 +693,35 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
 
       if (result.error === "fecha_pasada") {
         return `⚠️ La nueva fecha ya pasó. Indicá una fecha futura.`;
+      }
+
+      // ── v9: destino ocupado/bloqueado — antes caía en el "no encontré la
+      // cita" genérico, lo cual era engañoso (la cita SÍ existe, el problema
+      // es el destino). Ahora se informa el motivo real y se sugieren
+      // horarios alternativos del día de destino.
+      if (result.error === "destino_ocupado") {
+        const motivoTexto = {
+          dia_bloqueado: "ese día está bloqueado internamente",
+          slot_ocupado:  "ese horario ya está ocupado",
+        }[result.motivo] || "ese horario no está disponible";
+
+        let sugerencia = "";
+        if (intent.nuevaFecha) {
+          try {
+            const slots = await getAvailableSlots(intent.nuevaFecha);
+            if (slots.length > 0) {
+              const slotsText = slots.map(s => {
+                const [h, m] = s.split(":");
+                const hNum   = parseInt(h);
+                const h12    = hNum > 12 ? hNum - 12 : hNum;
+                return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
+              }).join(", ");
+              sugerencia = `\n\n🕐 Horarios libres ese día: ${slotsText}`;
+            }
+          } catch {}
+        }
+
+        return `⚠️ No se pudo reagendar: ${motivoTexto}${result.conflicto ? ` (${result.conflicto})` : ""}.${sugerencia}`;
       }
 
       if (result.moved === 0) {
@@ -975,8 +1081,15 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       let timeStr     = `${hour12}:${mm} ${hourNum >= 12 ? "p.m." : "a.m."}`;
       let dateStr     = updated.visit_day;
 
+      // ── v9: ya NO se asume éxito. Se revisa eventData.ok antes de decidir
+      // qué mensaje mandarle al cliente. Si el calendario rechazó la cita
+      // (bloqueo manual de Darwin/Melvin o slot ocupado), el cliente recibe
+      // una respuesta honesta con horarios alternativos, en vez de una
+      // falsa confirmación de "listo, agendada".
+      let eventOk = false;
+      let eventData = null;
       try {
-        const eventData = await createVisitEvent({
+        eventData = await createVisitEvent({
           name:        updated.name,
           phone:       from,
           project:     updated.project_desc,
@@ -986,29 +1099,59 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           wazeLink:    updated.waze_link,
           clientEmail: updated.client_email,
         });
-        dateStr = eventData.startDate.toLocaleDateString("es-CR", {
-          weekday: "long", day: "numeric", month: "long", timeZone: TZ,
-        });
-        console.log(`📅 Visita agendada: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`);
+
+        if (eventData.ok) {
+          eventOk = true;
+          dateStr = eventData.startDate.toLocaleDateString("es-CR", {
+            weekday: "long", day: "numeric", month: "long", timeZone: TZ,
+          });
+          console.log(`📅 Visita agendada: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`);
+        } else {
+          console.warn(`⛔ Visita NO agendada (flujo cliente): ${eventData.motivo} — ${eventData.conflicto || "—"}`);
+        }
       } catch (calErr) {
         console.error("❌ Error Calendar:", calErr.message);
       }
 
-      try {
-        await sendVisitConfirmation({
-          name: updated.name, phone: from, project: updated.project_desc,
-          zone: updated.zone, day: updated.visit_day, hour: updated.visit_hour,
-          wazeLink: updated.waze_link, clientEmail: updated.client_email,
-          dateStr, timeStr,
-        });
-      } catch (emailErr) {
-        console.error("❌ Error email:", emailErr.message);
-      }
+      if (eventOk) {
+        try {
+          await sendVisitConfirmation({
+            name: updated.name, phone: from, project: updated.project_desc,
+            zone: updated.zone, day: updated.visit_day, hour: updated.visit_hour,
+            wazeLink: updated.waze_link, clientEmail: updated.client_email,
+            dateStr, timeStr,
+          });
+        } catch (emailErr) {
+          console.error("❌ Error email:", emailErr.message);
+        }
 
-      registerVisit({ ...updated, phone: from }).catch(() => {});
-      await notifyAllSupervisors(from, updated, normalized, "visita_solicitada");
-      logLead(from, updated, "visita_solicitada");
-      await sendText(from, `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`);
+        registerVisit({ ...updated, phone: from }).catch(() => {});
+        await notifyAllSupervisors(from, updated, normalized, "visita_solicitada");
+        logLead(from, updated, "visita_solicitada");
+        await sendText(from, `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`);
+      } else {
+        // No se creó el evento: no confirmamos, ofrecemos horarios reales
+        // del mismo día y avisamos a los supervisores para seguimiento manual.
+        const rechazo = eventData
+          ? await formatearRechazoDisponibilidad(eventData, updated.visit_day)
+          : "⚠️ Hubo un problema técnico al consultar el calendario.";
+
+        await sendText(from, [
+          `Disculpe, ese horario ya no está disponible 🙏`,
+          ``,
+          rechazo.replace(/^⚠️ No se pudo agendar: /, ""),
+          ``,
+          `¿Le sirve alguno de esos horarios, o prefiere otro día?`,
+        ].join("\n"));
+
+        update(from, { visit_confirmed: false, lead_saved: session.lead_saved || false });
+        await notifyAllSupervisors(
+          from, updated,
+          `⚠️ Intento de agendar chocó con un bloqueo/cita existente (${eventData?.motivo || "error"}). El cliente sigue esperando horario.`,
+          "visita_solicitada"
+        );
+        logLead(from, updated, "visita_rechazada_conflicto");
+      }
 
     } else if (flag === "SOLICITANTE") {
       update(from, { modo: "solicitante", rrhh_paso: 0, rrhh_data: {} });
