@@ -14,13 +14,59 @@ const { google } = require("googleapis");
 // ANTES de cualquier consulta a Calendar. Si la fecha resultante no cae en
 // lunes/martes/viernes, se rechaza con motivo "dia_no_laborable" sin
 // necesidad de gastar una llamada a la API.
+//
+// ── v10 — Dos bugs adicionales de cómputo de fechas ───────────────────────────
+// BUG A: parseSpecificDate() usaba `new Date().getFullYear()` (año del
+//   SERVIDOR, que corre en UTC en Railway) como año por defecto cuando el
+//   cliente no lo menciona. Cerca de medianoche, UTC y Costa Rica (UTC-6)
+//   pueden estar en años distintos. FIX: nowCR() calcula "ahora" en zona
+//   horaria de Costa Rica, y ese es el año que se usa por defecto.
+// BUG B: cuando la fecha pedida ya había pasado este año, getNextAvailableDate
+//   le sumaba "+7 días" a ciegas — sin relación real con la fecha pedida.
+//   Ejemplo real: pedir "1 de agosto" el 4 de agosto resultaba en "8 de
+//   agosto" (que además puede caer en día no hábil, como pasó). FIX: si la
+//   fecha ya pasó y el cliente NO dio un año explícito, se interpreta como
+//   el mismo día/mes del PRÓXIMO AÑO — el comportamiento correcto para una
+//   fecha específica que ya pasó (igual que cualquier calendario real).
+//   Si el cliente SÍ dio un año explícito y ya pasó, no se reinterpreta:
+//   ese es un error del cliente/supervisor que debe corregirse explícitamente,
+//   no algo que el sistema deba adivinar.
+// ─────────────────────────────────────────────────────────────────────────────
 const BUSINESS_DAYS = [1, 2, 5]; // 1=lunes, 2=martes, 5=viernes (0=domingo)
 
 function esDiaLaborable(date) {
   return BUSINESS_DAYS.includes(date.getDay());
 }
 
+// "Ahora" en zona horaria de Costa Rica — usar SIEMPRE en vez de `new Date()`
+// crudo para cualquier cómputo de año/día por defecto (el servidor corre en
+// UTC en Railway).
+function nowCR() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+}
+
+// ── Próximos N días hábiles a partir de una fecha (sin incluirla) ────────────
+// Se usa para darle a Sasha fechas REALES y ya calculadas cuando el cliente
+// pide un día que no es laborable — así nunca tiene que inferir "el viernes
+// más cercano" por su cuenta.
+function proximosDiasHabiles(desde, cantidad = 3) {
+  const resultado = [];
+  const cursor = new Date(desde);
+  cursor.setHours(0, 0, 0, 0);
+  cursor.setDate(cursor.getDate() + 1);
+  while (resultado.length < cantidad) {
+    if (esDiaLaborable(cursor)) resultado.push(new Date(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return resultado;
+}
+
 // ── Parsear fecha específica (ej: "19 de mayo", "19/05", "2026-05-19") ────────
+// Devuelve { date, explicitYear } o null. explicitYear indica si el año vino
+// dado por el usuario (true) o se asumió el año actual en CR (false) — esto
+// determina si getNextAvailableDate puede "adelantar" la fecha al próximo
+// año cuando ya pasó, o si debe respetarla tal cual (año explícito = intención
+// clara del usuario, no se reinterpreta).
 function parseSpecificDate(str) {
   if (!str) return null;
   const s = str.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -34,20 +80,22 @@ function parseSpecificDate(str) {
   if (m1) {
     const month = MONTHS[m1[2]];
     if (month !== undefined) {
-      const year = m1[3] ? parseInt(m1[3]) : new Date().getFullYear();
-      return new Date(year, month, parseInt(m1[1]));
+      const explicitYear = !!m1[3];
+      const year = explicitYear ? parseInt(m1[3]) : nowCR().getFullYear();
+      return { date: new Date(year, month, parseInt(m1[1])), explicitYear };
     }
   }
 
   const m2 = s.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?$/);
   if (m2) {
-    const year = m2[3] ? parseInt(m2[3]) : new Date().getFullYear();
-    return new Date(year, parseInt(m2[2]) - 1, parseInt(m2[1]));
+    const explicitYear = !!m2[3];
+    const year = explicitYear ? parseInt(m2[3]) : nowCR().getFullYear();
+    return { date: new Date(year, parseInt(m2[2]) - 1, parseInt(m2[1])), explicitYear };
   }
 
   const m3 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (m3) {
-    return new Date(parseInt(m3[1]), parseInt(m3[2]) - 1, parseInt(m3[3]));
+    return { date: new Date(parseInt(m3[1]), parseInt(m3[2]) - 1, parseInt(m3[3])), explicitYear: true };
   }
 
   return null;
@@ -79,16 +127,29 @@ function getNextAvailableDate(dayName, hourStr) {
     if (hour > 16) hour = 16;
   }
 
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  const now = nowCR();
 
-  const specificDate = parseSpecificDate(dayName);
-  if (specificDate) {
+  const parsed = parseSpecificDate(dayName);
+  if (parsed) {
+    const specificDate = parsed.date;
     specificDate.setHours(hour, minute, 0, 0);
+
     if (specificDate <= now) {
-      console.warn(`⚠️ Calendar: fecha "${dayName}" ya pasó o es hoy, usando siguiente semana.`);
-      specificDate.setDate(specificDate.getDate() + 7);
+      if (parsed.explicitYear) {
+        // El usuario dio un año explícito y ya pasó — no lo reinterpretamos,
+        // eso sería adivinar la intención. Se deja tal cual; verificarDisponibilidadExacta
+        // / esDiaLaborable seguirán aplicando sobre esta fecha (probablemente
+        // resultará en un rechazo aguas abajo, que es lo correcto).
+        console.warn(`⚠️ Calendar: fecha "${dayName}" con año explícito ya pasó. No se reinterpreta.`);
+      } else {
+        // v10 FIX: antes se sumaban "+7 días" a ciegas (sin relación con la
+        // fecha pedida). Ahora se interpreta correctamente como el mismo
+        // día/mes del PRÓXIMO AÑO.
+        console.warn(`⚠️ Calendar: fecha "${dayName}" ya pasó este año, usando el próximo año.`);
+        specificDate.setFullYear(specificDate.getFullYear() + 1);
+      }
     }
-    console.log(`📅 Calendar: fecha específica "${dayName}" → ${specificDate.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday:"long", day:"numeric", month:"long" })}`);
+    console.log(`📅 Calendar: fecha específica "${dayName}" → ${specificDate.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday:"long", day:"numeric", month:"long", year:"numeric" })}`);
     return specificDate;
   }
 
@@ -442,7 +503,7 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
 
   nuevaFecha.setHours(hour, minute, 0, 0);
 
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  const now = nowCR();
   if (nuevaFecha <= now) {
     return { moved: 0, ambiguous: false, events: [], error: "fecha_pasada" };
   }
@@ -552,7 +613,7 @@ function resolveDateHint(hint) {
   if (!hint) return null;
 
   const s = hint.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const now = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
+  const now = nowCR();
 
   if (s === "hoy") return now;
   if (s === "manana" || s === "mañana") {
@@ -577,7 +638,15 @@ function resolveDateHint(hint) {
     return d;
   }
 
-  return parseSpecificDate(sDia) || parseSpecificDate(s);
+  // v10: unificar con la misma lógica de rollover-al-próximo-año que
+  // getNextAvailableDate (antes esta rama no aplicaba ningún rollover).
+  const parsed = parseSpecificDate(sDia) || parseSpecificDate(s);
+  if (!parsed) return null;
+  const d = parsed.date;
+  if (d < now && !parsed.explicitYear) {
+    d.setFullYear(d.getFullYear() + 1);
+  }
+  return d;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -692,4 +761,5 @@ module.exports = {
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
   esDiaLaborable,
+  proximosDiasHabiles,
 };
