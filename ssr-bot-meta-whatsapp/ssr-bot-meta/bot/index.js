@@ -99,11 +99,44 @@
  *      rescheduleEventByNameAndDate). Esa es la red de seguridad real.
  *   2) Acá en index.js: cuando el cliente menciona una FECHA ESPECÍFICA
  *      (no un nombre de día), calcularFechaYDiaSemana() calcula el día de la
- *      semana real con JavaScript — no con la "memoria" de Claude — y si esa
- *      fecha NO cae en día hábil, se inyecta como [SISTEMA: ...] el dato ya
- *      calculado, igual que ya se hace con los slots disponibles. Así Claude
- *      nunca tiene que adivinar: se le da el hecho y solo tiene que
- *      comunicarlo bien.
+ *      semana real con JavaScript — no con la "memoria" de Claude.
+ *
+ * ── CAMBIOS v11 — CIERRE COMPLETO DEL PIPELINE DE FECHAS ──────────────────────
+ * Auditoría completa de extremo a extremo tras el incidente del sábado 8 de
+ * agosto. Se encontraron y corrigieron 3 puntos ciegos adicionales:
+ *
+ * BUG 1 — Prioridad de detección invertida: detectDayOrDate() revisaba
+ *   PRIMERO si el texto contenía "lunes"/"martes"/"viernes" como substring, y
+ *   solo si no encontraba nada, buscaba una fecha específica ("D de mes").
+ *   Esto significa que un mensaje como "el lunes 24 de agosto" se detectaba
+ *   como "lunes" (nombre de día), ignorando la fecha exacta — y el sistema
+ *   calculaba disponibilidad para el PRÓXIMO lunes desde hoy, que puede NO
+ *   ser el 24. FIX: ahora se busca primero una fecha específica (más
+ *   precisa); el nombre de día es el fallback solo si no hay fecha explícita.
+ *
+ * BUG 2 — Días no hábiles "invisibles" para el detector: detectDayOrDate()
+ *   solo reconocía lunes/martes/viernes como nombres de día; si el cliente
+ *   decía "el miércoles" o "el sábado" SIN fecha específica, la función no
+ *   detectaba nada, no se inyectaba ningún [SISTEMA:...], y Sasha quedaba sin
+ *   contexto verificado — dependía solo de la regla general del system
+ *   prompt. FIX: ahora se reconocen también miércoles/jueves/sábado/domingo,
+ *   y siempre se responde con fechas reales calculadas (ver BUG 3).
+ *
+ * BUG 3 — Sasha tenía que "inferir" cuál era el día hábil más cercano: aun
+ *   con el fix v10, cuando una fecha caía en día no hábil, el mensaje de
+ *   sistema solo decía "ofrecele el lunes/martes/viernes más cercano" — sin
+ *   fechas concretas. Eso todavía le pedía a Claude un cálculo de calendario
+ *   (que fue exactamente la causa raíz del bug original). FIX: calendar.js
+ *   ahora expone proximosDiasHabiles(), que calcula con JS los próximos 3
+ *   días hábiles reales a partir de hoy. index.js se los inyecta a Claude ya
+ *   resueltos ("viernes 7 de agosto, lunes 10 de agosto, martes 11 de
+ *   agosto") — Sasha ya no calcula NADA relacionado con fechas, solo
+ *   comunica lo que el sistema ya verificó.
+ *
+ * Con esto, en todo el pipeline (mensaje del cliente → flag [VISITA:] →
+ * createVisitEvent → Google Calendar) no queda ningún punto donde el día de
+ * la semana, el año, o la cercanía de una fecha dependan del cálculo mental
+ * de un LLM. Todo pasa por funciones de JavaScript deterministas.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -112,7 +145,8 @@ const { get, update, addMsg, reset } = require("./state");
 const { ask }                        = require("./claude");
 const { sendText, markRead, downloadMedia, sendMediaById } = require("./messenger");
 const { createVisitEvent, getAvailableSlots, cancelEventByNameAndDate,
-        rescheduleEventByNameAndDate, listUpcomingEvents } = require("./calendar");
+        rescheduleEventByNameAndDate, listUpcomingEvents,
+        proximosDiasHabiles } = require("./calendar");
 const { sendVisitConfirmation }      = require("./email");
 const { upsertLead, registerVisit }  = require("./crm");
 const KNOWLEDGE                      = require("./knowledge");
@@ -371,7 +405,7 @@ async function handleMsgCliente(cmd, supervisorPhone) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// HELPER v10 — Calcular el día de la semana REAL de una fecha específica
+// HELPER v10/v11 — Calcular el día de la semana REAL de una fecha específica
 // usando JavaScript (confiable), en vez de dejar que Claude lo calcule "de
 // memoria" en la conversación (punto ciego conocido de los LLM — así fue
 // como se ofreció "viernes 8 de agosto" siendo en realidad sábado).
@@ -382,10 +416,12 @@ const DIAS_SEMANA_ES = ["domingo","lunes","martes","miercoles","jueves","viernes
 const MESES_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto",
                    "septiembre","octubre","noviembre","diciembre"];
 const DIAS_HABILES = ["lunes","martes","viernes"];
+const NOMBRES_DIA_NO_HABIL = ["miercoles","jueves","sabado","domingo"];
 
 function calcularFechaYDiaSemana(dayMentioned) {
   if (!dayMentioned) return null;
   if (/^(lunes|martes|viernes)$/i.test(dayMentioned)) return null; // nombre de día, no hace falta
+  if (NOMBRES_DIA_NO_HABIL.includes(dayMentioned)) return null;    // nombre de día no hábil, se maneja aparte
 
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
   let candidate = null;
@@ -397,6 +433,8 @@ function calcularFechaYDiaSemana(dayMentioned) {
       .normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
     if (mesIdx >= 0) {
       candidate = new Date(now.getFullYear(), mesIdx, dia);
+      // v11: mismo criterio que calendar.js — si ya pasó, es el próximo año,
+      // no una fecha arbitraria cercana.
       if (candidate < now) candidate = new Date(now.getFullYear() + 1, mesIdx, dia);
     }
   } else {
@@ -409,6 +447,18 @@ function calcularFechaYDiaSemana(dayMentioned) {
 
   if (!candidate || isNaN(candidate.getTime())) return null;
   return { date: candidate, diaSemana: DIAS_SEMANA_ES[candidate.getDay()] };
+}
+
+// v11 — Formatea una lista de fechas (Date[]) como "viernes 7 de agosto,
+// lunes 10 de agosto, martes 11 de agosto" para inyectar en el contexto de
+// Claude. Siempre fechas YA calculadas — nunca le pedimos a Claude que
+// calcule cuál es "el próximo viernes" o similar.
+function formatearListaFechas(fechas) {
+  return fechas.map(d => {
+    const nombreDia    = d.toLocaleDateString("es-CR", { timeZone: TZ, weekday: "long" });
+    const fechaLegible = d.toLocaleDateString("es-CR", { timeZone: TZ, day: "numeric", month: "long" });
+    return `${nombreDia} ${fechaLegible}`;
+  }).join(", ");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -428,7 +478,12 @@ async function formatearRechazoDisponibilidad(eventData, day) {
     `⚠️ No se pudo agendar: ${motivoTexto}${eventData.conflicto ? ` (${eventData.conflicto})` : ""}.`,
   ];
 
-  if (eventData.motivo !== "error_calendario") {
+  if (eventData.motivo === "dia_no_laborable") {
+    // v11: fechas reales ya calculadas, no un slot-check sobre un día que de
+    // entrada no es agendable.
+    const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
+    lineas.push(`📅 Próximas fechas disponibles: ${formatearListaFechas(proximos)}`);
+  } else if (eventData.motivo !== "error_calendario") {
     try {
       const slots = await getAvailableSlots(day);
       if (slots.length > 0) {
@@ -769,8 +824,13 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
           dia_no_laborable: "esa fecha no cae en día de visitas (solo lunes, martes o viernes)",
         }[result.motivo] || "ese horario no está disponible";
 
+        // v11: si el motivo es día no hábil, ofrecemos fechas reales ya
+        // calculadas en vez de intentar sacar slots de un día imposible.
         let sugerencia = "";
-        if (intent.nuevaFecha) {
+        if (result.motivo === "dia_no_laborable") {
+          const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
+          sugerencia = `\n\n📅 Próximas fechas disponibles: ${formatearListaFechas(proximos)}`;
+        } else if (intent.nuevaFecha) {
           try {
             const slots = await getAvailableSlots(intent.nuevaFecha);
             if (slots.length > 0) {
@@ -1041,25 +1101,33 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
     if (dayMentioned && dayMentioned !== session.slots_shown) {
 
-      // ── v10: si es una FECHA ESPECÍFICA (no un nombre de día), calculamos
-      // su día de la semana real con JS ANTES de consultar slots. Si cae en
-      // día no hábil, se lo decimos a Claude como hecho consumado — no le
-      // pedimos que lo calcule él, que es donde estaba el bug (confundió
-      // sábado 8 de agosto con viernes).
-      const infoFecha = calcularFechaYDiaSemana(dayMentioned);
+      const esNombreDiaNoHabil = NOMBRES_DIA_NO_HABIL.includes(dayMentioned);
 
-      if (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana)) {
+      // ── v10/v11: si es una FECHA ESPECÍFICA (no un nombre de día),
+      // calculamos su día de la semana real con JS ANTES de consultar slots.
+      // Si cae en día no hábil (o el cliente nombró directamente un día no
+      // hábil como "miércoles"/"sábado"), le damos a Claude fechas reales ya
+      // calculadas — nunca le pedimos que calcule ni infiera nada.
+      const infoFecha = esNombreDiaNoHabil ? null : calcularFechaYDiaSemana(dayMentioned);
+
+      if (esNombreDiaNoHabil || (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana))) {
         update(from, { slots_shown: dayMentioned });
-        const fechaLegible = infoFecha.date.toLocaleDateString("es-CR", {
-          timeZone: TZ, day: "numeric", month: "long",
-        });
-        availabilityContext = `\n\n[SISTEMA: La fecha "${dayMentioned}" (${fechaLegible}) cae en ${infoFecha.diaSemana.toUpperCase()}, que NO es un día disponible. Días disponibles: lunes, martes y viernes. Explicale esto al cliente con claridad (mencioná el día real de la semana) y ofrecele el lunes, martes o viernes más cercano. NO confirmes ni digas que esa fecha quedó agendada bajo ninguna circunstancia.]`;
+
+        const detalleFecha = infoFecha
+          ? ` La fecha "${dayMentioned}" (${infoFecha.date.toLocaleDateString("es-CR", { timeZone: TZ, day: "numeric", month: "long" })}) cae en ${infoFecha.diaSemana.toUpperCase()}.`
+          : ` "${dayMentioned.charAt(0).toUpperCase() + dayMentioned.slice(1)}" no es un día disponible.`;
+
+        const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
+        const proximosTexto = formatearListaFechas(proximos);
+
+        availabilityContext = `\n\n[SISTEMA:${detalleFecha} Días disponibles: lunes, martes y viernes. Las próximas fechas disponibles son: ${proximosTexto}. Ofrecele ESTAS fechas exactas al cliente — no calcules ni inventes otras. NO confirmes ni agendes esa fecha bajo ninguna circunstancia.]`;
       } else {
         const slots = await getAvailableSlots(dayMentioned);
         update(from, { slots_shown: dayMentioned });
 
         if (slots.length === 0) {
-          availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele los otros días disponibles: lunes, martes o viernes.]`;
+          const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
+          availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele estas fechas: ${formatearListaFechas(proximos)}.]`;
         } else {
           const slotsText = slots.map(s => {
             const [h, m] = s.split(":");
@@ -1163,9 +1231,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
       // ── v9: ya NO se asume éxito. Se revisa eventData.ok antes de decidir
       // qué mensaje mandarle al cliente. Si el calendario rechazó la cita
-      // (bloqueo manual de Darwin/Melvin o slot ocupado), el cliente recibe
-      // una respuesta honesta con horarios alternativos, en vez de una
-      // falsa confirmación de "listo, agendada".
+      // (bloqueo manual de Darwin/Melvin, slot ocupado, o día no hábil), el
+      // cliente recibe una respuesta honesta con fechas/horarios reales, en
+      // vez de una falsa confirmación de "listo, agendada".
       let eventOk = false;
       let eventData = null;
       try {
@@ -1210,8 +1278,8 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         logLead(from, updated, "visita_solicitada");
         await sendText(from, `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`);
       } else {
-        // No se creó el evento: no confirmamos, ofrecemos horarios reales
-        // del mismo día y avisamos a los supervisores para seguimiento manual.
+        // No se creó el evento: no confirmamos, ofrecemos fechas/horarios
+        // reales y avisamos a los supervisores para seguimiento manual.
         const rechazo = eventData
           ? await formatearRechazoDisponibilidad(eventData, updated.visit_day)
           : "⚠️ Hubo un problema técnico al consultar el calendario.";
@@ -1221,7 +1289,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           ``,
           rechazo.replace(/^⚠️ No se pudo agendar: /, ""),
           ``,
-          `¿Le sirve alguno de esos horarios, o prefiere otro día?`,
+          `¿Le sirve alguna de esas opciones, o prefiere otro día?`,
         ].join("\n"));
 
         update(from, { visit_confirmed: false, lead_saved: session.lead_saved || false });
@@ -1305,12 +1373,18 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
+// v11 — REORDEN CRÍTICO: antes se revisaba PRIMERO si el texto contenía
+// "lunes"/"martes"/"viernes" como substring, y solo si no había match se
+// buscaba una fecha específica. Eso significaba que "el lunes 24 de agosto"
+// se detectaba como "lunes" (ignorando la fecha exacta), y el sistema
+// calculaba disponibilidad para el PRÓXIMO lunes desde hoy — que puede NO
+// ser el 24. Ahora se busca PRIMERO una fecha específica (más precisa); el
+// nombre de día es el fallback. También se agregan miércoles/jueves/sábado/
+// domingo para que ningún día no hábil quede "invisible" para el detector.
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  if (n.includes("lunes"))   return "lunes";
-  if (n.includes("martes"))  return "martes";
-  if (n.includes("viernes")) return "viernes";
 
+  // 1) Fecha específica primero — es más precisa que un nombre de día.
   const MONTHS = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"];
   for (const mes of MONTHS) {
     const re = new RegExp(`(\\d{1,2})\\s+(?:de\\s+)?${mes}`, "i");
@@ -1319,6 +1393,16 @@ function detectDayOrDate(text) {
   }
   const m2 = n.match(/\b(\d{1,2})\/(\d{1,2})\b/);
   if (m2) return `${m2[1]}/${m2[2]}`;
+
+  // 2) Nombre de día (solo si no hubo fecha específica).
+  if (n.includes("lunes"))     return "lunes";
+  if (n.includes("martes"))    return "martes";
+  if (n.includes("viernes"))   return "viernes";
+  if (n.includes("miercoles")) return "miercoles";
+  if (n.includes("jueves"))    return "jueves";
+  if (n.includes("sabado"))    return "sabado";
+  if (n.includes("domingo"))   return "domingo";
+
   return null;
 }
 
