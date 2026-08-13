@@ -513,6 +513,23 @@ function postProcesarMovimiento(m, textoOriginal) {
     out.observaciones = out.observaciones ? `${nota} | ${out.observaciones}` : nota;
   }
 
+  // 5) GARANTÍA CAJA_GENERAL — FIX v10.2
+  // Bug detectado: pagos registrados con pestaña_principal="SUBCONTRATOS" (u otra
+  // pestaña de gasto) muchas veces NO llevaban "CAJA_GENERAL" en pestanas_adicionales,
+  // aunque la regla ya existía en el prompt de Claude ("SIEMPRE incluir CAJA_GENERAL").
+  // Confiar solo en que el modelo lo recuerde no bastó: auditoría de SUBCONTRATOS vs
+  // CAJA_GENERAL mostró 14 pagos (₡8.753.460) que nunca bajaron la caja disponible.
+  // Esta regla se aplica ahora en código, no depende de que el modelo la siga.
+  const esPlanillaHoras =
+    out.tipo === "PLANILLA" || /^PLANILLA_/i.test(out["pestaña_principal"] || "");
+  if (!esPlanillaHoras) {
+    const adicionales = new Set(
+      Array.isArray(out.pestanas_adicionales) ? out.pestanas_adicionales : []
+    );
+    adicionales.add("CAJA_GENERAL");
+    out.pestanas_adicionales = Array.from(adicionales);
+  }
+
   return out;
 }
 
