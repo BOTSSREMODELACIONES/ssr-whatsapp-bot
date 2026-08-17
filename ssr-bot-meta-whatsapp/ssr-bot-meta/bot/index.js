@@ -133,6 +133,29 @@
  *   agosto") — Sasha ya no calcula NADA relacionado con fechas, solo
  *   comunica lo que el sistema ya verificó.
  *
+ * ── CAMBIOS v12 — FIX "HOY MISMO" EN NOMBRES DE DÍA SIMPLES ───────────────────
+ * BUG: el v10/v11 blindó el caso de FECHA ESPECÍFICA que cae en día no hábil
+ *   (el incidente del "viernes 8 de agosto" que en realidad era sábado), pero
+ *   nunca tocó el caso de NOMBRE DE DÍA SIMPLE ("lunes"/"martes"/"viernes").
+ *   Un cliente escribió "Lunes - se puede hoy?" un lunes al mediodía. Como
+ *   calcularFechaYDiaSemana() se abstiene a propósito para nombres de día
+ *   simples (los considera inequívocos), el flujo caía directo a
+ *   getAvailableSlots() y el mensaje de sistema resultante solo decía
+ *   "Slots disponibles para lunes: ..." — sin la fecha real (el PRÓXIMO
+ *   lunes, ya calculado correctamente por getNextAvailableDate). Como el
+ *   cliente preguntó explícitamente "¿se puede hoy?" y el sistema nunca le
+ *   aclaró que no, Claude — sin ninguna noción propia de la fecha de hoy —
+ *   asumió que sí y ofreció el mismo día. Mismo patrón que el incidente del
+ *   sábado, en el único camino que había quedado sin corregir.
+ * FIX: getAvailableSlots() (calendar.js v12) ahora también devuelve
+ *   dateLabel (la fecha real resuelta, ej. "lunes 24 de agosto"). El mensaje
+ *   de sistema acá usa esa fecha explícita y prohíbe decir "hoy mismo" —
+ *   igual que ya se hacía para el camino de fecha específica. También se
+ *   agrega detección explícita de "hoy"/"mañana" en detectDayOrDate() — antes
+ *   un cliente que preguntaba SOLO "¿tienen espacio hoy?" sin mencionar un
+ *   día de la semana no generaba ningún [SISTEMA:...], dejando a Claude sin
+ *   ningún dato verificado para responder.
+ *
  * Con esto, en todo el pipeline (mensaje del cliente → flag [VISITA:] →
  * createVisitEvent → Google Calendar) no queda ningún punto donde el día de
  * la semana, el año, o la cercanía de una fecha dependan del cálculo mental
@@ -485,7 +508,9 @@ async function formatearRechazoDisponibilidad(eventData, day) {
     lineas.push(`📅 Próximas fechas disponibles: ${formatearListaFechas(proximos)}`);
   } else if (eventData.motivo !== "error_calendario") {
     try {
-      const slots = await getAvailableSlots(day);
+      // v12: getAvailableSlots ahora devuelve { date, dateLabel, slots }.
+      const resultado = await getAvailableSlots(day);
+      const slots = resultado.slots;
       if (slots.length > 0) {
         const slotsText = slots.map(s => {
           const [h, m] = s.split(":");
@@ -493,7 +518,7 @@ async function formatearRechazoDisponibilidad(eventData, day) {
           const h12    = hNum > 12 ? hNum - 12 : hNum;
           return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
         }).join(", ");
-        lineas.push(`🕐 Horarios libres ese día: ${slotsText}`);
+        lineas.push(`🕐 Horarios libres ${resultado.dateLabel ? `el ${resultado.dateLabel}` : "ese día"}: ${slotsText}`);
       } else {
         lineas.push(`📭 No hay horarios libres ese día. Probá otro día.`);
       }
@@ -832,7 +857,9 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
           sugerencia = `\n\n📅 Próximas fechas disponibles: ${formatearListaFechas(proximos)}`;
         } else if (intent.nuevaFecha) {
           try {
-            const slots = await getAvailableSlots(intent.nuevaFecha);
+            // v12: getAvailableSlots ahora devuelve { date, dateLabel, slots }.
+            const resultado = await getAvailableSlots(intent.nuevaFecha);
+            const slots = resultado.slots;
             if (slots.length > 0) {
               const slotsText = slots.map(s => {
                 const [h, m] = s.split(":");
@@ -840,7 +867,7 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
                 const h12    = hNum > 12 ? hNum - 12 : hNum;
                 return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
               }).join(", ");
-              sugerencia = `\n\n🕐 Horarios libres ese día: ${slotsText}`;
+              sugerencia = `\n\n🕐 Horarios libres ${resultado.dateLabel ? `el ${resultado.dateLabel}` : "ese día"}: ${slotsText}`;
             }
           } catch {}
         }
@@ -1122,12 +1149,30 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
         availabilityContext = `\n\n[SISTEMA:${detalleFecha} Días disponibles: lunes, martes y viernes. Las próximas fechas disponibles son: ${proximosTexto}. Ofrecele ESTAS fechas exactas al cliente — no calcules ni inventes otras. NO confirmes ni agendes esa fecha bajo ninguna circunstancia.]`;
       } else {
-        const slots = await getAvailableSlots(dayMentioned);
+        // v12 — getAvailableSlots ahora devuelve { date, dateLabel, slots }
+        // en vez de solo el array de horarios. dateLabel es la fecha REAL
+        // resuelta (ej. "lunes 24 de agosto"), no solo el nombre de día que
+        // escribió el cliente. Esto es lo que faltaba: antes el mensaje de
+        // sistema solo decía "para lunes" — ambiguo entre "hoy" y "el
+        // próximo lunes" — y así fue como Claude terminó respondiendo "hoy
+        // mismo podemos" cuando el cliente preguntó explícitamente por hoy.
+        const resultado  = await getAvailableSlots(dayMentioned);
+        const slots       = resultado.slots;
+        const dateLabel   = resultado.dateLabel;
         update(from, { slots_shown: dayMentioned });
+
+        // v12 — detectar si el cliente preguntó explícitamente por "hoy"/
+        // "mañana" en este mismo mensaje, para aclarárselo directamente si
+        // corresponde (además de la prohibición general de decir "hoy mismo").
+        const nHoyManana = normalized.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        const preguntoHoyOManana = /\bhoy\b/.test(nHoyManana) || /\bmanana\b/.test(nHoyManana);
+        const notaHoyOManana = preguntoHoyOManana
+          ? ` El cliente preguntó específicamente si es posible hoy/mañana — aclarale amablemente que las visitas nunca son el mismo día en que se solicitan, y que la fecha más próxima disponible es la indicada arriba.`
+          : "";
 
         if (slots.length === 0) {
           const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
-          availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele estas fechas: ${formatearListaFechas(proximos)}.]`;
+          availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} (${dateLabel || dayMentioned}) pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele estas fechas: ${formatearListaFechas(proximos)}. RECORDATORIO OBLIGATORIO: las visitas NUNCA se agendan para hoy mismo.${notaHoyOManana}]`;
         } else {
           const slotsText = slots.map(s => {
             const [h, m] = s.split(":");
@@ -1135,7 +1180,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
             const h12    = hNum > 12 ? hNum - 12 : hNum;
             return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
           }).join(", ");
-          availabilityContext = `\n\n[SISTEMA: Slots disponibles para ${dayMentioned}: ${slotsText}. Ofrece SOLO estos horarios al cliente. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.]`;
+          availabilityContext = `\n\n[SISTEMA: La fecha disponible real es *${dateLabel || dayMentioned}* — esta fecha jamás es hoy, el sistema ya garantiza que es como mínimo el próximo día hábil. Slots disponibles ese día: ${slotsText}. Ofrece SOLO estos horarios, y siempre mencionale al cliente la fecha completa (${dateLabel}) — NUNCA digas "hoy mismo" ni ninguna variante, aunque el cliente pregunte específicamente si es posible hoy. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.${notaHoyOManana}]`;
         }
       }
     }
@@ -1381,6 +1426,10 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
 // ser el 24. Ahora se busca PRIMERO una fecha específica (más precisa); el
 // nombre de día es el fallback. También se agregan miércoles/jueves/sábado/
 // domingo para que ningún día no hábil quede "invisible" para el detector.
+// v12 — también se reconoce "hoy"/"mañana" explícitos, para que un cliente
+// que pregunta SOLO "¿tienen espacio hoy?" (sin mencionar un día de la
+// semana) sí dispare la verificación de disponibilidad — antes quedaba sin
+// ningún [SISTEMA:...] y Sasha no tenía ningún dato verificado para responder.
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -1403,7 +1452,31 @@ function detectDayOrDate(text) {
   if (n.includes("sabado"))    return "sabado";
   if (n.includes("domingo"))   return "domingo";
 
+  // 3) v12 — "hoy"/"mañana" explícitos, mapeados al día hábil más cercano
+  // (getNextAvailableDate ya garantiza, con el fix de calendar.js v12, que
+  // nunca va a devolver hoy mismo — así que no hay riesgo de terminar
+  // agendando same-day por este camino).
+  if (n.includes("hoy")) return nearestBusinessDayName();
+  if (n.includes("manana") || n.includes("mañana")) return nearestBusinessDayName();
+
   return null;
+}
+
+// v12 — traduce "hoy"/"mañana" al día hábil de visitas (lunes/martes/
+// viernes) más cercano, para poder consultar disponibilidad real en vez de
+// dejar la pregunta sin ninguna respuesta determinística.
+function nearestBusinessDayName() {
+  const DIAS = { 1: "lunes", 2: "martes", 5: "viernes" };
+  const now  = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
+  const hoy  = now.getDay();
+
+  if (DIAS[hoy]) return DIAS[hoy];
+
+  for (let i = 1; i <= 7; i++) {
+    const d = (hoy + i) % 7;
+    if (DIAS[d]) return DIAS[d];
+  }
+  return "lunes";
 }
 
 function parseFlags(response) {
