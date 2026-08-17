@@ -1,28 +1,21 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
 // v10.5 — FIX DETECCIÓN DE PROYECTO + SUBTIPO SSR (17 agosto 2026):
-//        1. BUG CORREGIDO: cuando el mensaje era largo (>11 palabras) y
-//           pasaba por Claude (interpretarMovimientos), Claude podía fallar
-//           en reconocer el alias del proyecto y devolver proyecto_codigo="SSR"
-//           por defecto — SIN que ningún backstop determinístico lo corrigiera
-//           después (a diferencia de moneda, tipo INGRESO/GASTO y trabajador,
-//           que sí tenían corrección local). Esto causaba que gastos de un
-//           proyecto específico se cargaran silenciosamente a SSR.
-//           FIX: nuevo paso 2.5 en postProcesarMovimiento — se vuelve a correr
-//           detectarProyectoLocal(textoOriginal) SIEMPRE (salvo que ya haya
-//           actuado la guardia de trabajador/planilla) y, si detecta un
-//           proyecto específico que Claude no detectó (o detectó distinto),
-//           se sobreescribe de forma determinística — mismo patrón que ya
-//           se usa en calendar.js: la IA nunca decide sola, JS valida.
-//        2. NUEVO CAMPO "subtipo_ssr": para gastos con proyecto_codigo="SSR"
-//           se clasifica automáticamente en ADMINISTRATIVO, OPERATIVO o
-//           MANO_DE_OBRA según la categoría, para poder filtrar reportes
-//           ejecutivos de SSR sin depender solo de leer "categoria" a mano.
-//        3. VALE/ADELANTO SIN HORAS: ahora se adjuntan num_semana y
-//           dia_semana también a los GASTO tipo "Mano de obra" (vale sin
-//           horas), para que Apps Script tenga los datos necesarios para
-//           ubicar la fila/semana correcta en la planilla mensual si así
-//           lo requiere su lógica de escritura.
+//        1. CORRECCIÓN DETERMINÍSTICA DE PROYECTO (paso 2.5 de
+//           postProcesarMovimiento): cuando el mensaje es lo bastante
+//           largo como para saltarse los parsers locales y pasar por
+//           Claude, detectarProyectoLocal() ahora vuelve a correr
+//           SIEMPRE sobre el texto original como backstop. Si Claude
+//           no reconoció el alias del proyecto y devolvió "SSR" por
+//           default, pero la detección local sí encuentra un proyecto
+//           específico, se sobreescribe — mismo patrón ya usado para
+//           moneda y tipo INGRESO/GASTO. Esto es lo que causaba que
+//           gastos de un proyecto específico se registraran a nombre
+//           de SSR sin ningún aviso.
+//        2. CAMPO "subtipo_ssr": para gastos con proyecto_codigo="SSR"
+//           se agrega ADMINISTRATIVO / OPERATIVO / MANO_DE_OBRA de forma
+//           determinística según categoría, para poder filtrar reportes
+//           sin depender de leer la columna categoría a mano.
 //
 // v10.4 — FIX SSR OPERATIVO + MONEDA COMPROBANTES (14 agosto 2026):
 //        1. GASTOS SSR NO LABORALES: si proyecto_codigo="SSR" y NO es Mano de obra,
@@ -59,7 +52,7 @@
 //   5. Payload COMPLETO a Apps Script.
 // ============================================================
 
-const Anthropic = require("@anthropic-ai/sdk");
+import Anthropic from "@anthropic-ai/sdk";
 
 // ⚠️ v10.2 — Implementación vigente del ERP V13 (7 jul 2026).
 // Si volvés a crear una implementación NUEVA en Apps Script, actualizá la
@@ -680,33 +673,6 @@ function categorizarGastoLocal(desc) {
 }
 
 
-// ─── v10.5 — Subtipo SSR (para reportes ejecutivos filtrables) ────
-//
-// SSR es un centro de costo. Dentro de SSR, no todos los gastos son
-// iguales: no es lo mismo pagar planilla que pagar un almuerzo o el
-// internet de la oficina. Este subtipo permite filtrar sin depender
-// solo de leer la columna "categoria" a mano.
-//
-function determinarSubtipoSSR(categoria) {
-
-  const c = norm(categoria);
-
-  if (c === "mano de obra") {
-    return "MANO_DE_OBRA";
-  }
-
-  if (
-    /^(servicios|seguros)$/.test(c)
-  ) {
-    return "ADMINISTRATIVO";
-  }
-
-  // Transporte, Material, Alimentación, Herramienta, Subcontrato,
-  // Gasto (genérico) → operación del día a día de la empresa.
-  return "OPERATIVO";
-}
-
-
 // ─── Destino contable determinístico v10.4 ───────────────────
 //
 // SSR es un CENTRO DE COSTO operativo, no un proyecto.
@@ -850,14 +816,8 @@ function aplicarDestinoContableSSR(out) {
 
       }
 
-      // v10.5 — subtipo, si el gasto de mano de obra
-      // quedó imputado a SSR (no a un proyecto real).
-      if (codigo === "SSR") {
-
-        out.subtipo_ssr =
-          "MANO_DE_OBRA";
-
-      }
+      out.subtipo_ssr =
+        "MANO_DE_OBRA";
 
       return out;
 
@@ -889,11 +849,27 @@ function aplicarDestinoContableSSR(out) {
       out.pestaña_principal =
         "CAJA_GENERAL";
 
-      // v10.5 — subtipo SSR (ADMINISTRATIVO / OPERATIVO).
+
+      // ------------------------------------------------------
+      // v10.5 — SUBTIPO SSR (ADMINISTRATIVO vs OPERATIVO)
+      //
+      // Antes solo existía la categoría libre. Ahora se agrega
+      // un campo determinístico que permite filtrar/reportar
+      // "Gastos Administrativos SSR" vs "Gastos Operativos SSR"
+      // sin depender de leer la columna categoría a mano.
+      // ------------------------------------------------------
+
+      const CATEGORIAS_ADMINISTRATIVAS = new Set([
+        "servicios",
+        "seguros",
+        "alquiler",
+        "contabilidad"
+      ]);
+
       out.subtipo_ssr =
-        determinarSubtipoSSR(
-          out.categoria
-        );
+        CATEGORIAS_ADMINISTRATIVAS.has(categoria)
+          ? "ADMINISTRATIVO"
+          : "OPERATIVO";
 
 
       out.observaciones = [
@@ -916,6 +892,8 @@ function aplicarDestinoContableSSR(out) {
 
       out.pestaña_principal =
         "GASTOS_PROYECTO";
+
+      out.subtipo_ssr = null;
 
     }
 
@@ -1778,69 +1756,34 @@ function postProcesarMovimiento(
 
     }
 
-
-    // v10.5 — un vale/adelanto sin horas trabajadas puede
-    // necesitar num_semana/dia_semana para que Apps Script
-    // ubique la fila/columna correcta en la planilla mensual
-    // (misma semana en la que se está registrando el vale).
-    if (
-      out.num_semana === undefined ||
-      out.num_semana === null
-    ) {
-
-      out.num_semana =
-        getSemanaDelMes();
-
-    }
-
-    if (
-      !out.dia_semana
-    ) {
-
-      out.dia_semana =
-        getDiaSemana();
-
-    }
-
   }
 
 
   // ==========================================================
-  // 2.5 CORRECCIÓN DETERMINÍSTICA DE PROYECTO — FIX v10.5
+  // 2.5 CORRECCIÓN DETERMINÍSTICA DE PROYECTO — v10.5
   //
-  // PROBLEMA QUE CORRIGE:
-  // Cuando el mensaje es largo (>11 palabras) el parser local
-  // (extraerMovimientoNaturalLocal) no se activa y el movimiento
-  // se resuelve vía Claude (interpretarMovimientos). Claude podía
-  // no reconocer bien el alias del proyecto (fraseo distinto,
-  // ruido de transcripción de voz) y devolver proyecto_codigo="SSR"
-  // por defecto, tal como le indica su propio system prompt. Antes
-  // de este fix, NINGÚN backstop determinístico revisaba esa
-  // decisión — a diferencia de moneda y tipo, que sí se corrigen.
+  // PROBLEMA QUE RESUELVE:
+  // Claude decidía "proyecto_codigo" libremente cuando el mensaje
+  // era demasiado largo para los parsers locales (>11 palabras,
+  // dictado natural). Si no reconocía bien el alias del proyecto
+  // (fraseo raro, ruido de Whisper, orden de palabras distinto al
+  // listado en el prompt), caía en el default "SSR" — en silencio,
+  // sin error visible. Resultado: gastos de proyectos específicos
+  // terminaban mezclados en el centro de costo general SSR.
   //
-  // REGLA (mismo principio que calendar.js: JS decide los hechos,
-  // el LLM solo comunica):
-  //   - Si ya actuó la guardia de trabajador (arriba), NO tocamos
-  //     nada — ese caso ya decidió el proyecto correctamente.
-  //   - Si detectarProyectoLocal() encuentra un proyecto ESPECÍFICO
-  //     (no SSR) en el texto original, y el proyecto que trae el
-  //     movimiento es distinto o es SSR → se sobreescribe con el
-  //     resultado local, que es determinístico (substring + alias +
-  //     Levenshtein) y ya probó ser confiable en los otros dos
-  //     caminos de parseo.
-  //   - Si la detección local NO encuentra nada (devuelve SSR), NO
-  //     forzamos SSR sobre lo que haya dicho Claude — Claude puede
-  //     haber reconocido un nombre que el detector local no tiene
-  //     en su lista de alias. Solo corregimos "de SSR hacia un
-  //     proyecto real", nunca al revés.
+  // FIX:
+  // detectarProyectoLocal() ya es la fuente de verdad confiable
+  // que usan los otros dos parsers (crudo y natural corto). Ahora
+  // se corre SIEMPRE sobre el texto original (salvo que el guardia
+  // de trabajador ya haya resuelto el proyecto en el paso 2) y, si
+  // encuentra un proyecto específico que Claude no detectó, se
+  // sobreescribe el resultado del modelo — mismo patrón que ya se
+  // usa para moneda y tipo INGRESO/GASTO más arriba.
   // ==========================================================
 
   if (
     !trab &&
-    out.tipo !== "PLANILLA" &&
-    !/^PLANILLA_/i.test(
-      String(out["pestaña_principal"] || "")
-    )
+    out.tipo !== "PLANILLA"
   ) {
 
     const proyectoLocal =
@@ -1849,11 +1792,7 @@ function postProcesarMovimiento(
       );
 
 
-    const proyectoLocalEsEspecifico =
-      proyectoLocal.codigo !== "SSR";
-
-
-    const proyectoActualCodigo =
+    const codigoModelo =
       String(
         out.proyecto_codigo || "SSR"
       )
@@ -1861,10 +1800,24 @@ function postProcesarMovimiento(
         .toUpperCase();
 
 
+    const codigoLocal =
+      String(
+        proyectoLocal.codigo || "SSR"
+      )
+        .trim()
+        .toUpperCase();
+
+
+    // Solo corregimos cuando la detección local SÍ encontró un
+    // proyecto específico (no "SSR") y difiere de lo que devolvió
+    // Claude. Si la detección local también da "SSR", no forzamos
+    // nada: puede que el mensaje genuinamente no mencione proyecto,
+    // y ahí sí confiamos en el criterio de Claude (p. ej. reconoció
+    // el proyecto por contexto de la conversación, no solo del texto
+    // suelto).
     if (
-      proyectoLocalEsEspecifico &&
-      proyectoActualCodigo !==
-        proyectoLocal.codigo.toUpperCase()
+      codigoLocal !== "SSR" &&
+      codigoLocal !== codigoModelo
     ) {
 
       out.proyecto_codigo =
@@ -1878,7 +1831,7 @@ function postProcesarMovimiento(
 
         out.observaciones || "",
 
-        `Proyecto corregido por regla local (${proyectoLocal.codigo})`
+        `Proyecto corregido por regla local (modelo devolvió "${codigoModelo}")`
 
       ]
         .filter(Boolean)
@@ -2041,10 +1994,9 @@ REGLAS DE INTERPRETACIÓN:
   Si no se menciona moneda extranjera, asumí colones y "moneda": "CRC".
 - Sin fecha = hoy: ${TODAY()}
 - Detectá proyecto por nombre o alias EN CUALQUIER PARTE del mensaje, incluso con errores
-  de tipeo leves. Prestá atención especial: tu elección de proyecto será VERIFICADA y
-  corregida automáticamente contra el texto original si no coincide, así que hacé tu
-  mejor esfuerzo por identificarlo — no asumas SSR solo porque no estás 100% seguro.
-  Si de verdad no encontrás el proyecto por ningún alias → proyecto_codigo = "SSR".
+  de tipeo leves. Si no encontrás el proyecto por ningún alias → proyecto_codigo = "SSR".
+  IMPORTANTE: tu detección de proyecto pasa por una verificación determinística después —
+  si te equivocás, el sistema lo corrige, pero hacé tu mejor esfuerzo igual.
 - Gastos operativos/administrativos sin proyecto claro → proyecto_codigo = "SSR" y pestaña_principal="CAJA_GENERAL".
 - SSR es centro de costo, NO proyecto. Un gasto SSR no laboral NUNCA va a GASTOS_PROYECTO.
 - Gasto con PROY XXX/YYYY → pestaña_principal="GASTOS_PROYECTO" y además CAJA_GENERAL.
@@ -2313,6 +2265,10 @@ function extraerMovimientoNaturalLocal(texto) {
     raw,
     monto
   } =
+    // v10.5 — FIX: esta función se llamaba "extraerMontoDeTextoFinanciero"
+    // (no existía en el archivo → ReferenceError silencioso cada vez que
+    // un mensaje corto pasaba por este parser). El nombre correcto es
+    // extraerMontoLocal(), definida más arriba en este mismo archivo.
     extraerMontoLocal(
       original
     );
@@ -2519,7 +2475,6 @@ async function interpretarMovimientos(texto) {
   // - descripción
   // - moneda
   // - trabajador vs proyecto
-  // - proyecto (v10.5)
   // - SSR operativo vs proyecto real
   return movimientos.map(
     m =>
@@ -2818,13 +2773,7 @@ function generarConfirmacionItem(
     } else {
 
       lineas.push(
-
-        data.subtipo_ssr
-
-          ? `🏢 SSR (${data.subtipo_ssr})`
-
-          : `🏢 SSR`
-
+        `🏢 SSR${data.subtipo_ssr ? ` (${data.subtipo_ssr === "ADMINISTRATIVO" ? "Administrativo" : data.subtipo_ssr === "MANO_DE_OBRA" ? "Mano de obra" : "Operativo"})` : ""}`
       );
 
     }
