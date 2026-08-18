@@ -1,5 +1,21 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v10.6 — FIX MATCHING DE PROYECTO POR SUBSTRING (18 agosto 2026):
+//        PROBLEMA: detectarProyectoLocal() comparaba alias contra el
+//        texto completo con `t.includes(alias)`, sin límite de palabra.
+//        Esto causaba falsos positivos garantizados: el alias "lore"
+//        (de "Fede y Lore") es una subcadena literal de "Flores"
+//        (F-LORE-S). Un gasto para "José Flores" se detectaba como
+//        proyecto de "Fede y Lore" — un cliente distinto, con proyecto
+//        ya culminado — sin ningún error ni aviso.
+//        FIX: se agrega el helper coincideComoPalabra(), que envuelve
+//        el alias en límites de palabra (\b) antes de buscarlo en el
+//        texto. Se aplica tanto al nombre del proyecto como a cada
+//        alias en la coincidencia directa de detectarProyectoLocal().
+//        La coincidencia aproximada por Levenshtein (para typos) ya
+//        operaba sobre palabras tokenizadas individualmente y no se ve
+//        afectada por este bug, así que se deja igual.
+//
 // v10.5 — FIX DETECCIÓN DE PROYECTO + SUBTIPO SSR (17 agosto 2026):
 //        1. CORRECCIÓN DETERMINÍSTICA DE PROYECTO (paso 2.5 de
 //           postProcesarMovimiento): cuando el mensaje es lo bastante
@@ -119,7 +135,7 @@ const PROYECTOS = [
   {
     codigo: "PROY 028/2026",
     nombre: "Fede y Lore",
-    alias: ["fede", "lore", "federico", "banos fede"]
+    alias: ["fede", "lore", "federico", "banos fede", "fede y lore"]
   },
   {
     codigo: "PROY 019/2026",
@@ -322,6 +338,20 @@ function norm(t) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .trim();
+}
+
+
+// ─── v10.6 — Coincidencia de alias por límite de palabra ──────
+// Antes se usaba `t.includes(alias)`, que es substring puro: el alias
+// "lore" matchea dentro de "Flores" (F-LORE-S), "Dolores", "Florencia",
+// etc. Este helper envuelve el alias con \b (límite de palabra) para
+// que solo matchee cuando el alias aparece como palabra completa (o
+// como frase completa de varias palabras, ya que \b también funciona
+// en los extremos de una frase con espacios internos).
+function coincideComoPalabra(texto, alias) {
+  if (!alias) return false;
+  const escapado = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escapado}\\b`, "i").test(texto);
 }
 
 
@@ -1023,6 +1053,12 @@ function detectarProyectoLocal(texto) {
 
   // ─────────────────────────────────────────────
   // Coincidencia directa
+  //
+  // v10.6 — FIX: antes se usaba `t.includes(...)`, que es
+  // substring puro y produce falsos positivos garantizados con
+  // alias cortos (ej. "lore" dentro de "Flores"). Ahora se usa
+  // coincideComoPalabra(), que exige límite de palabra (\b) en
+  // ambos extremos del alias/nombre.
   // ─────────────────────────────────────────────
 
   for (const p of PROYECTOS) {
@@ -1039,12 +1075,12 @@ function detectarProyectoLocal(texto) {
 
     if (
 
-      t.includes(nombre) ||
+      coincideComoPalabra(t, nombre) ||
 
       aliases.some(
         a =>
           a &&
-          t.includes(a)
+          coincideComoPalabra(t, a)
       )
 
     ) {
@@ -1779,6 +1815,10 @@ function postProcesarMovimiento(
   // encuentra un proyecto específico que Claude no detectó, se
   // sobreescribe el resultado del modelo — mismo patrón que ya se
   // usa para moneda y tipo INGRESO/GASTO más arriba.
+  //
+  // v10.6: detectarProyectoLocal() ahora usa coincidencia por límite
+  // de palabra (ver coincideComoPalabra()), así que esta corrección
+  // determinística ya no hereda el bug de "lore" dentro de "Flores".
   // ==========================================================
 
   if (
@@ -2265,10 +2305,6 @@ function extraerMovimientoNaturalLocal(texto) {
     raw,
     monto
   } =
-    // v10.5 — FIX: esta función se llamaba "extraerMontoDeTextoFinanciero"
-    // (no existía en el archivo → ReferenceError silencioso cada vez que
-    // un mensaje corto pasaba por este parser). El nombre correcto es
-    // extraerMontoLocal(), definida más arriba en este mismo archivo.
     extraerMontoLocal(
       original
     );
