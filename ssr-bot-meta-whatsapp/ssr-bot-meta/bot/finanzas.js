@@ -3450,5 +3450,6 @@ export {
   procesarComprobanteImagen,
   interpretarMovimientos,
   interpretarComprobante,
-  registrarEnSheets
+  registrarEnSheets,
+  esComandoFinanciero
 };
