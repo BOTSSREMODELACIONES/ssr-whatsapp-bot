@@ -88,6 +88,26 @@ const TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 530;
 const PROYECTOS = [
   // ── Activos / recientes ─────────────────────────────────────
   {
+    codigo: "PROY 074/2026",
+    nombre: "Stephanie Jiménez",
+    alias: ["stephanie", "jimenez", "stephanie jimenez", "cocina stephanie"]
+  },
+  {
+    codigo: "PROY 072/2026",
+    nombre: "Daniel Víquez",
+    alias: ["daniel viquez", "viquez", "sala cocina daniel", "mobiliario daniel viquez"]
+  },
+  {
+    codigo: "PROY 066/2026",
+    nombre: "Marco Guzmán",
+    alias: ["marco guzman", "guzman", "bano marco", "baño marco", "marco"]
+  },
+  {
+    codigo: "PROY 065/2026",
+    nombre: "José Flores",
+    alias: ["jose flores", "restauracion jose", "pintura casa jose", "sacos jose flores"]
+  },
+  {
     codigo: "PROY 060/2026",
     nombre: "María José",
     alias: ["maria jose", "mariajose", "balcon", "balcon maria jose"]
