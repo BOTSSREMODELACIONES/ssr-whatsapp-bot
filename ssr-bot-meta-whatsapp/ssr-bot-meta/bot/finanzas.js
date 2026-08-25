@@ -85,7 +85,14 @@ const TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 530;
 // ⚠️ Códigos VERIFICADOS contra la hoja PROYECTOS (julio 2026).
 // OJO: el proyecto del panel acanalado de Leonardo es PROY SC1/2026
 // (PROY 001/2026 es de Sergio Gonzales Pauta — pintura exterior).
-const PROYECTOS = [
+// ⚠️ v14 — LISTA DE ARRANQUE / RESPALDO, YA NO ES LA FUENTE DE VERDAD.
+// PROYECTOS ahora es `let`, no `const`: se sobreescribe automáticamente
+// con el catálogo en vivo de la hoja PROYECTOS (ver
+// refrescarCatalogoProyectos() al final de este bloque). Este arreglo
+// solo se usa como respaldo mientras llega el primer refresco exitoso
+// al arrancar, o si el ERP no responde. NO hace falta editar esta
+// lista a mano cuando se crea un proyecto nuevo — se sincroniza sola.
+let PROYECTOS = [
   // ── Activos / recientes ─────────────────────────────────────
   {
     codigo: "PROY 074/2026",
@@ -243,6 +250,68 @@ const PROYECTOS = [
     alias: ["franxi"]
   }
 ];
+
+// ============================================================
+// CATÁLOGO DINÁMICO DE PROYECTOS (v14)
+// Reemplaza el mantenimiento manual del arreglo PROYECTOS. Consulta
+// el mismo webhook de Apps Script (accion=proyectos) que ya expone
+// SSR ERP V13, cachea el resultado en memoria, y lo refresca cada
+// PROYECTOS_REFRESH_MS en segundo plano — sin bloquear ni frenar el
+// arranque del proceso ni ninguna petición individual.
+//
+// Si el ERP no responde (webhook caído, sin red, etc.), se conserva
+// el último catálogo conocido — nunca se deja PROYECTOS vacío. Al
+// arrancar en frío (antes del primer refresco exitoso), se usa la
+// lista de respaldo definida arriba.
+// ============================================================
+
+const PROYECTOS_REFRESH_MS = 10 * 60 * 1000; // 10 minutos
+
+async function SASHA_FETCH_PROYECTOS_REMOTOS_() {
+  const url = APPS_SCRIPT_URL +
+    (APPS_SCRIPT_URL.includes("?") ? "&" : "?") +
+    "accion=proyectos";
+
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} consultando catálogo de proyectos`);
+  }
+
+  const data = await res.json();
+
+  if (!data || !Array.isArray(data.proyectos) || !data.proyectos.length) {
+    throw new Error("Respuesta de catálogo de proyectos vacía o inválida");
+  }
+
+  return data.proyectos
+    .map(p => ({
+      codigo: String(p.codigo || "").trim(),
+      nombre: String(p.nombre || "").trim(),
+      alias: Array.isArray(p.alias) ? p.alias.filter(Boolean) : []
+    }))
+    .filter(p => p.codigo);
+}
+
+async function refrescarCatalogoProyectos() {
+  try {
+    const nuevos = await SASHA_FETCH_PROYECTOS_REMOTOS_();
+    PROYECTOS = nuevos;
+    console.log(`✅ Catálogo de proyectos actualizado desde el ERP: ${PROYECTOS.length} proyectos`);
+  } catch (err) {
+    console.error(
+      "⚠️ No se pudo refrescar el catálogo de proyectos, se conserva el último conocido:",
+      err.message
+    );
+  }
+}
+
+// Primer refresco al arrancar el proceso (no bloqueante: si falla,
+// las primeras peticiones usan la lista de respaldo de arriba hasta
+// el próximo refresco exitoso) + refresco periódico en segundo plano.
+refrescarCatalogoProyectos();
+setInterval(refrescarCatalogoProyectos, PROYECTOS_REFRESH_MS);
+
 
 // ⚠️ TRABAJADORES — sincronizado con la hoja TRABAJADORES.
 const TRABAJADORES = [
