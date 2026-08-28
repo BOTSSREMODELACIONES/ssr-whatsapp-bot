@@ -2,164 +2,73 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
- * ── CAMBIOS v2 ────────────────────────────────────────────────────────────────
- * NUEVOS handlers para supervisores:
- *   [GASTO: monto | descripcion | proyecto?]   → escribe en CAJA_GENERAL + AUDIT_LOG
- *   [INGRESO: monto | descripcion | proyecto?] → escribe en CAJA_GENERAL + AUDIT_LOG
- *   [MSG_CLIENTE: nombre_o_tel | msg]    → envía mensaje directo a un cliente
- *   [VISITA: tel_cliente | ...]          → agenda visita asociada a teléfono de cliente
- *   [RESUMEN_CLIENTE: nombre]            → acceso directo al resumen IA
+ * (ver historial completo de versiones v2 a v12 en el archivo original)
  *
- * ── CAMBIOS v3 — FIX AUDIO SUPERVISOR ──────────────────────────────────────────
- * desenvolverInstruccionVoz(texto) extrae solo la transcripción real del
- * envoltorio [Instrucción de voz de supervisor (tel): "texto"] ANTES de
- * evaluar comandos financieros.
+ * ── CAMBIOS v13 — CIERRE DE 3 HUECOS DETECTADOS EN INCIDENTE OMAR QUESADA ──────
+ * Auditoría sobre capturas reales de WhatsApp (agosto 2026) donde Sasha dio
+ * fechas incorrectas repetidamente y confirmó una visita ANTES de que el
+ * backend supiera si el horario estaba realmente libre. v9-v12 ya blindaban
+ * el cálculo de fechas específicas y nombres de día — pero quedaban 3 huecos:
  *
- * ── CAMBIOS v4 — LECTURA DE COMPROBANTES BANCARIOS POR IMAGEN ──────────────────
- * ── CAMBIOS v5 — SANITIZACIÓN DE ERRORES DEL WEBHOOK (Apps Script) ────────────
- * ── CAMBIOS v6 — LENGUAJE NATURAL FINANCIERO DIRECTO A FINANZAS.JS ────────────
- * (ver historial en versiones anteriores)
+ * BUG 1 — Preguntas de disponibilidad SIN mencionar día/fecha ("¿Cuándo se
+ *   pueden llegar?", "¿tienen espacio?") no disparaban NINGÚN [SISTEMA:...].
+ *   detectDayOrDate() solo reconocía nombres de día, fechas específicas y
+ *   "hoy"/"mañana" — una pregunta genérica de disponibilidad caía fuera de
+ *   los tres casos y dejaba a Claude respondiendo fechas de memoria, sin
+ *   ningún dato verificado. Así se originó el primer error de la
+ *   conversación (ofreció "viernes 29 de agosto", que en realidad es
+ *   sábado). FIX: nuevo caso "GENERICO" en detectDayOrDate() + manejo
+ *   dedicado en handleMessage que inyecta los próximos días hábiles reales
+ *   (ya calculados) sin que Claude tenga que inferir nada.
  *
- * ── CAMBIOS v7 — GESTIÓN DE CALENDARIO PARA SUPERVISORES ──────────────────────
- * BUG 1: detectarYCancelarCita() recibía el texto CON el envoltorio de voz
- *   [Instrucción de voz de supervisor (506...): "cancela la cita..."] — los
- *   corchetes/paréntesis rompían la extracción de nombre y fecha. Por eso
- *   los comandos de calendario por AUDIO nunca funcionaban.
- * BUG 2: no existía ninguna función para REAGENDAR una cita. "Cambia la cita
- *   de Gabriela para el viernes" no hacía nada.
- * FIX: nuevo módulo gestionarCalendarioSupervisor() que:
- *   - Usa el texto DESENVUELTO (igual que finanzas) → funciona por audio.
- *   - Detecta 3 intenciones: CANCELAR, REAGENDAR y CONSULTAR agenda.
- *   - Interpreta con Claude (JSON estructurado) cuando el mensaje menciona
- *     citas/visitas/agenda — entiende lenguaje natural real, no solo regex.
- *   - Fallback a regex local si Claude falla (sin API no se cae nada).
- *   - REAGENDAR: usa rescheduleEventByNameAndDate() nueva en calendar.js.
- *     Si hay varias citas que coinciden, pide especificar (no mueve a ciegas).
- *   - Notifica automáticamente al cliente por WhatsApp cuando su cita se
- *     cancela o se mueve (el teléfono se extrae de la descripción del evento).
- *     Se puede silenciar diciendo "sin avisar al cliente".
+ * BUG 2 — El gate `dayMentioned !== session.slots_shown` bloqueaba la
+ *   re-verificación PARA SIEMPRE dentro de una misma conversación: una vez
+ *   mostrado "viernes" (o cualquier fecha) una sola vez, ningún mensaje
+ *   posterior que volviera a mencionar exactamente ese mismo valor
+ *   disparaba una nueva consulta al calendario — ni siquiera si el intento
+ *   anterior había fallado. Esto dejó a Sasha respondiendo sin datos reales
+ *   en varios puntos de la conversación con Omar, incluyendo una regla de
+ *   "un día de anticipación" que NO existe en ningún mensaje de sistema —
+ *   Claude la inventó porque no tenía contexto verificado para responder.
+ *   FIX: se eliminó el gate de bloqueo; ahora se verifica SIEMPRE que el
+ *   cliente mencione un día/fecha/disponibilidad genérica, sin excepción.
+ *   slots_shown se sigue guardando, pero solo como referencia/telemetría.
  *
- * ── CAMBIOS v8 — CONTEXTO PUENTE TEXTO→IMAGEN PARA COMPROBANTES ───────────────
- * BUG: cuando un supervisor escribe "Registra este gasto de combustible para
- *   el proyecto de Christian" y LUEGO manda la foto del comprobante SINPE,
- *   WhatsApp los entrega como DOS mensajes/webhooks independientes:
- *     1) el texto solo → dispara procesarComandoFinanciero() SIN monto →
- *        "❌ Monto inválido: ..." (Claude sí detecta el proyecto pero no
- *        tiene el monto, que está en la imagen que aún no llegó).
- *     2) la imagen sola → dispara procesarComprobanteImagen() SIN el texto
- *        original (WhatsApp no reenvía el caption si se mandó por separado)
- *        → el "Detalle" del banco casi nunca menciona el proyecto → cae a
- *        SSR por defecto, aunque el supervisor SÍ dijo el proyecto.
- * FIX: pendingReceiptContext — buffer en memoria por número de supervisor.
- *   - Si un comando financiero de TEXTO no trae monto (esComandoFinanciero
- *     true pero sin dígitos), NO se manda a procesarComandoFinanciero (que
- *     generaría el error falso). En su lugar se guarda como contexto
- *     pendiente con timestamp, y se responde con un acuse corto pidiendo
- *     la foto — no un error.
- *   - Cuando llega una IMAGEN de ese mismo supervisor dentro de los
- *     siguientes 3 minutos, se fusiona el texto pendiente con el caption
- *     de la imagen (si lo hay) antes de llamar a procesarComprobanteImagen,
- *     y se limpia el buffer.
- *   - Contexto pendiente > 3 min se descarta automáticamente (evita que un
- *     comentario viejo se pegue a un comprobante no relacionado).
+ * BUG 3 (el más grave) — El texto de Claude (cleanMessage) se enviaba al
+ *   cliente de inmediato, ANTES de llamar a createVisitEvent(). Cuando
+ *   Claude emite el flag [VISITA:...], también escribe una confirmación
+ *   ("¡Todo listo!") que salía primero pasara lo que pasara después — y
+ *   solo si el backend rechazaba la cita (slot_ocupado, como pasó 3 veces
+ *   con Omar porque el horario ya tenía un bloqueo de administrador)
+ *   llegaba una segunda corrección. El cliente ya había leído "Todo listo".
+ *   FIX (v13): para el flag VISITA, cleanMessage se descarta por completo.
+ *   El mensaje real al cliente se construye DESPUÉS de conocer el
+ *   resultado real de createVisitEvent(). También se ajustó
+ *   notifyAllSupervisors(): en éxito ya no muestra el último mensaje crudo
+ *   del cliente (ej. su correo) como "nota" — muestra una nota real
+ *   ("Visita confirmada automáticamente").
  *
- * ── CAMBIOS v9 — RESPETAR BLOQUEOS MANUALES DE CALENDARIO ──────────────────────
- * BUG: createVisitEvent() (calendar.js v8) YA verifica disponibilidad real
- *   contra Google Calendar (día bloqueado por Darwin/Melvin, o slot ocupado)
- *   y devuelve { ok:false, motivo, conflicto } sin crear el evento. Pero
- *   index.js NUNCA revisaba ese campo `ok`: tanto el flujo automático de
- *   cliente (flag VISITA) como el comando de supervisor [VISITA: ...]
- *   confirmaban "✅ ¡Listo! Su cita quedó agendada" (y se lo avisaban al
- *   cliente por WhatsApp) AUNQUE el evento no se hubiera creado realmente.
- *   Resultado: falsos positivos — el cliente cree que tiene cita, no existe
- *   en el calendario, y nadie se entera del conflicto.
- * FIX: ambos call-sites ahora revisan `eventData.ok`. Si es false:
- *   - NO se envía confirmación de éxito al cliente ni al supervisor.
- *   - Se consultan slots alternativos con getAvailableSlots() para el mismo
- *     día y se ofrecen como opción.
- *   - Se notifica a los supervisores que hubo un intento de agendar sobre
- *     un bloqueo, para que le den seguimiento manual si hace falta.
- * También se corrige rescheduleEventByNameAndDate: el caso "destino_ocupado"
- *   caía en el mensaje genérico "no encontré la cita" (engañoso — la cita SÍ
- *   existe, el problema es el destino). Ahora se informa el motivo real y se
- *   sugieren horarios alternativos.
- *
- * ── CAMBIOS v10 — SASHA YA NO CALCULA EL DÍA DE LA SEMANA "DE MEMORIA" ────────
- * BUG REAL: un cliente dijo "miércoles 5 de agosto", Sasha (Claude) le explicó
- *   que el miércoles no es día disponible y ofreció "el viernes 8 de agosto"
- *   — pero el 8 de agosto de 2026 es SÁBADO, no viernes. El cliente confirmó
- *   esa fecha y el sistema agendó una visita técnica en sábado, día que la
- *   empresa no trabaja. La causa: el system prompt (claude.js) le pide a
- *   Claude que verifique "de memoria" en qué día de la semana cae una fecha,
- *   y el cálculo de calendario a mano es un punto ciego conocido de los LLM.
- * FIX (dos capas):
- *   1) calendar.js v9 ya bloquea a nivel de backend cualquier intento de
- *      crear/mover una cita fuera de lunes/martes/viernes, sin importar lo
- *      que haya dicho la conversación (ver createVisitEvent y
- *      rescheduleEventByNameAndDate). Esa es la red de seguridad real.
- *   2) Acá en index.js: cuando el cliente menciona una FECHA ESPECÍFICA
- *      (no un nombre de día), calcularFechaYDiaSemana() calcula el día de la
- *      semana real con JavaScript — no con la "memoria" de Claude.
- *
- * ── CAMBIOS v11 — CIERRE COMPLETO DEL PIPELINE DE FECHAS ──────────────────────
- * Auditoría completa de extremo a extremo tras el incidente del sábado 8 de
- * agosto. Se encontraron y corrigieron 3 puntos ciegos adicionales:
- *
- * BUG 1 — Prioridad de detección invertida: detectDayOrDate() revisaba
- *   PRIMERO si el texto contenía "lunes"/"martes"/"viernes" como substring, y
- *   solo si no encontraba nada, buscaba una fecha específica ("D de mes").
- *   Esto significa que un mensaje como "el lunes 24 de agosto" se detectaba
- *   como "lunes" (nombre de día), ignorando la fecha exacta — y el sistema
- *   calculaba disponibilidad para el PRÓXIMO lunes desde hoy, que puede NO
- *   ser el 24. FIX: ahora se busca primero una fecha específica (más
- *   precisa); el nombre de día es el fallback solo si no hay fecha explícita.
- *
- * BUG 2 — Días no hábiles "invisibles" para el detector: detectDayOrDate()
- *   solo reconocía lunes/martes/viernes como nombres de día; si el cliente
- *   decía "el miércoles" o "el sábado" SIN fecha específica, la función no
- *   detectaba nada, no se inyectaba ningún [SISTEMA:...], y Sasha quedaba sin
- *   contexto verificado — dependía solo de la regla general del system
- *   prompt. FIX: ahora se reconocen también miércoles/jueves/sábado/domingo,
- *   y siempre se responde con fechas reales calculadas (ver BUG 3).
- *
- * BUG 3 — Sasha tenía que "inferir" cuál era el día hábil más cercano: aun
- *   con el fix v10, cuando una fecha caía en día no hábil, el mensaje de
- *   sistema solo decía "ofrecele el lunes/martes/viernes más cercano" — sin
- *   fechas concretas. Eso todavía le pedía a Claude un cálculo de calendario
- *   (que fue exactamente la causa raíz del bug original). FIX: calendar.js
- *   ahora expone proximosDiasHabiles(), que calcula con JS los próximos 3
- *   días hábiles reales a partir de hoy. index.js se los inyecta a Claude ya
- *   resueltos ("viernes 7 de agosto, lunes 10 de agosto, martes 11 de
- *   agosto") — Sasha ya no calcula NADA relacionado con fechas, solo
- *   comunica lo que el sistema ya verificó.
- *
- * ── CAMBIOS v12 — FIX "HOY MISMO" EN NOMBRES DE DÍA SIMPLES ───────────────────
- * BUG: el v10/v11 blindó el caso de FECHA ESPECÍFICA que cae en día no hábil
- *   (el incidente del "viernes 8 de agosto" que en realidad era sábado), pero
- *   nunca tocó el caso de NOMBRE DE DÍA SIMPLE ("lunes"/"martes"/"viernes").
- *   Un cliente escribió "Lunes - se puede hoy?" un lunes al mediodía. Como
- *   calcularFechaYDiaSemana() se abstiene a propósito para nombres de día
- *   simples (los considera inequívocos), el flujo caía directo a
- *   getAvailableSlots() y el mensaje de sistema resultante solo decía
- *   "Slots disponibles para lunes: ..." — sin la fecha real (el PRÓXIMO
- *   lunes, ya calculado correctamente por getNextAvailableDate). Como el
- *   cliente preguntó explícitamente "¿se puede hoy?" y el sistema nunca le
- *   aclaró que no, Claude — sin ninguna noción propia de la fecha de hoy —
- *   asumió que sí y ofreció el mismo día. Mismo patrón que el incidente del
- *   sábado, en el único camino que había quedado sin corregir.
- * FIX: getAvailableSlots() (calendar.js v12) ahora también devuelve
- *   dateLabel (la fecha real resuelta, ej. "lunes 24 de agosto"). El mensaje
- *   de sistema acá usa esa fecha explícita y prohíbe decir "hoy mismo" —
- *   igual que ya se hacía para el camino de fecha específica. También se
- *   agrega detección explícita de "hoy"/"mañana" en detectDayOrDate() — antes
- *   un cliente que preguntaba SOLO "¿tienen espacio hoy?" sin mencionar un
- *   día de la semana no generaba ningún [SISTEMA:...], dejando a Claude sin
- *   ningún dato verificado para responder.
- *
- * Con esto, en todo el pipeline (mensaje del cliente → flag [VISITA:] →
- * createVisitEvent → Google Calendar) no queda ningún punto donde el día de
- * la semana, el año, o la cercanía de una fecha dependan del cálculo mental
- * de un LLM. Todo pasa por funciones de JavaScript deterministas.
+ * ── CAMBIOS v14 — RECUPERAR LA MINI-GUÍA DE PREPARACIÓN SIN REINTRODUCIR
+ *    LA CONFIRMACIÓN FALSA ──────────────────────────────────────────────────
+ * v13 descartaba cleanMessage por completo para el flag VISITA — pero ese
+ *   texto también trae la mini-guía de preparación (ONBOARDING
+ *   POST-AGENDAMIENTO en claude.js: "tenga acceso al área", "traiga fotos",
+ *   etc.), que es información legítima y útil que el cliente dejó de
+ *   recibir. FIX de dos capas:
+ *   1) claude.js: nueva sección de system prompt que le prohíbe
+ *      explícitamente a Claude afirmar éxito ("Todo listo", "quedó
+ *      agendada") en el mensaje que acompaña al flag [VISITA:...].
+ *   2) index.js: cleanMessage ahora SÍ se envía — como mensaje aparte,
+ *      ANTES de intentar la reserva — y el resultado real (éxito o
+ *      rechazo) llega en un SEGUNDO mensaje independiente, construido
+ *      exclusivamente a partir de lo que devuelve createVisitEvent().
+ *   El broadcast al monitor de supervisores refleja ambos mensajes, en el
+ *   mismo orden en que los recibió el cliente.
+ * También se movió la verificación de "¿en qué día cae esta fecha?" para
+ *   que sea EXCLUSIVAMENTE responsabilidad del backend: claude.js ya no le
+ *   pide a Claude que verifique él mismo si una fecha específica cae en
+ *   día hábil — eso ahora está señalado como prohibido en el prompt,
+ *   coherente con los [SISTEMA:...] deterministas de index.js/calendar.js.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -441,6 +350,18 @@ const MESES_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agos
 const DIAS_HABILES = ["lunes","martes","viernes"];
 const NOMBRES_DIA_NO_HABIL = ["miercoles","jueves","sabado","domingo"];
 
+// v13 — frases que indican que el cliente pregunta por disponibilidad en
+// general, SIN mencionar un día o fecha puntual. Antes esto no disparaba
+// ningún [SISTEMA:...] y Sasha respondía fechas inventadas de memoria.
+const PALABRAS_DISPONIBILIDAD_GENERICA = [
+  "cuando se puede", "cuando pueden", "cuando podrian", "cuando podrían",
+  "que dia", "que día", "que dias", "qué días", "cuales dias", "cuáles días",
+  "disponibilidad", "tienen espacio", "hay espacio", "cuando llegan",
+  "cuando vienen", "pueden llegar", "pueden venir", "cuando hay",
+  "que horarios", "qué horarios", "cuando tienen", "cuándo tienen",
+  "cuando es la visita", "cuando seria", "cuando sería",
+];
+
 function calcularFechaYDiaSemana(dayMentioned) {
   if (!dayMentioned) return null;
   if (/^(lunes|martes|viernes)$/i.test(dayMentioned)) return null; // nombre de día, no hace falta
@@ -520,7 +441,12 @@ async function formatearRechazoDisponibilidad(eventData, day) {
         }).join(", ");
         lineas.push(`🕐 Horarios libres ${resultado.dateLabel ? `el ${resultado.dateLabel}` : "ese día"}: ${slotsText}`);
       } else {
-        lineas.push(`📭 No hay horarios libres ese día. Probá otro día.`);
+        // v13 — si tampoco hay horarios libres ese día (ej. bloqueo de día
+        // completo puesto por un administrador), ofrecer directamente los
+        // próximos días hábiles reales en vez de dejar al cliente sin
+        // ninguna salida concreta.
+        const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
+        lineas.push(`📭 No hay horarios libres ese día. Próximas fechas disponibles: ${formatearListaFechas(proximos)}`);
       }
     } catch {
       lineas.push(`ℹ️ Probá con otro horario o día.`);
@@ -1126,7 +1052,29 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     const dayMentioned = detectDayOrDate(normalized);
     let availabilityContext = "";
 
-    if (dayMentioned && dayMentioned !== session.slots_shown) {
+    if (dayMentioned === "GENERICO") {
+      // ── v13: el cliente pregunta por disponibilidad en general ("¿Cuándo
+      // se pueden llegar?", "¿tienen espacio?") sin mencionar un día o
+      // fecha puntual. Antes esto NO generaba ningún [SISTEMA:...] y Sasha
+      // improvisaba fechas de memoria — así se originó el primer error de
+      // fecha del incidente de agosto (ofreció "viernes 29 de agosto",
+      // que en realidad es sábado). Ahora se inyectan los próximos días
+      // hábiles reales, ya calculados por JS.
+      update(from, { slots_shown: dayMentioned });
+      const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
+      const proximosTexto = formatearListaFechas(proximos);
+      availabilityContext = `\n\n[SISTEMA: El cliente preguntó por disponibilidad en general, sin especificar un día. Las próximas fechas disponibles (ya calculadas, reales) son: ${proximosTexto}. Ofrecele ESTAS fechas exactas — no calcules ni inventes otras. NO confirmes ni agendes ninguna fecha todavía, solo ofrece opciones y preguntá cuál le sirve.]`;
+
+    } else if (dayMentioned) {
+      // ── v13: ANTES esto solo corría si dayMentioned era distinto al
+      // último valor guardado en session.slots_shown — lo que en la
+      // práctica significaba que, una vez mostrado un valor (ej. "viernes")
+      // una sola vez en la conversación, NUNCA se volvía a verificar contra
+      // el calendario real, aunque el cliente lo repitiera turnos después y
+      // el intento anterior hubiera fallado. Ahora se verifica SIEMPRE que
+      // el cliente mencione un día/fecha — sin excepción. slots_shown se
+      // sigue guardando, pero solo como referencia.
+      update(from, { slots_shown: dayMentioned });
 
       const esNombreDiaNoHabil = NOMBRES_DIA_NO_HABIL.includes(dayMentioned);
 
@@ -1138,8 +1086,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       const infoFecha = esNombreDiaNoHabil ? null : calcularFechaYDiaSemana(dayMentioned);
 
       if (esNombreDiaNoHabil || (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana))) {
-        update(from, { slots_shown: dayMentioned });
-
         const detalleFecha = infoFecha
           ? ` La fecha "${dayMentioned}" (${infoFecha.date.toLocaleDateString("es-CR", { timeZone: TZ, day: "numeric", month: "long" })}) cae en ${infoFecha.diaSemana.toUpperCase()}.`
           : ` "${dayMentioned.charAt(0).toUpperCase() + dayMentioned.slice(1)}" no es un día disponible.`;
@@ -1159,7 +1105,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         const resultado  = await getAvailableSlots(dayMentioned);
         const slots       = resultado.slots;
         const dateLabel   = resultado.dateLabel;
-        update(from, { slots_shown: dayMentioned });
 
         // v12 — detectar si el cliente preguntó explícitamente por "hoy"/
         // "mañana" en este mismo mensaje, para aclarárselo directamente si
@@ -1189,62 +1134,25 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext, imageData);
     const { cleanMessage, flag, flagData } = parseFlags(rawResponse);
 
-    await sendText(from, cleanMessage);
-    addMsg(from, "assistant", cleanMessage);
-
-    if (!esSupervisor) {
-      memoria.guardarMensaje({ phone: fromE164, clientName: session.name || null, direction: "out", type: "text", content: cleanMessage, session }).catch(() => {});
-    }
-
-    // ── Monitor supervisores ──────────────────────────────────────────────────
-    const clientLabel    = session.name ? `${session.name} (${from})` : from;
-    const clientMsgLabel = imageDataArray.length > 0
-      ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
-      : normalized;
-    const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientLabel}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${cleanMessage}`;
-    for (const supervisor of SUPERVISORES) {
-      sendText(supervisor, monitorMsg).catch(err => {
-        console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
-      });
-    }
-    if (mediaIds) {
-      const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
-      for (const mediaId of ids) {
-        for (const supervisor of SUPERVISORES) {
-          sendMediaById(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientLabel}`).catch(() => {});
-        }
-      }
-    }
-
-    // ── Procesar flags ────────────────────────────────────────────────────────
-    if (flag === "ESCALAR") {
-      update(from, { escalated: true });
-      await sendText(from, `📞 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
-      await notifyAllSupervisors(from, session, normalized, "escalacion");
-
-    } else if (flag === "LEAD") {
-      const [name, project, zone] = (flagData || "").split("|");
-      const updated = update(from, {
-        name:         name?.trim()    || session.name,
-        project_desc: project?.trim() || session.project_desc,
-        zone:         zone?.trim()    || session.zone,
-      });
-
-      const nombreDetectado = updated.name || name?.trim();
-      if (nombreDetectado) {
-        memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
-          proyecto: updated.project_desc || "",
-          zona:     updated.zone || "",
-        }).catch(() => {});
-      }
-
-      if (!session.lead_saved) {
-        update(from, { lead_saved: true });
-        logLead(from, updated);
-        upsertLead({ ...updated, phone: from }).catch(() => {});
-      }
-
-    } else if (flag === "VISITA") {
+    // ══════════════════════════════════════════════════════════════════════
+    // v13/v14 — FIX CRÍTICO: para el flag VISITA, el texto de Claude
+    // (cleanMessage) podía incluir una confirmación ("¡Todo listo!")
+    // escrita ANTES de intentar crear el evento real en Calendar. Enviarlo
+    // de inmediato significa confirmarle al cliente una cita que todavía
+    // no sabemos si existe — exactamente lo que pasó con Omar Quesada
+    // (se le dijo "Todo listo" y el evento chocó con slot_ocupado).
+    // v13 descartaba cleanMessage por completo, pero ese texto también trae
+    // la mini-guía de preparación (ONBOARDING POST-AGENDAMIENTO en
+    // claude.js), que sí es información útil y legítima. v14: el system
+    // prompt (claude.js) ahora le prohíbe explícitamente a Claude afirmar
+    // éxito en ese mensaje, así que cleanMessage SÍ se envía — pero como un
+    // mensaje aparte, ANTES de intentar la reserva. El resultado real
+    // (éxito o rechazo) llega DESPUÉS, en un segundo mensaje construido
+    // exclusivamente a partir de lo que devuelve createVisitEvent() — nunca
+    // de lo que Claude haya escrito de antemano. Para el resto de los
+    // flags, el comportamiento es idéntico al original.
+    // ══════════════════════════════════════════════════════════════════════
+    if (flag === "VISITA") {
       const [name, project, zone, day, hour, ubicacion, email] = (flagData || "").split("|");
       const updated = update(from, {
         name:            name?.trim()      || session.name,
@@ -1274,11 +1182,6 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       let timeStr     = `${hour12}:${mm} ${hourNum >= 12 ? "p.m." : "a.m."}`;
       let dateStr     = updated.visit_day;
 
-      // ── v9: ya NO se asume éxito. Se revisa eventData.ok antes de decidir
-      // qué mensaje mandarle al cliente. Si el calendario rechazó la cita
-      // (bloqueo manual de Darwin/Melvin, slot ocupado, o día no hábil), el
-      // cliente recibe una respuesta honesta con fechas/horarios reales, en
-      // vez de una falsa confirmación de "listo, agendada".
       let eventOk = false;
       let eventData = null;
       try {
@@ -1306,6 +1209,24 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         console.error("❌ Error Calendar:", calErr.message);
       }
 
+      // ── v14: cleanMessage YA NO se descarta — trae la mini-guía de
+      // preparación (ONBOARDING POST-AGENDAMIENTO en claude.js) y ahora el
+      // system prompt le prohíbe explícitamente afirmar que la cita ya
+      // quedó agendada. Se envía primero, tal cual, como un mensaje
+      // separado; el resultado real del backend llega DESPUÉS en un
+      // segundo mensaje aparte, nunca reemplazando ni mezclándose con este.
+      if (cleanMessage) {
+        await sendText(from, cleanMessage);
+        addMsg(from, "assistant", cleanMessage);
+        if (!esSupervisor) {
+          memoria.guardarMensaje({ phone: fromE164, clientName: updated.name || session.name || null, direction: "out", type: "text", content: cleanMessage, session }).catch(() => {});
+        }
+      }
+
+      // ── El mensaje de RESULTADO se arma SOLO a partir del resultado real
+      // del backend — nunca del texto que Claude haya escrito de antemano.
+      let finalClientMessage;
+
       if (eventOk) {
         try {
           await sendVisitConfirmation({
@@ -1319,23 +1240,25 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         }
 
         registerVisit({ ...updated, phone: from }).catch(() => {});
-        await notifyAllSupervisors(from, updated, normalized, "visita_solicitada");
         logLead(from, updated, "visita_solicitada");
-        await sendText(from, `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`);
+        finalClientMessage = `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`;
+
+        // v13 — nota real para supervisores en vez del último mensaje crudo
+        // del cliente (antes podía mostrar, por ejemplo, su correo).
+        await notifyAllSupervisors(from, updated, "Visita confirmada automáticamente por Sasha.", "visita_solicitada");
+
       } else {
-        // No se creó el evento: no confirmamos, ofrecemos fechas/horarios
-        // reales y avisamos a los supervisores para seguimiento manual.
         const rechazo = eventData
           ? await formatearRechazoDisponibilidad(eventData, updated.visit_day)
           : "⚠️ Hubo un problema técnico al consultar el calendario.";
 
-        await sendText(from, [
+        finalClientMessage = [
           `Disculpe, ese horario ya no está disponible 🙏`,
           ``,
           rechazo.replace(/^⚠️ No se pudo agendar: /, ""),
           ``,
           `¿Le sirve alguna de esas opciones, o prefiere otro día?`,
-        ].join("\n"));
+        ].join("\n");
 
         update(from, { visit_confirmed: false, lead_saved: session.lead_saved || false });
         await notifyAllSupervisors(
@@ -1344,6 +1267,97 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           "visita_solicitada"
         );
         logLead(from, updated, "visita_rechazada_conflicto");
+      }
+
+      await sendText(from, finalClientMessage);
+      addMsg(from, "assistant", finalClientMessage);
+
+      if (!esSupervisor) {
+        memoria.guardarMensaje({ phone: fromE164, clientName: updated.name || null, direction: "out", type: "text", content: finalClientMessage, session }).catch(() => {});
+      }
+
+      // Monitor supervisores — v14: refleja los DOS mensajes reales que
+      // recibió el cliente (la mini-guía de Claude, si la hubo, y el
+      // resultado real del backend), en el mismo orden en que se enviaron.
+      const clientLabel    = updated.name ? `${updated.name} (${from})` : from;
+      const clientMsgLabel = imageDataArray.length > 0
+        ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
+        : normalized;
+      const sashaTexto = cleanMessage
+        ? `${cleanMessage}\n\n[luego, resultado verificado del calendario:]\n${finalClientMessage}`
+        : finalClientMessage;
+      const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientLabel}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${sashaTexto}`;
+      for (const supervisor of SUPERVISORES) {
+        sendText(supervisor, monitorMsg).catch(err => {
+          console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
+        });
+      }
+      if (mediaIds) {
+        const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
+        for (const mediaId of ids) {
+          for (const supervisor of SUPERVISORES) {
+            sendMediaById(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientLabel}`).catch(() => {});
+          }
+        }
+      }
+
+      return; // VISITA ya se manejó por completo — no seguir al flujo genérico.
+    }
+
+    // ── Flujo genérico (todo lo que NO es VISITA) — sin cambios ───────────────
+    await sendText(from, cleanMessage);
+    addMsg(from, "assistant", cleanMessage);
+
+    if (!esSupervisor) {
+      memoria.guardarMensaje({ phone: fromE164, clientName: session.name || null, direction: "out", type: "text", content: cleanMessage, session }).catch(() => {});
+    }
+
+    // ── Monitor supervisores ──────────────────────────────────────────────────
+    const clientLabel    = session.name ? `${session.name} (${from})` : from;
+    const clientMsgLabel = imageDataArray.length > 0
+      ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
+      : normalized;
+    const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientLabel}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${cleanMessage}`;
+    for (const supervisor of SUPERVISORES) {
+      sendText(supervisor, monitorMsg).catch(err => {
+        console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
+      });
+    }
+    if (mediaIds) {
+      const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
+      for (const mediaId of ids) {
+        for (const supervisor of SUPERVISORES) {
+          sendMediaById(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientLabel}`).catch(() => {});
+        }
+      }
+    }
+
+    // ── Procesar flags (VISITA ya se manejó arriba y salió con `return`) ──────
+    if (flag === "ESCALAR") {
+      update(from, { escalated: true });
+      await sendText(from, `📞 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
+      await notifyAllSupervisors(from, session, normalized, "escalacion");
+
+    } else if (flag === "LEAD") {
+      const [name, project, zone] = (flagData || "").split("|");
+      const updated = update(from, {
+        name:         name?.trim()    || session.name,
+        project_desc: project?.trim() || session.project_desc,
+        zone:         zone?.trim()    || session.zone,
+      });
+
+      const nombreDetectado = updated.name || name?.trim();
+      if (nombreDetectado) {
+        memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
+          proyecto: updated.project_desc || "",
+          zona:     updated.zone || "",
+        }).catch(() => {});
+      }
+
+      if (!session.lead_saved) {
+        update(from, { lead_saved: true });
+        logLead(from, updated);
+        upsertLead({ ...updated, phone: from }).catch(() => {});
       }
 
     } else if (flag === "SOLICITANTE") {
@@ -1430,6 +1444,9 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
 // que pregunta SOLO "¿tienen espacio hoy?" (sin mencionar un día de la
 // semana) sí dispare la verificación de disponibilidad — antes quedaba sin
 // ningún [SISTEMA:...] y Sasha no tenía ningún dato verificado para responder.
+// v13 — se agrega detección de preguntas de disponibilidad GENÉRICAS (sin
+// día, fecha, ni hoy/mañana) → devuelve el sentinel "GENERICO", manejado en
+// handleMessage con los próximos días hábiles reales.
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -1458,6 +1475,11 @@ function detectDayOrDate(text) {
   // agendando same-day por este camino).
   if (n.includes("hoy")) return nearestBusinessDayName();
   if (n.includes("manana") || n.includes("mañana")) return nearestBusinessDayName();
+
+  // 4) v13 — pregunta de disponibilidad genérica, sin día/fecha puntual.
+  if (PALABRAS_DISPONIBILIDAD_GENERICA.some(p => n.includes(p.normalize("NFD").replace(/[\u0300-\u036f]/g, "")))) {
+    return "GENERICO";
+  }
 
   return null;
 }
