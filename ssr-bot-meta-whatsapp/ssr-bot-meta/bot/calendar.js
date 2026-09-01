@@ -1,5 +1,22 @@
 const { google } = require("googleapis");
 
+// ── v15 — HORARIO ÚNICO: 9:00 a.m. (lunes, martes, viernes) ──────────────────
+// A petición de Darwin: Sasha ya no debe ofrecer múltiples horarios por día
+// (antes: 09:00, 11:30, 14:00). A partir de ahora el ÚNICO horario que se
+// ofrece a los clientes es las 9:00 a.m., en los mismos 3 días hábiles de
+// siempre (lunes, martes, viernes). Esto simplifica getAvailableSlots() a un
+// solo slot, y reduce el flujo de conversación de Sasha a "¿qué día le
+// sirve?" en vez de "¿qué día y qué hora?".
+//
+// IMPORTANTE: esto NO afecta la lógica de verificación de disponibilidad —
+// verificarDisponibilidadExacta() sigue revisando TODOS los eventos del día
+// completo (no solo el rango 9:00-10:00), así que una cita introducida
+// manualmente por un administrador a cualquier hora del día sigue bloqueando
+// correctamente el slot de las 9:00 a.m. si cae dentro del margen de 30 min
+// de colchón. Ver también el refuerzo de comentarios en
+// verificarDisponibilidadExacta() más abajo.
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ── v12 — FIX "HOY MISMO" EN NOMBRES DE DÍA SIMPLES ───────────────────────────
 // BUG: un cliente escribió "Lunes - se puede hoy?" un lunes a las 12pm. El
 // v9/v10/v11 ya blindaba el caso de FECHA ESPECÍFICA que cae en día no hábil
@@ -140,6 +157,12 @@ function toCRMinutes(dateTimeStr) {
 }
 
 // ── Obtener fecha agendable ───────────────────────────────────────────────────
+// NOTA v15: aunque el flujo de cliente ahora solo ofrece 9:00 a.m., esta
+// función se sigue usando también para reagendamientos manuales de
+// supervisores (que pueden necesitar otra hora puntual), por eso conserva el
+// parámetro hourStr y su clamp 9–16. El horario único de 9:00 a.m. se
+// garantiza en la capa de arriba (getAvailableSlots + el system prompt de
+// Sasha), no acá.
 function getNextAvailableDate(dayName, hourStr) {
   const DAY_MAP = { lunes: 1, martes: 2, viernes: 5 };
 
@@ -239,12 +262,16 @@ function formatearFechaEvento(startRaw) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // getAvailableSlots — verifica disponibilidad real incluyendo eventos manuales
+//
+// v15: un único slot posible por día — 9:00 a.m. (antes: 09:00, 11:30, 14:00).
+// El chequeo de conflicto sigue siendo contra TODOS los eventos del día
+// (calendar.events.list sin filtrar por origen), así que una cita puesta a
+// mano por un administrador a cualquier hora bloquea este slot igual que
+// bloqueaba los tres anteriores.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getAvailableSlots(dayName) {
   const SLOTS = [
-    { label: "09:00", startMin: 9 * 60,      endMin: 10 * 60 },
-    { label: "11:30", startMin: 11 * 60 + 30, endMin: 12 * 60 + 30 },
-    { label: "14:00", startMin: 14 * 60,      endMin: 15 * 60 },
+    { label: "09:00", startMin: 9 * 60, endMin: 10 * 60 },
   ];
 
   try {
@@ -325,10 +352,20 @@ async function getAvailableSlots(dayName) {
 // ─────────────────────────────────────────────────────────────────────────────
 // verificarDisponibilidadExacta
 // Verifica si una fecha/hora concreta está libre ANTES de crear el evento.
-// A diferencia de getAvailableSlots (que trabaja sobre 3 slots fijos), esta
-// función chequea el rango real [inicio, inicio+60min] de la cita que se va a
-// crear, contra TODOS los eventos de ese día — incluyendo bloqueos de día
-// completo (ej: Melvin reservó el día para instalar muebles).
+// A diferencia de getAvailableSlots (que trabaja sobre el slot fijo de las
+// 9:00 a.m.), esta función chequea el rango real [inicio, inicio+60min] de
+// la cita que se va a crear, contra TODOS los eventos de ese día —
+// incluyendo bloqueos de día completo (ej: Melvin reservó el día para
+// instalar muebles) Y CUALQUIER CITA INTRODUCIDA MANUALMENTE POR UN
+// ADMINISTRADOR directamente en Google Calendar (no solo las que creó
+// Sasha). calendar.events.list() no filtra por origen/creador del evento —
+// trae absolutamente todo lo que exista ese día en el calendario, sin
+// importar si se creó a mano o por el bot — así que un bloqueo o cita
+// manual de un administrador SIEMPRE se respeta acá y NUNCA se reagenda
+// encima. Esta es la verificación que se ejecuta justo antes de insertar
+// (createVisitEvent) y justo antes de mover una cita existente
+// (rescheduleEventByNameAndDate) — en ambos casos, si el resultado es
+// "no disponible", no se toca el calendario.
 //
 // NOTA v9: esta función SOLO revisa conflictos con otros eventos. La
 // validación de "¿es un día hábil?" vive en createVisitEvent() (se hace
@@ -359,6 +396,8 @@ async function verificarDisponibilidadExacta(startDate) {
       orderBy: "startTime",
     });
 
+    // Sin filtro de creador/origen: esto trae TODOS los eventos del día,
+    // los que creó Sasha y los que un administrador metió a mano.
     const events = (response.data.items || []).filter(e => e.status !== "cancelled");
 
     // Rango de la cita que se quiere crear, en minutos CR
@@ -376,7 +415,10 @@ async function verificarDisponibilidadExacta(startDate) {
       let   evFinMin    = toCRMinutes(event.end.dateTime);
       if (evFinMin < evInicioMin) evFinMin = 23 * 60 + 59;
 
-      // Solapamiento con margen de 30 min antes y después (igual que getAvailableSlots)
+      // Solapamiento con margen de 30 min antes y después (igual que getAvailableSlots).
+      // Este margen es lo que garantiza que una cita manual de un administrador
+      // cercana en el tiempo (aunque no coincida exacto con el rango 9:00-10:00)
+      // también bloquee el slot, en vez de dejar dos citas pegadas sin espacio real.
       const solapa = (nuevoInicioMin - 30) < evFinMin && (nuevoFinMin + 30) > evInicioMin;
       if (solapa) {
         console.log(`⛔ verificarDisponibilidadExacta: choca con "${event.summary}"`);
@@ -394,6 +436,11 @@ async function verificarDisponibilidadExacta(startDate) {
 }
 
 // ── Buscar y eliminar eventos futuros de un cliente por teléfono ─────────────
+// IMPORTANTE: esto SOLO borra eventos cuya descripción contiene el teléfono
+// del MISMO cliente que está reagendando (matching por "WhatsApp: +506...."
+// en la descripción que arma createVisitEvent). Nunca toca eventos de otros
+// clientes ni bloqueos/citas manuales de administradores, porque esos no
+// contienen el teléfono de este cliente en su descripción.
 async function cancelClientEvents(calendar, phone) {
   try {
     const now    = new Date();
@@ -561,7 +608,10 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
     return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: "dia_no_laborable", conflicto: null };
   }
 
-  // v8: verificar que el destino esté libre antes de mover (respeta bloqueos)
+  // v8: verificar que el destino esté libre antes de mover (respeta bloqueos
+  // Y citas manuales de administradores — ver comentario en
+  // verificarDisponibilidadExacta). Si el destino no está libre, NO se
+  // reagenda encima; se aborta antes de tocar el calendario.
   const dispo = await verificarDisponibilidadExacta(nuevaFecha);
   if (!dispo.disponible) {
     return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: dispo.motivo, conflicto: dispo.conflicto };
@@ -697,15 +747,18 @@ function resolveDateHint(hint) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // createVisitEvent
-// v8: VERIFICA disponibilidad (bloqueos/citas) antes de insertar.
+// v8: VERIFICA disponibilidad (bloqueos/citas — incluidas las introducidas
+//   manualmente por un administrador directo en Google Calendar) antes de
+//   insertar.
 // v9: TAMBIÉN verifica que el día resultante sea hábil (lunes/martes/viernes)
 //   antes de cualquier otra cosa — esto es lo que evita que una fecha
 //   específica mal etiquetada (ej. "viernes 8 de agosto" cuando el 8 es
 //   sábado) termine agendando una visita en un día que la empresa no trabaja.
-// Si el día no es hábil, o el slot está bloqueado/ocupado, NO crea el evento
-// y devuelve { ok:false, motivo, conflicto } para que el llamador (flujo
-// cliente o [VISITA:] de supervisor) informe en vez de duplicar/pisar la
-// agenda o confirmar algo que no existe.
+// Si el día no es hábil, o el slot está bloqueado/ocupado (por Sasha o por
+// un administrador a mano), NO crea el evento y devuelve
+// { ok:false, motivo, conflicto } para que el llamador (flujo cliente o
+// [VISITA:] de supervisor) informe en vez de duplicar/pisar la agenda o
+// confirmar algo que no existe.
 // ─────────────────────────────────────────────────────────────────────────────
 async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail, skipAvailabilityCheck = false }) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
@@ -728,9 +781,11 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
       };
     }
 
-    // ── v8: VERIFICACIÓN DE DISPONIBILIDAD (respeta bloqueos y slots ocupados) ──
-    // Se ejecuta ANTES de borrar citas previas o insertar nada. Si el destino
-    // no está libre, abortamos sin tocar la agenda.
+    // ── v8: VERIFICACIÓN DE DISPONIBILIDAD (respeta bloqueos, citas creadas
+    // por Sasha y citas introducidas manualmente por administradores). Se
+    // ejecuta ANTES de borrar citas previas o insertar nada. Si el destino
+    // no está libre, abortamos sin tocar la agenda — nunca se reagenda
+    // encima de una cita manual.
     const dispo = await verificarDisponibilidadExacta(startDate);
     if (!dispo.disponible) {
       console.warn(`⛔ createVisitEvent abortado: ${dispo.motivo} (${dispo.conflicto || "—"})`);
