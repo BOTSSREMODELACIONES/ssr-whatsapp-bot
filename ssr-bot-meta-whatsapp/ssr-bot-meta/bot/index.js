@@ -69,6 +69,19 @@
  *   pide a Claude que verifique él mismo si una fecha específica cae en
  *   día hábil — eso ahora está señalado como prohibido en el prompt,
  *   coherente con los [SISTEMA:...] deterministas de index.js/calendar.js.
+ *
+ * ── CAMBIOS v15 (2 sept 2026) — MÓDULO DE CONSULTAS FINANCIERAS ───────────────
+ * BUG REAL: "resumen de los pagos realizados por un cliente? Jose Flores"
+ *   fue tratado como un comando de REGISTRO en vez de una consulta. Causa:
+ *   esComandoFinanciero() en finanzas.js clasifica por substring, y "pago"
+ *   (una de las KEYWORDS_FINANZAS) es substring literal de "pagos". Como el
+ *   mensaje no traía ningún dígito, cayó en esComandoFinancieroSinMonto() →
+ *   Sasha respondió "Anotado, mandame la foto..." en vez de responder.
+ * FIX: nuevo módulo consultas.js, dedicado EXCLUSIVAMENTE a preguntas de
+ *   solo lectura (resumen de pagos/gastos por cliente o proyecto). Se
+ *   evalúa en un PASO 0.5, ANTES que finanzas.js, para que ninguna consulta
+ *   pueda malinterpretarse como un registro. Usa un endpoint de lectura
+ *   nuevo en Apps Script (accion=consulta_movimientos) que nunca escribe.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -84,6 +97,7 @@ const { upsertLead, registerVisit }  = require("./crm");
 const KNOWLEDGE                      = require("./knowledge");
 const memoria                        = require("./memoria");
 const { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImagen } = require("./finanzas");
+const { esConsultaFinanciera, procesarConsultaFinanciera } = require("./consultas");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
 // ── Constantes ────────────────────────────────────────────────────────────────
@@ -900,6 +914,19 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // el envoltorio [Instrucción de voz...] rompía la detección de citas
     // cuando el comando llegaba por audio.
     const textoLimpio = desenvolverInstruccionVoz(normalized);
+
+    // ── PASO 0.5 (v15): Consultas financieras de solo lectura ─────────────────
+    // Va ANTES de finanzas.js a propósito. esComandoFinanciero() clasifica por
+    // substring y "pago" matchea dentro de "pagos" — sin este paso, una
+    // pregunta como "resumen de los pagos de Jose Flores" caía en el flujo de
+    // REGISTRO (finanzas.js) en vez de responderse. esConsultaFinanciera()
+    // detecta frases de consulta (resumen, cuánto, listado, etc.) y responde
+    // desde consultas.js, que solo LEE — nunca llega a finanzas.js.
+    if (esConsultaFinanciera(textoLimpio)) {
+      const respuestaConsulta = await procesarConsultaFinanciera(textoLimpio);
+      await sendText(from, respuestaConsulta);
+      return;
+    }
 
     // ── PASO 1 (v6): Finanzas en lenguaje natural → DIRECTO a finanzas.js ─────
     const cmd = normalized;
