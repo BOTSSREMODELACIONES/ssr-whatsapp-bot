@@ -702,26 +702,21 @@ function detectarProyectoPendiente(
 // CONSTRUIR MENSAJE PARA SELECCIÓN DE PROYECTO
 // ============================================================
 
-mensaje:
-  mensajeSeleccionProyecto(
-    entrada.trabajador,
-    entrada.proyectos || [],
-    entrada.proyectosDetalle || []
-  )
+function mensajeSeleccionProyecto(
+  trabajador,
+  proyectos,
+  proyectosDetalle = []
+) {
 
   // ----------------------------------------------------------
   // CONSTRUIR LISTA PARA WHATSAPP
   // ----------------------------------------------------------
   //
-  // El código real sigue estando en "proyectos".
+  // "proyectos" conserva los códigos reales utilizados
+  // internamente para registrar la asistencia.
   //
-  // "proyectosDetalle" solamente mejora lo que ve
-  // el trabajador.
-  //
-  // Ejemplo:
-  //
-  // 1. PROY 074/2026 — Stephanie Jimenez
-  // 2. PROY 065/2026 — José Flores
+  // "proyectosDetalle" contiene la información visual:
+  // código + cliente.
   // ----------------------------------------------------------
 
   const lista =
