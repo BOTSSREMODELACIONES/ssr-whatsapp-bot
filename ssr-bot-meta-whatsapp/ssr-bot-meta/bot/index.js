@@ -882,74 +882,107 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     return;
   }
 
-  // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
-  const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
+// ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
+const esSupervisor =
+  SUPERVISORES.includes(fromE164) ||
+  SUPERVISORES.includes(from);
 
-  // ═════════════════════════════════════════════════════════════════════════════
-  // SASHA ASISTENCIA V1
-  // Trabajadores SSR → Entrada / Salida / Selección de proyecto
-  // Los supervisores conservan primero su funcionamiento administrativo normal.
-  // ═════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════════════════════════════════
+// SASHA ASISTENCIA V1
+// Trabajadores SSR → Entrada / Salida / Selección de proyecto
+// Los supervisores conservan primero su funcionamiento administrativo normal.
+// ═════════════════════════════════════════════════════════════════════════════
 
-  if (!esSupervisor) {
-    try {
+if (!esSupervisor) {
+  try {
 
-      const telefonoAsistencia = String(from || "")
-        .replace(/\D/g, "");
+    const telefonoAsistencia = String(from || "")
+      .replace(/\D/g, "");
 
-      // Preguntamos al ERP si este número pertenece a un trabajador activo.
-      const trabajadorSSR = await esTrabajadorSSR(telefonoAsistencia);
+    // Preguntamos al ERP si este número pertenece a un trabajador activo.
+    const trabajadorSSR = await esTrabajadorSSR(telefonoAsistencia);
 
-      if (trabajadorSSR) {
+    if (trabajadorSSR) {
 
-        console.log(
-          `👷 SASHA ASISTENCIA — mensaje de trabajador: ${telefonoAsistencia}`
-        );
+      console.log(
+        `👷 SASHA ASISTENCIA — mensaje de trabajador: ${telefonoAsistencia}`
+      );
 
-        const resultadoAsistencia = await procesarAsistencia({
-          telefono: telefonoAsistencia,
-          texto: normalized,
-          messageId: messageId || "",
-          mediaIds: mediaIds || null
-        });
+      const resultadoAsistencia = await procesarAsistencia({
+        telefono: telefonoAsistencia,
+        texto: normalized,
+        messageId: messageId || "",
+        mediaIds: mediaIds || null
+      });
 
-        // Si Asistencia procesó el mensaje, detenemos aquí el flujo.
-        // Así el trabajador NO cae al flujo normal de clientes de Sasha.
-        if (resultadoAsistencia) {
+      console.log(
+        "👷 SASHA ASISTENCIA — resultado:",
+        JSON.stringify(resultadoAsistencia)
+      );
 
-          if (typeof resultadoAsistencia === "string") {
-            await sendText(from, resultadoAsistencia);
-          }
+      // --------------------------------------------------------
+      // Si Asistencia procesó el mensaje, respondemos por
+      // WhatsApp y detenemos aquí el flujo.
+      // --------------------------------------------------------
 
-          else if (resultadoAsistencia.respuesta) {
-            await sendText(from, resultadoAsistencia.respuesta);
-          }
+      if (resultadoAsistencia) {
 
-          return;
+        const mensajeAsistencia =
+          typeof resultadoAsistencia === "string"
+            ? resultadoAsistencia
+            : (
+                resultadoAsistencia.mensaje ||
+                resultadoAsistencia.respuesta ||
+                ""
+              );
+
+        if (mensajeAsistencia) {
+
+          console.log(
+            `📤 SASHA ASISTENCIA — enviando respuesta a ${telefonoAsistencia}: ${mensajeAsistencia}`
+          );
+
+          await sendText(
+            from,
+            mensajeAsistencia
+          );
+
+        } else {
+
+          console.warn(
+            "⚠️ SASHA ASISTENCIA procesó el mensaje pero no devolvió texto para enviar:",
+            JSON.stringify(resultadoAsistencia)
+          );
         }
-
-        // El teléfono pertenece a un trabajador, pero el mensaje
-        // todavía no constituye una acción válida de asistencia.
-        // Tampoco lo enviamos al flujo comercial de Sasha.
-        console.log(
-          `👷 Trabajador reconocido sin acción de asistencia: ${telefonoAsistencia}`
-        );
 
         return;
       }
 
-    } catch (err) {
+      // --------------------------------------------------------
+      // Es trabajador, pero Asistencia no devolvió una acción.
+      // NO permitimos que caiga al flujo comercial de Sasha.
+      // --------------------------------------------------------
 
-      console.error(
-        "❌ Error en SASHA ASISTENCIA V1:",
-        err?.message || err
+      console.log(
+        `👷 Trabajador reconocido sin acción de asistencia: ${telefonoAsistencia}`
       );
 
-      // IMPORTANTE:
-      // Si falla temporalmente Asistencia, dejamos continuar Sasha.
-      // No tumbamos el bot completo por una falla del módulo.
+      return;
     }
+
+    // Si NO es trabajador, continúa normalmente hacia Sasha.
+
+  } catch (err) {
+
+    console.error(
+      "❌ Error en SASHA ASISTENCIA V1:",
+      err?.message || err
+    );
+
+    // Si Asistencia falla temporalmente, dejamos que continúe
+    // el funcionamiento normal del bot.
   }
+}
 
   // ═════════════════════════════════════════════════════════════════════════════
   // FIN SASHA ASISTENCIA V1
