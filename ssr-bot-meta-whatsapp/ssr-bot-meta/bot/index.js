@@ -908,12 +908,20 @@ if (!esSupervisor) {
         `👷 SASHA ASISTENCIA — mensaje de trabajador: ${telefonoAsistencia}`
       );
 
-      const resultadoAsistencia = await procesarAsistencia({
-        telefono: telefonoAsistencia,
-        texto: normalized,
-        messageId: messageId || "",
-        mediaIds: mediaIds || null
-      });
+     const fotoAsistencia = Array.isArray(mediaIds)
+  ? (mediaIds[0] || "")
+  : (mediaIds || "");
+
+console.log(
+  `📸 SASHA ASISTENCIA — foto recibida para procesar: ${fotoAsistencia || "ninguna"}`
+);
+
+const resultadoAsistencia = await procesarAsistencia({
+  telefono: telefonoAsistencia,
+  texto: normalized,
+  foto: fotoAsistencia,
+  messageId: messageId || ""
+});
 
       console.log(
         "👷 SASHA ASISTENCIA — resultado:",
