@@ -286,17 +286,40 @@ async function registrarEntrada({
     )
   ) {
 
+    // Códigos reales de proyecto.
+    // Estos son los que se utilizan para registrar en el ERP.
     const proyectos =
       Array.isArray(resultado.proyectosDisponibles)
         ? resultado.proyectosDisponibles
         : [];
 
 
+    // Detalle visual recibido desde Apps Script.
+    // Ejemplo:
+    // {
+    //   codigo: "PROY 065/2026",
+    //   cliente: "José Flores",
+    //   etiqueta: "PROY 065/2026 — José Flores"
+    // }
+    const proyectosDetalle =
+      Array.isArray(resultado.proyectosDetalle)
+        ? resultado.proyectosDetalle
+        : [];
+
+
+    // Guardamos AMBAS listas.
+    //
+    // proyectos:
+    // se utiliza internamente para detectar qué código seleccionó.
+    //
+    // proyectosDetalle:
+    // se utiliza únicamente para mostrar una descripción amigable.
     pendientesProyecto.set(
       telefono,
       {
         idJornada: resultado.id,
         proyectos: proyectos,
+        proyectosDetalle: proyectosDetalle,
         creado: Date.now()
       }
     );
@@ -313,6 +336,8 @@ async function registrarEntrada({
       idJornada: resultado.id,
 
       proyectos: proyectos,
+
+      proyectosDetalle: proyectosDetalle,
 
       resultado: resultado
 
