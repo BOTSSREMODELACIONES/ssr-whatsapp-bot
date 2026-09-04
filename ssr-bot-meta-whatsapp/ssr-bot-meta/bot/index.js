@@ -885,6 +885,76 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
   const esSupervisor = SUPERVISORES.includes(fromE164) || SUPERVISORES.includes(from);
 
+  // ═════════════════════════════════════════════════════════════════════════════
+  // SASHA ASISTENCIA V1
+  // Trabajadores SSR → Entrada / Salida / Selección de proyecto
+  // Los supervisores conservan primero su funcionamiento administrativo normal.
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  if (!esSupervisor) {
+    try {
+
+      const telefonoAsistencia = String(from || "")
+        .replace(/\D/g, "");
+
+      // Preguntamos al ERP si este número pertenece a un trabajador activo.
+      const trabajadorSSR = await esTrabajadorSSR(telefonoAsistencia);
+
+      if (trabajadorSSR) {
+
+        console.log(
+          `👷 SASHA ASISTENCIA — mensaje de trabajador: ${telefonoAsistencia}`
+        );
+
+        const resultadoAsistencia = await procesarAsistencia({
+          telefono: telefonoAsistencia,
+          texto: normalized,
+          messageId: messageId || "",
+          mediaIds: mediaIds || null
+        });
+
+        // Si Asistencia procesó el mensaje, detenemos aquí el flujo.
+        // Así el trabajador NO cae al flujo normal de clientes de Sasha.
+        if (resultadoAsistencia) {
+
+          if (typeof resultadoAsistencia === "string") {
+            await sendText(from, resultadoAsistencia);
+          }
+
+          else if (resultadoAsistencia.respuesta) {
+            await sendText(from, resultadoAsistencia.respuesta);
+          }
+
+          return;
+        }
+
+        // El teléfono pertenece a un trabajador, pero el mensaje
+        // todavía no constituye una acción válida de asistencia.
+        // Tampoco lo enviamos al flujo comercial de Sasha.
+        console.log(
+          `👷 Trabajador reconocido sin acción de asistencia: ${telefonoAsistencia}`
+        );
+
+        return;
+      }
+
+    } catch (err) {
+
+      console.error(
+        "❌ Error en SASHA ASISTENCIA V1:",
+        err?.message || err
+      );
+
+      // IMPORTANTE:
+      // Si falla temporalmente Asistencia, dejamos continuar Sasha.
+      // No tumbamos el bot completo por una falla del módulo.
+    }
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // FIN SASHA ASISTENCIA V1
+  // ═════════════════════════════════════════════════════════════════════════════
+        
   // ── v4/v8: lectura de comprobantes bancarios por imagen ──────────────────────
   // v8: se fusiona con cualquier contexto de texto pendiente de ESTE supervisor
   // (ej. "regístrame esto a nombre del proyecto de Christian" mandado como
