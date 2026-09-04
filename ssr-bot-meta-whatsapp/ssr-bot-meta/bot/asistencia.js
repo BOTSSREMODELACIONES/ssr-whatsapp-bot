@@ -702,11 +702,12 @@ function detectarProyectoPendiente(
 // CONSTRUIR MENSAJE PARA SELECCIÓN DE PROYECTO
 // ============================================================
 
-function mensajeSeleccionProyecto(
-  trabajador,
-  proyectos,
-  proyectosDetalle = []
-) {
+mensaje:
+  mensajeSeleccionProyecto(
+    entrada.trabajador,
+    entrada.proyectos || [],
+    entrada.proyectosDetalle || []
+  )
 
   // ----------------------------------------------------------
   // CONSTRUIR LISTA PARA WHATSAPP
