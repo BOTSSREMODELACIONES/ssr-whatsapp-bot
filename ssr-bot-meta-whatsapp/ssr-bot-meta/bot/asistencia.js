@@ -775,12 +775,440 @@ async function procesarRespuestaProyecto({
   });
 }
 
+// ============================================================
+// INTEGRACIÓN PRINCIPAL CON INDEX.JS
+// ============================================================
+
+/**
+ * Determina si el número que escribe por WhatsApp
+ * pertenece a un trabajador registrado en SSR.
+ *
+ * Devuelve:
+ * true  -> es trabajador
+ * false -> no es trabajador
+ */
+async function esTrabajadorSSR(telefono) {
+
+  try {
+
+    telefono = normalizarTelefono(telefono);
+
+    if (!telefono) {
+      return false;
+    }
+
+    const respuesta = await consultarEstado(telefono);
+
+    const resultado =
+      respuesta &&
+      respuesta.resultado
+        ? respuesta.resultado
+        : respuesta;
+
+    if (!resultado) {
+      return false;
+    }
+
+    if (resultado.status === "no_es_trabajador") {
+      return false;
+    }
+
+    if (resultado.esTrabajador === true) {
+      return true;
+    }
+
+    return false;
+
+  } catch (err) {
+
+    console.error(
+      "❌ Error verificando trabajador SSR:",
+      err.message
+    );
+
+    return false;
+  }
+}
+
+
+// ============================================================
+// PROCESADOR PRINCIPAL DE ASISTENCIA
+// ============================================================
+
+/**
+ * Procesador de alto nivel utilizado por index.js.
+ *
+ * Recibe:
+ * {
+ *   telefono,
+ *   texto,
+ *   foto,
+ *   messageId
+ * }
+ *
+ * Apps Script sigue siendo la fuente de verdad.
+ */
+async function procesarAsistencia({
+  telefono,
+  texto = "",
+  foto = "",
+  messageId = ""
+}) {
+
+  try {
+
+    telefono = normalizarTelefono(telefono);
+
+    const textoOriginal =
+      String(texto || "").trim();
+
+    const textoNormalizado =
+      normalizarTexto(textoOriginal);
+
+
+    if (!telefono) {
+
+      return {
+        manejado: false,
+        tipo: "error",
+        error: "telefono_requerido"
+      };
+    }
+
+
+    // ========================================================
+    // 1. SI ESTÁ ESPERANDO SELECCIÓN DE PROYECTO
+    // ========================================================
+
+    if (tieneProyectoPendiente(telefono)) {
+
+      const resultadoProyecto =
+        await procesarRespuestaProyecto({
+          telefono: telefono,
+          texto: textoOriginal
+        });
+
+
+      if (
+        resultadoProyecto &&
+        resultadoProyecto.tipo === "proyecto_asignado"
+      ) {
+
+        return {
+          ...resultadoProyecto,
+          mensaje:
+            mensajeProyectoAsignado(
+              resultadoProyecto
+            )
+        };
+      }
+
+
+      if (
+        resultadoProyecto &&
+        resultadoProyecto.tipo === "proyecto_invalido"
+      ) {
+
+        const pendiente =
+          obtenerProyectoPendiente(telefono);
+
+        return {
+          manejado: true,
+          tipo: "proyecto_invalido",
+          proyectos:
+            resultadoProyecto.proyectos || [],
+          mensaje:
+            mensajeSeleccionProyecto(
+              "Trabajador",
+              pendiente
+                ? pendiente.proyectos
+                : resultadoProyecto.proyectos || []
+            )
+        };
+      }
+
+
+      return resultadoProyecto;
+    }
+
+
+    // ========================================================
+    // 2. CONSULTAR ESTADO ACTUAL EN APPS SCRIPT
+    // ========================================================
+
+    const respuestaEstado =
+      await consultarEstado(telefono);
+
+
+    const estado =
+      respuestaEstado &&
+      respuestaEstado.resultado
+        ? respuestaEstado.resultado
+        : respuestaEstado;
+
+
+    if (!estado) {
+
+      return {
+        manejado: true,
+        tipo: "error",
+        error: "estado_invalido"
+      };
+    }
+
+
+    // ========================================================
+    // 3. SI NO ES TRABAJADOR
+    // ========================================================
+
+    if (
+      estado.status === "no_es_trabajador" ||
+      estado.esTrabajador !== true
+    ) {
+
+      return {
+        manejado: false,
+        tipo: "no_es_trabajador"
+      };
+    }
+
+
+    // ========================================================
+    // 4. DETERMINAR SI EL MENSAJE INDICA ENTRADA O SALIDA
+    // ========================================================
+
+    const pideEntrada =
+      textoNormalizado === "entrada" ||
+      textoNormalizado.includes("registrar entrada") ||
+      textoNormalizado.includes("marcar entrada") ||
+      textoNormalizado.includes("mi entrada") ||
+      textoNormalizado.includes("entrando") ||
+      textoNormalizado.includes("llegue") ||
+      textoNormalizado.includes("llegué");
+
+
+    const pideSalida =
+      textoNormalizado === "salida" ||
+      textoNormalizado.includes("registrar salida") ||
+      textoNormalizado.includes("marcar salida") ||
+      textoNormalizado.includes("mi salida") ||
+      textoNormalizado.includes("saliendo") ||
+      textoNormalizado.includes("me voy") ||
+      textoNormalizado.includes("termine") ||
+      textoNormalizado.includes("terminé");
+
+
+    // ========================================================
+    // 5. SI MANDA FOTO Y YA TIENE JORNADA ABIERTA -> SALIDA
+    // ========================================================
+
+    if (
+      foto &&
+      estado.jornadaAbierta === true
+    ) {
+
+      const salida =
+        await registrarSalida({
+          telefono: telefono,
+          foto: foto,
+          messageId: messageId
+        });
+
+
+      if (
+        salida &&
+        salida.tipo === "salida_registrada"
+      ) {
+
+        return {
+          ...salida,
+          mensaje:
+            mensajeSalidaRegistrada(salida)
+        };
+      }
+
+
+      return salida;
+    }
+
+
+    // ========================================================
+    // 6. SI MANDA FOTO Y NO TIENE JORNADA -> ENTRADA
+    // ========================================================
+
+    if (
+      foto &&
+      estado.jornadaAbierta !== true
+    ) {
+
+      const entrada =
+        await registrarEntrada({
+          telefono: telefono,
+          foto: foto,
+          messageId: messageId
+        });
+
+
+      if (
+        entrada &&
+        entrada.tipo === "requiere_proyecto"
+      ) {
+
+        return {
+          ...entrada,
+          mensaje:
+            mensajeSeleccionProyecto(
+              entrada.trabajador,
+              entrada.proyectos || []
+            )
+        };
+      }
+
+
+      if (
+        entrada &&
+        entrada.tipo === "entrada_registrada"
+      ) {
+
+        return {
+          ...entrada,
+          mensaje:
+            mensajeEntradaRegistrada(entrada)
+        };
+      }
+
+
+      return entrada;
+    }
+
+
+    // ========================================================
+    // 7. SOLICITUD EXPLÍCITA DE ENTRADA
+    // ========================================================
+
+    if (pideEntrada) {
+
+      if (estado.jornadaAbierta === true) {
+
+        return {
+          manejado: true,
+          tipo: "jornada_ya_abierta",
+          trabajador: estado.trabajador,
+          jornada: estado.jornada,
+          mensaje:
+            "⚠️ Ya tienes una jornada abierta.\n\n" +
+            "Para registrar la salida, envíame la fotografía de salida."
+        };
+      }
+
+
+      return {
+        manejado: true,
+        tipo: "solicitar_foto_entrada",
+        trabajador: estado.trabajador,
+        mensaje:
+          `👷 ${estado.trabajador || "Trabajador"}\n\n` +
+          "📸 Envíame una fotografía desde el proyecto para registrar tu entrada."
+      };
+    }
+
+
+    // ========================================================
+    // 8. SOLICITUD EXPLÍCITA DE SALIDA
+    // ========================================================
+
+    if (pideSalida) {
+
+      if (estado.jornadaAbierta !== true) {
+
+        return {
+          manejado: true,
+          tipo: "sin_jornada_abierta",
+          trabajador: estado.trabajador,
+          mensaje:
+            "⚠️ No tienes una jornada abierta actualmente."
+        };
+      }
+
+
+      return {
+        manejado: true,
+        tipo: "solicitar_foto_salida",
+        trabajador: estado.trabajador,
+        jornada: estado.jornada,
+        mensaje:
+          `👷 ${estado.trabajador || "Trabajador"}\n\n` +
+          "📸 Envíame una fotografía para registrar tu salida."
+      };
+    }
+
+
+    // ========================================================
+    // 9. MENSAJE NORMAL DE UN TRABAJADOR
+    // ========================================================
+
+    if (estado.jornadaAbierta === true) {
+
+      return {
+        manejado: true,
+        tipo: "trabajador_con_jornada",
+        trabajador: estado.trabajador,
+        jornada: estado.jornada,
+        mensaje:
+          `👷 Hola ${estado.trabajador || ""}.\n\n` +
+          "Tienes una jornada abierta actualmente.\n\n" +
+          "📸 Cuando termines, envíame la fotografía de salida."
+      };
+    }
+
+
+    return {
+      manejado: true,
+      tipo: "trabajador_sin_jornada",
+      trabajador: estado.trabajador,
+      mensaje:
+        `👷 Hola ${estado.trabajador || ""}.\n\n` +
+        "📸 Envíame una fotografía desde el proyecto para registrar tu entrada."
+    };
+
+
+  } catch (err) {
+
+    console.error(
+      "❌ Error procesando SASHA ASISTENCIA:",
+      err
+    );
+
+
+    return {
+      manejado: true,
+      tipo: "error",
+      error: err.message,
+      mensaje:
+        "⚠️ No pude procesar la asistencia en este momento."
+    };
+  }
+}
+
 
 // ============================================================
 // EXPORTACIONES
 // ============================================================
 
 module.exports = {
+
+  // ----------------------------------------------------------
+  // FUNCIONES PRINCIPALES UTILIZADAS POR INDEX.JS
+  // ----------------------------------------------------------
+
+  esTrabajadorSSR,
+
+  procesarAsistencia,
+
+
+  // ----------------------------------------------------------
+  // FUNCIONES DEL MÓDULO DE ASISTENCIA
+  // ----------------------------------------------------------
 
   consultarEstado,
 
