@@ -100,6 +100,12 @@ const { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImage
 const { esConsultaFinanciera, procesarConsultaFinanciera } = require("./consultas");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 
+// ── MÓDULO ASISTENCIA SASHA V1 ───────────────────────────────────────────────
+const {
+  esTrabajadorSSR,
+  procesarAsistencia
+} = require("./asistencia");
+
 // ── Constantes ────────────────────────────────────────────────────────────────
 const SUPERVISORES = ["+50683091817", "+50671981370", "+50671951695"];
 
