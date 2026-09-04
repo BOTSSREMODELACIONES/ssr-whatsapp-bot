@@ -97,6 +97,7 @@ function limpiarPendientesExpirados() {
 async function llamarAppsScript(payload) {
 
   if (!APPS_SCRIPT_URL) {
+    console.error("❌ ASISTENCIA: falta APPS_SCRIPT_URL");
 
     throw new Error(
       "Falta la variable de entorno APPS_SCRIPT_URL"
@@ -104,23 +105,78 @@ async function llamarAppsScript(payload) {
   }
 
 
-  const response = await fetch(
-    APPS_SCRIPT_URL,
-    {
-      method: "POST",
-
-      headers: {
-        "Content-Type": "application/json"
-      },
-
-      body: JSON.stringify(payload),
-
-      redirect: "follow"
-    }
+  console.log(
+    "📡 ASISTENCIA → Apps Script:",
+    JSON.stringify(payload)
   );
 
 
-  const texto = await response.text();
+  let response;
+
+  try {
+
+    response = await fetch(
+      APPS_SCRIPT_URL,
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type": "application/json"
+        },
+
+        body: JSON.stringify(payload),
+
+        redirect: "follow",
+
+        // Evita que Sasha quede esperando indefinidamente.
+        signal: AbortSignal.timeout(15000)
+      }
+    );
+
+  } catch (err) {
+
+    console.error(
+      "❌ ASISTENCIA: error llamando Apps Script:",
+      err.name,
+      err.message
+    );
+
+    throw new Error(
+      "No se pudo comunicar con Apps Script: " +
+      err.message
+    );
+  }
+
+
+  console.log(
+    "📥 ASISTENCIA ← Apps Script HTTP:",
+    response.status
+  );
+
+
+  let texto;
+
+  try {
+
+    texto = await response.text();
+
+  } catch (err) {
+
+    console.error(
+      "❌ ASISTENCIA: no se pudo leer respuesta:",
+      err.message
+    );
+
+    throw new Error(
+      "No se pudo leer la respuesta de Apps Script."
+    );
+  }
+
+
+  console.log(
+    "📄 ASISTENCIA ← respuesta:",
+    String(texto || "").substring(0, 1000)
+  );
 
 
   let data;
@@ -131,24 +187,40 @@ async function llamarAppsScript(payload) {
 
   } catch (err) {
 
+    console.error(
+      "❌ ASISTENCIA: Apps Script devolvió respuesta no JSON:",
+      String(texto || "").substring(0, 500)
+    );
+
     throw new Error(
       "Apps Script no devolvió JSON válido. Respuesta: " +
-      texto.substring(0, 500)
+      String(texto || "").substring(0, 500)
     );
   }
 
 
   if (!response.ok) {
 
+    console.error(
+      "❌ ASISTENCIA: HTTP no exitoso:",
+      response.status,
+      String(texto || "").substring(0, 500)
+    );
+
     throw new Error(
-      `Apps Script HTTP ${response.status}: ${texto.substring(0, 500)}`
+      `Apps Script HTTP ${response.status}: ` +
+      String(texto || "").substring(0, 500)
     );
   }
 
 
+  console.log(
+    "✅ ASISTENCIA: respuesta Apps Script procesada correctamente"
+  );
+
+
   return data;
 }
-
 
 // ============================================================
 // CONSULTAR ESTADO DEL TRABAJADOR
