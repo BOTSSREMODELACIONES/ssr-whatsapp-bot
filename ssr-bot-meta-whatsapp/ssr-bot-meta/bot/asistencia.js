@@ -1176,20 +1176,21 @@ async function procesarAsistencia({
         });
 
 
-      if (
-        entrada &&
-        entrada.tipo === "requiere_proyecto"
-      ) {
+    if (
+  entrada &&
+  entrada.tipo === "requiere_proyecto"
+) {
 
-        return {
-          ...entrada,
-          mensaje:
-            mensajeSeleccionProyecto(
-              entrada.trabajador,
-              entrada.proyectos || []
-            )
-        };
-      }
+  return {
+    ...entrada,
+    mensaje:
+      mensajeSeleccionProyecto(
+        entrada.trabajador,
+        entrada.proyectos || [],
+        entrada.proyectosDetalle || []
+      )
+  };
+}
 
 
       if (
