@@ -704,14 +704,49 @@ function detectarProyectoPendiente(
 
 function mensajeSeleccionProyecto(
   trabajador,
-  proyectos
+  proyectos,
+  proyectosDetalle = []
 ) {
+
+  // ----------------------------------------------------------
+  // CONSTRUIR LISTA PARA WHATSAPP
+  // ----------------------------------------------------------
+  //
+  // El código real sigue estando en "proyectos".
+  //
+  // "proyectosDetalle" solamente mejora lo que ve
+  // el trabajador.
+  //
+  // Ejemplo:
+  //
+  // 1. PROY 074/2026 — Stephanie Jimenez
+  // 2. PROY 065/2026 — José Flores
+  // ----------------------------------------------------------
 
   const lista =
     proyectos
       .map(
-        (proyecto, index) =>
-          `${index + 1}. ${proyecto}`
+        (proyecto, index) => {
+
+          const detalle =
+            Array.isArray(proyectosDetalle)
+              ? proyectosDetalle.find(
+                  item =>
+                    item &&
+                    String(item.codigo || "").trim() ===
+                    String(proyecto || "").trim()
+                )
+              : null;
+
+
+          const etiqueta =
+            detalle && detalle.etiqueta
+              ? detalle.etiqueta
+              : proyecto;
+
+
+          return `${index + 1}. ${etiqueta}`;
+        }
       )
       .join("\n");
 
@@ -723,7 +758,6 @@ function mensajeSeleccionProyecto(
     `Respóndeme solamente con el número de la opción.`
   );
 }
-
 
 // ============================================================
 // MENSAJES DE CONFIRMACIÓN
