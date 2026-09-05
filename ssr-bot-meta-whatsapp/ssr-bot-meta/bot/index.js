@@ -933,39 +933,182 @@ const resultadoAsistencia = await procesarAsistencia({
       // WhatsApp y detenemos aquí el flujo.
       // --------------------------------------------------------
 
-      if (resultadoAsistencia) {
+if (resultadoAsistencia) {
 
-        const mensajeAsistencia =
-          typeof resultadoAsistencia === "string"
-            ? resultadoAsistencia
-            : (
-                resultadoAsistencia.mensaje ||
-                resultadoAsistencia.respuesta ||
-                ""
-              );
+  const mensajeAsistencia =
+    typeof resultadoAsistencia === "string"
+      ? resultadoAsistencia
+      : (
+          resultadoAsistencia.mensaje ||
+          resultadoAsistencia.respuesta ||
+          ""
+        );
 
-        if (mensajeAsistencia) {
+  // ==========================================================
+  // RESPUESTA AL TRABAJADOR
+  // ==========================================================
 
-          console.log(
-            `📤 SASHA ASISTENCIA — enviando respuesta a ${telefonoAsistencia}: ${mensajeAsistencia}`
-          );
+  if (mensajeAsistencia) {
 
-          await sendText(
-            from,
-            mensajeAsistencia
-          );
+    console.log(
+      `📤 SASHA ASISTENCIA — enviando respuesta a ${telefonoAsistencia}: ${mensajeAsistencia}`
+    );
 
-        } else {
+    await sendText(
+      from,
+      mensajeAsistencia
+    );
 
-          console.warn(
-            "⚠️ SASHA ASISTENCIA procesó el mensaje pero no devolvió texto para enviar:",
-            JSON.stringify(resultadoAsistencia)
-          );
-        }
+  } else {
 
-        return;
-      }
+    console.warn(
+      "⚠️ SASHA ASISTENCIA procesó el mensaje pero no devolvió texto para enviar:",
+      JSON.stringify(resultadoAsistencia)
+    );
+  }
 
+
+  // ==========================================================
+  // NOTIFICACIÓN DE ASISTENCIA A DARWIN
+  // Solo movimientos CONFIRMADOS.
+  // ==========================================================
+
+  const tipoAsistencia =
+    resultadoAsistencia &&
+    typeof resultadoAsistencia === "object"
+      ? resultadoAsistencia.tipo
+      : "";
+
+
+  const tiposNotificables = [
+    "entrada_registrada",
+    "salida_registrada",
+    "proyecto_asignado"
+  ];
+
+
+  if (tiposNotificables.includes(tipoAsistencia)) {
+
+    let mensajeDarwin = "";
+
+    const trabajador =
+      resultadoAsistencia.trabajador ||
+      "Trabajador";
+
+    const proyecto =
+      resultadoAsistencia.etiquetaProyecto ||
+      resultadoAsistencia.proyectoEtiqueta ||
+      resultadoAsistencia.proyecto ||
+      (
+        resultadoAsistencia.jornada &&
+        resultadoAsistencia.jornada.proyecto
+      ) ||
+      "Sin proyecto";
+
+
+    // --------------------------------------------------------
+    // ENTRADA
+    // --------------------------------------------------------
+
+    if (tipoAsistencia === "entrada_registrada") {
+
+      const hora =
+        resultadoAsistencia.hora ||
+        resultadoAsistencia.entrada ||
+        "";
+
+      mensajeDarwin =
+        `📥 *ASISTENCIA — ENTRADA*\n\n` +
+        `👷 ${trabajador}\n` +
+        `🏗️ ${proyecto}\n` +
+        (hora ? `🕐 Entrada: ${hora}\n` : "") +
+        `📸 Fotografía registrada`;
+    }
+
+
+    // --------------------------------------------------------
+    // PROYECTO ASIGNADO
+    // La entrada ya existía y el trabajador acaba de escoger
+    // el proyecto correcto.
+    // --------------------------------------------------------
+
+    if (tipoAsistencia === "proyecto_asignado") {
+
+      const hora =
+        resultadoAsistencia.hora ||
+        resultadoAsistencia.entrada ||
+        "";
+
+      mensajeDarwin =
+        `📥 *ASISTENCIA — ENTRADA*\n\n` +
+        `👷 ${trabajador}\n` +
+        `🏗️ ${proyecto}\n` +
+        (hora ? `🕐 Entrada: ${hora}\n` : "") +
+        `📸 Fotografía registrada`;
+    }
+
+
+    // --------------------------------------------------------
+    // SALIDA
+    // --------------------------------------------------------
+
+    if (tipoAsistencia === "salida_registrada") {
+
+      const entrada =
+        resultadoAsistencia.entrada ||
+        (
+          resultadoAsistencia.jornada &&
+          resultadoAsistencia.jornada.entrada
+        ) ||
+        "";
+
+      const salida =
+        resultadoAsistencia.salida ||
+        resultadoAsistencia.hora ||
+        "";
+
+      const horas =
+        resultadoAsistencia.horas ||
+        resultadoAsistencia.horasTrabajadas ||
+        resultadoAsistencia.totalHoras ||
+        "";
+
+      mensajeDarwin =
+        `📤 *ASISTENCIA — SALIDA*\n\n` +
+        `👷 ${trabajador}\n` +
+        `🏗️ ${proyecto}\n` +
+        (entrada ? `🕐 Entrada: ${entrada}\n` : "") +
+        (salida ? `🕐 Salida: ${salida}\n` : "") +
+        (horas !== "" ? `⏱️ Horas: ${horas}\n` : "") +
+        `📸 Fotografía registrada`;
+    }
+
+
+    // --------------------------------------------------------
+    // ENVIAR A DARWIN
+    // El fallo de esta copia NO debe romper la asistencia.
+    // --------------------------------------------------------
+
+    if (mensajeDarwin) {
+
+      sendText(
+        DARWIN_PHONE,
+        mensajeDarwin
+      ).catch(err => {
+
+        console.warn(
+          "⚠️ No se pudo enviar notificación de asistencia a Darwin:",
+          err.message
+        );
+
+      });
+    }
+  }
+
+
+  return;
+}
+            
       // --------------------------------------------------------
       // Es trabajador, pero Asistencia no devolvió una acción.
       // NO permitimos que caiga al flujo comercial de Sasha.
