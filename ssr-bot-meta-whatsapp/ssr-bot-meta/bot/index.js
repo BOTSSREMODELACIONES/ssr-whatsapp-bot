@@ -894,244 +894,339 @@ const esSupervisor =
 // ═════════════════════════════════════════════════════════════════════════════
 
 if (!esSupervisor) {
+
+  const telefonoAsistencia = String(from || "")
+    .replace(/\D/g, "");
+
   try {
 
-    const telefonoAsistencia = String(from || "")
-      .replace(/\D/g, "");
+    // ==========================================================
+    // 1. VERIFICAR SI EL NÚMERO ES DE UN TRABAJADOR SSR
+    // ==========================================================
 
-    // Preguntamos al ERP si este número pertenece a un trabajador activo.
-    const trabajadorSSR = await esTrabajadorSSR(telefonoAsistencia);
+    const verificacion =
+      await esTrabajadorSSR(telefonoAsistencia);
 
-    if (trabajadorSSR) {
 
-      console.log(
-        `👷 SASHA ASISTENCIA — mensaje de trabajador: ${telefonoAsistencia}`
+    // ==========================================================
+    // 2. SI HUBO ERROR CONSULTANDO APPS SCRIPT
+    // NO LO TRATAMOS COMO CLIENTE
+    // ==========================================================
+
+    if (
+      verificacion &&
+      verificacion.error === true
+    ) {
+
+      console.error(
+        `❌ SASHA ASISTENCIA — no se pudo verificar trabajador ${telefonoAsistencia}:`,
+        verificacion.motivo || "error desconocido"
       );
 
-     const fotoAsistencia = Array.isArray(mediaIds)
-  ? (mediaIds[0] || "")
-  : (mediaIds || "");
+      await sendText(
+        from,
+        "⚠️ No pude verificar tu estado de asistencia en este momento. Intentá nuevamente en unos segundos."
+      );
 
-console.log(
-  `📸 SASHA ASISTENCIA — foto recibida para procesar: ${fotoAsistencia || "ninguna"}`
-);
+      // MUY IMPORTANTE:
+      // detenemos aquí para impedir que el trabajador
+      // caiga al flujo comercial de Sasha.
+      return;
+    }
 
-const resultadoAsistencia = await procesarAsistencia({
-  telefono: telefonoAsistencia,
-  texto: normalized,
-  foto: fotoAsistencia,
-  messageId: messageId || ""
-});
+
+    // ==========================================================
+    // 3. SI ES TRABAJADOR
+    // ==========================================================
+
+    if (
+      verificacion &&
+      verificacion.esTrabajador === true
+    ) {
+
+      console.log(
+        `👷 SASHA ASISTENCIA — trabajador reconocido: ${telefonoAsistencia}`
+      );
+
+
+      const fotoAsistencia =
+        Array.isArray(mediaIds)
+          ? (mediaIds[0] || "")
+          : (mediaIds || "");
+
+
+      console.log(
+        `📸 SASHA ASISTENCIA — foto recibida para procesar: ${
+          fotoAsistencia || "ninguna"
+        }`
+      );
+
+
+      // ========================================================
+      // 4. PROCESAR ASISTENCIA
+      // ========================================================
+
+      const resultadoAsistencia =
+        await procesarAsistencia({
+          telefono: telefonoAsistencia,
+          texto: normalized,
+          foto: fotoAsistencia,
+          messageId: messageId || ""
+        });
+
 
       console.log(
         "👷 SASHA ASISTENCIA — resultado:",
         JSON.stringify(resultadoAsistencia)
       );
 
-      // --------------------------------------------------------
-      // Si Asistencia procesó el mensaje, respondemos por
-      // WhatsApp y detenemos aquí el flujo.
-      // --------------------------------------------------------
 
-if (resultadoAsistencia) {
+      // ========================================================
+      // 5. RESPUESTA AL TRABAJADOR
+      // ========================================================
 
-  const mensajeAsistencia =
-    typeof resultadoAsistencia === "string"
-      ? resultadoAsistencia
-      : (
-          resultadoAsistencia.mensaje ||
-          resultadoAsistencia.respuesta ||
-          ""
-        );
+      if (resultadoAsistencia) {
 
-  // ==========================================================
-  // RESPUESTA AL TRABAJADOR
-  // ==========================================================
-
-  if (mensajeAsistencia) {
-
-    console.log(
-      `📤 SASHA ASISTENCIA — enviando respuesta a ${telefonoAsistencia}: ${mensajeAsistencia}`
-    );
-
-    await sendText(
-      from,
-      mensajeAsistencia
-    );
-
-  } else {
-
-    console.warn(
-      "⚠️ SASHA ASISTENCIA procesó el mensaje pero no devolvió texto para enviar:",
-      JSON.stringify(resultadoAsistencia)
-    );
-  }
+        const mensajeAsistencia =
+          typeof resultadoAsistencia === "string"
+            ? resultadoAsistencia
+            : (
+                resultadoAsistencia.mensaje ||
+                resultadoAsistencia.respuesta ||
+                ""
+              );
 
 
-  // ==========================================================
-  // NOTIFICACIÓN DE ASISTENCIA A DARWIN
-  // Solo movimientos CONFIRMADOS.
-  // ==========================================================
+        if (mensajeAsistencia) {
 
-  const tipoAsistencia =
-    resultadoAsistencia &&
-    typeof resultadoAsistencia === "object"
-      ? resultadoAsistencia.tipo
-      : "";
+          console.log(
+            `📤 SASHA ASISTENCIA — enviando respuesta a ${telefonoAsistencia}: ${mensajeAsistencia}`
+          );
 
+          await sendText(
+            from,
+            mensajeAsistencia
+          );
 
-  const tiposNotificables = [
-    "entrada_registrada",
-    "salida_registrada",
-    "proyecto_asignado"
-  ];
+        } else {
 
-
-  if (tiposNotificables.includes(tipoAsistencia)) {
-
-    let mensajeDarwin = "";
-
-    const trabajador =
-      resultadoAsistencia.trabajador ||
-      "Trabajador";
-
-    const proyecto =
-      resultadoAsistencia.etiquetaProyecto ||
-      resultadoAsistencia.proyectoEtiqueta ||
-      resultadoAsistencia.proyecto ||
-      (
-        resultadoAsistencia.jornada &&
-        resultadoAsistencia.jornada.proyecto
-      ) ||
-      "Sin proyecto";
+          console.warn(
+            "⚠️ SASHA ASISTENCIA procesó el mensaje pero no devolvió texto:",
+            JSON.stringify(resultadoAsistencia)
+          );
+        }
 
 
-    // --------------------------------------------------------
-    // ENTRADA
-    // --------------------------------------------------------
+        // ======================================================
+        // 6. NOTIFICACIÓN A DARWIN
+        // SOLO MOVIMIENTOS REALMENTE CONFIRMADOS
+        // ======================================================
 
-    if (tipoAsistencia === "entrada_registrada") {
-
-      const hora =
-        resultadoAsistencia.hora ||
-        resultadoAsistencia.entrada ||
-        "";
-
-      mensajeDarwin =
-        `📥 *ASISTENCIA — ENTRADA*\n\n` +
-        `👷 ${trabajador}\n` +
-        `🏗️ ${proyecto}\n` +
-        (hora ? `🕐 Entrada: ${hora}\n` : "") +
-        `📸 Fotografía registrada`;
-    }
+        const tipoAsistencia =
+          typeof resultadoAsistencia === "object"
+            ? resultadoAsistencia.tipo
+            : "";
 
 
-    // --------------------------------------------------------
-    // PROYECTO ASIGNADO
-    // La entrada ya existía y el trabajador acaba de escoger
-    // el proyecto correcto.
-    // --------------------------------------------------------
-
-    if (tipoAsistencia === "proyecto_asignado") {
-
-      const hora =
-        resultadoAsistencia.hora ||
-        resultadoAsistencia.entrada ||
-        "";
-
-      mensajeDarwin =
-        `📥 *ASISTENCIA — ENTRADA*\n\n` +
-        `👷 ${trabajador}\n` +
-        `🏗️ ${proyecto}\n` +
-        (hora ? `🕐 Entrada: ${hora}\n` : "") +
-        `📸 Fotografía registrada`;
-    }
+        const tiposNotificables = [
+          "entrada_registrada",
+          "salida_registrada",
+          "proyecto_asignado"
+        ];
 
 
-    // --------------------------------------------------------
-    // SALIDA
-    // --------------------------------------------------------
+        if (
+          tiposNotificables.includes(tipoAsistencia)
+        ) {
 
-    if (tipoAsistencia === "salida_registrada") {
-
-      const entrada =
-        resultadoAsistencia.entrada ||
-        (
-          resultadoAsistencia.jornada &&
-          resultadoAsistencia.jornada.entrada
-        ) ||
-        "";
-
-      const salida =
-        resultadoAsistencia.salida ||
-        resultadoAsistencia.hora ||
-        "";
-
-      const horas =
-        resultadoAsistencia.horas ||
-        resultadoAsistencia.horasTrabajadas ||
-        resultadoAsistencia.totalHoras ||
-        "";
-
-      mensajeDarwin =
-        `📤 *ASISTENCIA — SALIDA*\n\n` +
-        `👷 ${trabajador}\n` +
-        `🏗️ ${proyecto}\n` +
-        (entrada ? `🕐 Entrada: ${entrada}\n` : "") +
-        (salida ? `🕐 Salida: ${salida}\n` : "") +
-        (horas !== "" ? `⏱️ Horas: ${horas}\n` : "") +
-        `📸 Fotografía registrada`;
-    }
+          let mensajeDarwin = "";
 
 
-    // --------------------------------------------------------
-    // ENVIAR A DARWIN
-    // El fallo de esta copia NO debe romper la asistencia.
-    // --------------------------------------------------------
-
-    if (mensajeDarwin) {
-
-      sendText(
-        DARWIN_PHONE,
-        mensajeDarwin
-      ).catch(err => {
-
-        console.warn(
-          "⚠️ No se pudo enviar notificación de asistencia a Darwin:",
-          err.message
-        );
-
-      });
-    }
-  }
+          const trabajador =
+            resultadoAsistencia.trabajador ||
+            "Trabajador";
 
 
-  return;
-}
-            
-      // --------------------------------------------------------
-      // Es trabajador, pero Asistencia no devolvió una acción.
-      // NO permitimos que caiga al flujo comercial de Sasha.
-      // --------------------------------------------------------
+          const proyecto =
+            resultadoAsistencia.etiquetaProyecto ||
+            resultadoAsistencia.proyectoEtiqueta ||
+            resultadoAsistencia.proyecto ||
+            (
+              resultadoAsistencia.jornada &&
+              resultadoAsistencia.jornada.proyecto
+            ) ||
+            "Sin proyecto";
 
-      console.log(
-        `👷 Trabajador reconocido sin acción de asistencia: ${telefonoAsistencia}`
+
+          // ====================================================
+          // ENTRADA
+          // ====================================================
+
+          if (
+            tipoAsistencia === "entrada_registrada"
+          ) {
+
+            const hora =
+              resultadoAsistencia.hora ||
+              resultadoAsistencia.entrada ||
+              "";
+
+
+            mensajeDarwin =
+              `📥 *ASISTENCIA — ENTRADA*\n\n` +
+              `👷 ${trabajador}\n` +
+              `🏗️ ${proyecto}\n` +
+              (hora
+                ? `🕐 Entrada: ${hora}\n`
+                : "") +
+              `📸 Fotografía registrada`;
+          }
+
+
+          // ====================================================
+          // PROYECTO ASIGNADO
+          // ====================================================
+
+          if (
+            tipoAsistencia === "proyecto_asignado"
+          ) {
+
+            const hora =
+              resultadoAsistencia.hora ||
+              resultadoAsistencia.entrada ||
+              "";
+
+
+            mensajeDarwin =
+              `📥 *ASISTENCIA — ENTRADA*\n\n` +
+              `👷 ${trabajador}\n` +
+              `🏗️ ${proyecto}\n` +
+              (hora
+                ? `🕐 Entrada: ${hora}\n`
+                : "") +
+              `📸 Fotografía registrada`;
+          }
+
+
+          // ====================================================
+          // SALIDA
+          // ====================================================
+
+          if (
+            tipoAsistencia === "salida_registrada"
+          ) {
+
+            const entrada =
+              resultadoAsistencia.entrada ||
+              (
+                resultadoAsistencia.jornada &&
+                resultadoAsistencia.jornada.entrada
+              ) ||
+              "";
+
+
+            const salida =
+              resultadoAsistencia.salida ||
+              resultadoAsistencia.hora ||
+              "";
+
+
+            const horas =
+              resultadoAsistencia.horas ??
+              resultadoAsistencia.horasTrabajadas ??
+              resultadoAsistencia.totalHoras ??
+              "";
+
+
+            mensajeDarwin =
+              `📤 *ASISTENCIA — SALIDA*\n\n` +
+              `👷 ${trabajador}\n` +
+              `🏗️ ${proyecto}\n` +
+              (entrada
+                ? `🕐 Entrada: ${entrada}\n`
+                : "") +
+              (salida
+                ? `🕐 Salida: ${salida}\n`
+                : "") +
+              (horas !== ""
+                ? `⏱️ Horas: ${horas}\n`
+                : "") +
+              `📸 Fotografía registrada`;
+          }
+
+
+          // ====================================================
+          // ENVIAR COPIA A DARWIN
+          // ====================================================
+
+          if (mensajeDarwin) {
+
+            sendText(
+              DARWIN_PHONE,
+              mensajeDarwin
+            ).catch(err => {
+
+              console.warn(
+                "⚠️ No se pudo enviar notificación de asistencia a Darwin:",
+                err.message
+              );
+
+            });
+          }
+        }
+
+
+        // ======================================================
+        // TRABAJADOR: SIEMPRE TERMINA AQUÍ
+        // NUNCA PASA AL FLUJO COMERCIAL
+        // ======================================================
+
+        return;
+      }
+
+
+      console.warn(
+        `⚠️ Trabajador reconocido pero Asistencia no devolvió resultado: ${telefonoAsistencia}`
       );
 
       return;
     }
 
-    // Si NO es trabajador, continúa normalmente hacia Sasha.
+
+    // ==========================================================
+    // 7. NO ES TRABAJADOR
+    // ==========================================================
+
+    console.log(
+      `👤 SASHA — ${telefonoAsistencia} no es trabajador SSR; continúa flujo comercial.`
+    );
+
+    // NO hacemos return.
+    // Continúa normalmente al resto de index.js.
+
 
   } catch (err) {
 
+    // ==========================================================
+    // 8. FAIL CLOSED
+    //
+    // Si el módulo de asistencia falla inesperadamente,
+    // NO mandamos a esa persona al flujo comercial.
+    // ==========================================================
+
     console.error(
-      "❌ Error en SASHA ASISTENCIA V1:",
+      "❌ Error en SASHA ASISTENCIA:",
       err?.message || err
     );
 
-    // Si Asistencia falla temporalmente, dejamos que continúe
-    // el funcionamiento normal del bot.
+
+    await sendText(
+      from,
+      "⚠️ No pude verificar la asistencia en este momento. Intentá nuevamente en unos segundos."
+    ).catch(() => {});
+
+
+    return;
   }
 }
 
