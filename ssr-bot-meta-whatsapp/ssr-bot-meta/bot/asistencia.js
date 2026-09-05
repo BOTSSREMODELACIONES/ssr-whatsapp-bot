@@ -914,15 +914,19 @@ async function procesarRespuestaProyecto({
  * true  -> es trabajador
  * false -> no es trabajador
  */
+
 async function esTrabajadorSSR(telefono) {
 
+  telefono = normalizarTelefono(telefono);
+
+  if (!telefono) {
+    return {
+      esTrabajador: false,
+      error: false
+    };
+  }
+
   try {
-
-    telefono = normalizarTelefono(telefono);
-
-    if (!telefono) {
-      return false;
-    }
 
     const respuesta = await consultarEstado(telefono);
 
@@ -933,18 +937,31 @@ async function esTrabajadorSSR(telefono) {
         : respuesta;
 
     if (!resultado) {
-      return false;
+
+      return {
+        esTrabajador: false,
+        error: true,
+        motivo: "estado_invalido"
+      };
     }
 
-    if (resultado.status === "no_es_trabajador") {
-      return false;
+    if (
+      resultado.status === "no_es_trabajador" ||
+      resultado.esTrabajador !== true
+    ) {
+
+      return {
+        esTrabajador: false,
+        error: false,
+        estado: resultado
+      };
     }
 
-    if (resultado.esTrabajador === true) {
-      return true;
-    }
-
-    return false;
+    return {
+      esTrabajador: true,
+      error: false,
+      estado: resultado
+    };
 
   } catch (err) {
 
@@ -953,10 +970,16 @@ async function esTrabajadorSSR(telefono) {
       err.message
     );
 
-    return false;
+    // IMPORTANTE:
+    // Un error de Apps Script NO significa
+    // que la persona sea un cliente.
+    return {
+      esTrabajador: false,
+      error: true,
+      motivo: err.message
+    };
   }
 }
-
 
 // ============================================================
 // PROCESADOR PRINCIPAL DE ASISTENCIA
