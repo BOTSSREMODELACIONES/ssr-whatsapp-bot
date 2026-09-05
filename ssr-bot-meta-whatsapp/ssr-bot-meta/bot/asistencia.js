@@ -129,7 +129,7 @@ async function llamarAppsScript(payload) {
         redirect: "follow",
 
         // Evita que Sasha quede esperando indefinidamente.
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(45000)
       }
     );
 
