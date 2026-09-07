@@ -1154,27 +1154,47 @@ if (!esSupervisor) {
               `📸 Fotografía registrada`;
           }
 
+if (mensajeDarwin) {
 
-          // ====================================================
-          // ENVIAR COPIA A DARWIN
-          // ====================================================
+  try {
 
-          if (mensajeDarwin) {
+    // 1. Enviar resumen de asistencia
+    await sendText(
+      DARWIN_PHONE,
+      mensajeDarwin
+    );
 
-            sendText(
-              DARWIN_PHONE,
-              mensajeDarwin
-            ).catch(err => {
+    // 2. Reenviar a Darwin la fotografía REAL
+    // recibida del trabajador
+    if (fotoAsistencia) {
 
-              console.warn(
-                "⚠️ No se pudo enviar notificación de asistencia a Darwin:",
-                err.message
-              );
+      console.log(
+        `📸 SASHA ASISTENCIA — reenviando fotografía a Darwin: ${fotoAsistencia}`
+      );
 
-            });
-          }
-        }
+      await sendMediaById(
+        DARWIN_PHONE,
+        fotoAsistencia
+      );
 
+    } else {
+
+      console.warn(
+        "⚠️ SASHA ASISTENCIA — movimiento registrado sin fotografía disponible para reenviar."
+      );
+
+    }
+
+  } catch (err) {
+
+    console.warn(
+      "⚠️ No se pudo enviar notificación/fotografía de asistencia a Darwin:",
+      err.message
+    );
+
+  }
+}
+        
 
         // ======================================================
         // TRABAJADOR: SIEMPRE TERMINA AQUÍ
