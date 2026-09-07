@@ -1233,6 +1233,7 @@ async function procesarAsistencia({
   telefono,
   texto = "",
   foto = "",
+  imagen = null,
   messageId = ""
 }) {
 
@@ -1468,7 +1469,7 @@ const retoEsperado =
 
 const validacionFoto =
   await validarRetoFotograficoIA(
-    foto,
+    imagen,
     retoEsperado
   );
 
