@@ -1371,15 +1371,86 @@ async function procesarAsistencia({
       textoNormalizado.includes("termine") ||
       textoNormalizado.includes("terminé");
 
+  // ========================================================
+  // 5 Y 6. FOTO -> VALIDACIÓN FOTOGRÁFICA
+  // ========================================================
+  //
+  // NUEVA LÓGICA:
+  //
+  // Primera foto:
+  //   NO registra asistencia.
+  //   Crea un reto fotográfico aleatorio.
+  //
+  // Segunda foto:
+  //   Si existe un reto vigente, se acepta como fotografía
+  //   de comprobación y entonces:
+  //
+  //   - jornada abierta  -> SALIDA
+  //   - sin jornada      -> ENTRADA
+  //
+  // El reto expira automáticamente según FOTO_RETO_TTL_MS.
+  // ========================================================
 
-    // ========================================================
-    // 5. SI MANDA FOTO Y YA TIENE JORNADA ABIERTA -> SALIDA
-    // ========================================================
+  if (foto) {
 
-    if (
-      foto &&
-      estado.jornadaAbierta === true
-    ) {
+    // ------------------------------------------------------
+    // A. BUSCAR SI YA EXISTE UN RETO FOTOGRÁFICO VIGENTE
+    // ------------------------------------------------------
+
+    const retoExistente =
+      obtenerRetoFotografico(telefono);
+
+
+    // ------------------------------------------------------
+    // B. NO EXISTE RETO:
+    //    ESTA ES LA PRIMERA FOTO.
+    //    NO REGISTRAMOS ASISTENCIA TODAVÍA.
+    // ------------------------------------------------------
+
+    if (!retoExistente) {
+
+      const nuevoReto =
+        crearRetoFotografico(telefono);
+
+      console.log(
+        `📸 SASHA ASISTENCIA — reto fotográfico creado para ${telefono}:`,
+        nuevoReto
+      );
+
+      return {
+        manejado: true,
+        tipo: "reto_fotografico",
+        reto: nuevoReto,
+        mensaje:
+          "📸 Para validar tu asistencia necesito una fotografía tomada ahora.\n\n" +
+          "Haz lo siguiente:\n\n" +
+          `👉 ${nuevoReto.texto}\n\n` +
+          "Toma una nueva fotografía cumpliendo esta instrucción y envíamela."
+      };
+    }
+
+
+    // ------------------------------------------------------
+    // C. YA EXISTE RETO:
+    //    ESTA FOTO ES LA RESPUESTA AL RETO.
+    // ------------------------------------------------------
+
+    console.log(
+      `📸 SASHA ASISTENCIA — fotografía recibida como respuesta al reto de ${telefono}`
+    );
+
+
+    // Consumimos el reto para impedir que la misma validación
+    // quede activa para movimientos posteriores.
+
+    eliminarRetoFotografico(telefono);
+
+
+    // ======================================================
+    // D. SI YA TIENE JORNADA ABIERTA -> REGISTRAR SALIDA
+    // ======================================================
+
+    if (estado.jornadaAbierta === true) {
 
       const salida =
         await registrarSalida({
@@ -1406,56 +1477,64 @@ async function procesarAsistencia({
     }
 
 
-    // ========================================================
-    // 6. SI MANDA FOTO Y NO TIENE JORNADA -> ENTRADA
-    // ========================================================
+    // ======================================================
+    // E. SI NO TIENE JORNADA ABIERTA -> REGISTRAR ENTRADA
+    // ======================================================
+
+    const entrada =
+      await registrarEntrada({
+        telefono: telefono,
+        foto: foto,
+        messageId: messageId,
+        texto: texto
+      });
+
+
+    // ------------------------------------------------------
+    // ENTRADA REGISTRADA DIRECTAMENTE
+    // ------------------------------------------------------
 
     if (
-      foto &&
-      estado.jornadaAbierta !== true
+      entrada &&
+      entrada.tipo === "entrada_registrada"
     ) {
 
-      const entrada =
-        await registrarEntrada({
-          telefono: telefono,
-          foto: foto,
-          messageId: messageId
-        });
-
-
-    if (
-  entrada &&
-  entrada.tipo === "requiere_proyecto"
-) {
-
-  return {
-    ...entrada,
-    mensaje:
-      mensajeSeleccionProyecto(
-        entrada.trabajador,
-        entrada.proyectos || [],
-        entrada.proyectosDetalle || []
-      )
-  };
-}
-
-
-      if (
-        entrada &&
-        entrada.tipo === "entrada_registrada"
-      ) {
-
-        return {
-          ...entrada,
-          mensaje:
-            mensajeEntradaRegistrada(entrada)
-        };
-      }
-
-
-      return entrada;
+      return {
+        ...entrada,
+        mensaje:
+          mensajeEntradaRegistrada(entrada)
+      };
     }
 
+
+    // ------------------------------------------------------
+    // ENTRADA REGISTRADA PERO REQUIERE SELECCIONAR PROYECTO
+    // ------------------------------------------------------
+
+    if (
+      entrada &&
+      entrada.tipo === "requiere_proyecto"
+    ) {
+
+      guardarPendienteProyecto(
+        telefono,
+        entrada
+      );
+
+      return {
+        ...entrada,
+        mensaje:
+          mensajeSeleccionProyecto(entrada)
+      };
+    }
+
+
+    // ------------------------------------------------------
+    // CUALQUIER OTRO RESULTADO
+    // ------------------------------------------------------
+
+    return entrada;
+  }   
 
     // ========================================================
     // 7. SOLICITUD EXPLÍCITA DE ENTRADA
