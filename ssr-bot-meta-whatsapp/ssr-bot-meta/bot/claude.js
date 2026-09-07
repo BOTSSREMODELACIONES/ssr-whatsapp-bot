@@ -444,5 +444,140 @@ async function ask(history, userMessage, imageData = null) {
 
   return response.content[0].text;
 }
+// ============================================================
+// VALIDACIÓN VISUAL DE RETO FOTOGRÁFICO DE ASISTENCIA
+// ============================================================
 
-module.exports = { ask };
+async function validarRetoFotograficoIA(imageData, retoEsperado) {
+
+  try {
+
+    if (!imageData || !imageData.base64 || !imageData.mimeType) {
+      return {
+        valido: false,
+        gestoDetectado: "no_identificable",
+        motivo: "No se recibió una imagen válida."
+      };
+    }
+
+    const gestosPermitidos = [
+      "pulgar_arriba",
+      "un_dedo",
+      "dos_dedos",
+      "tres_dedos",
+      "no_identificable"
+    ];
+
+    const response = await client.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 150,
+
+      system:
+        "Eres un sistema de verificación visual de asistencia laboral. " +
+        "Tu única tarea es clasificar el gesto visible de una mano en una fotografía. " +
+        "No converses con el usuario. No expliques nada fuera del JSON solicitado.",
+
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: imageData.mimeType,
+                data: imageData.base64
+              }
+            },
+            {
+              type: "text",
+              text:
+                "Analiza únicamente el gesto de la mano visible en esta fotografía.\n\n" +
+                "Clasifícalo EXACTAMENTE como uno de estos valores:\n" +
+                "- pulgar_arriba = pulgar claramente levantado\n" +
+                "- un_dedo = exactamente un dedo extendido que NO sea el gesto de pulgar arriba\n" +
+                "- dos_dedos = exactamente dos dedos extendidos\n" +
+                "- tres_dedos = exactamente tres dedos extendidos\n" +
+                "- no_identificable = no se distingue claramente el gesto\n\n" +
+                `El reto esperado es: ${retoEsperado}\n\n` +
+                "IMPORTANTE: no declares válido un gesto diferente aunque sea parecido.\n" +
+                "Responde ÚNICAMENTE JSON válido con este formato:\n" +
+                '{"gestoDetectado":"pulgar_arriba"}'
+            }
+          ]
+        }
+      ]
+    });
+
+    const texto =
+      response &&
+      response.content &&
+      response.content[0] &&
+      response.content[0].text
+        ? response.content[0].text.trim()
+        : "";
+
+    let limpio = texto
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
+
+    let resultado;
+
+    try {
+      resultado = JSON.parse(limpio);
+    } catch (err) {
+
+      console.warn(
+        "⚠️ ASISTENCIA — Claude devolvió respuesta no JSON:",
+        texto
+      );
+
+      return {
+        valido: false,
+        gestoDetectado: "no_identificable",
+        motivo: "No fue posible interpretar la fotografía."
+      };
+    }
+
+    let gestoDetectado =
+      String(resultado.gestoDetectado || "").trim();
+
+    if (!gestosPermitidos.includes(gestoDetectado)) {
+      gestoDetectado = "no_identificable";
+    }
+
+    const valido =
+      gestoDetectado === retoEsperado;
+
+    console.log(
+      `🔐 ASISTENCIA IA — esperado=${retoEsperado} | detectado=${gestoDetectado} | valido=${valido}`
+    );
+
+    return {
+      valido: valido,
+      gestoDetectado: gestoDetectado,
+      motivo: valido
+        ? "El gesto coincide con el reto."
+        : "El gesto no coincide con el reto solicitado."
+    };
+
+  } catch (err) {
+
+    console.error(
+      "❌ ASISTENCIA — error validando fotografía con Claude:",
+      err
+    );
+
+    return {
+      valido: false,
+      gestoDetectado: "no_identificable",
+      motivo: "No fue posible validar la fotografía."
+    };
+  }
+}
+
+module.exports = {
+  ask,
+  validarRetoFotograficoIA
+};
