@@ -948,18 +948,60 @@ if (!esSupervisor) {
         `👷 SASHA ASISTENCIA — trabajador reconocido: ${telefonoAsistencia}`
       );
 
+// ========================================================
+// FOTO DE ASISTENCIA
+// Conservamos el mediaId original para poder reenviar
+// la fotografía a Darwin, pero además descargamos la
+// imagen en Base64 para que Claude pueda analizarla.
+// ========================================================
 
-      const fotoAsistencia =
-        Array.isArray(mediaIds)
-          ? (mediaIds[0] || "")
-          : (mediaIds || "");
+const fotoAsistencia =
+  Array.isArray(mediaIds)
+    ? (mediaIds[0] || "")
+    : (mediaIds || "");
 
+let imagenAsistencia = null;
+
+if (fotoAsistencia) {
+
+  try {
+
+    console.log(
+      `📥 SASHA ASISTENCIA — descargando fotografía: ${fotoAsistencia}`
+    );
+
+    imagenAsistencia =
+      await downloadMedia(fotoAsistencia);
+
+    if (
+      imagenAsistencia &&
+      imagenAsistencia.base64 &&
+      imagenAsistencia.mimeType
+    ) {
 
       console.log(
-        `📸 SASHA ASISTENCIA — foto recibida para procesar: ${
-          fotoAsistencia || "ninguna"
-        }`
+        `✅ SASHA ASISTENCIA — fotografía descargada correctamente | ${imagenAsistencia.mimeType}`
       );
+
+    } else {
+
+      console.warn(
+        "⚠️ SASHA ASISTENCIA — downloadMedia no devolvió una imagen válida."
+      );
+
+      imagenAsistencia = null;
+    }
+
+  } catch (err) {
+
+    console.error(
+      "❌ SASHA ASISTENCIA — error descargando fotografía:",
+      err.message
+    );
+
+    imagenAsistencia = null;
+  }
+}
 
 
       // ========================================================
@@ -967,12 +1009,20 @@ if (!esSupervisor) {
       // ========================================================
 
       const resultadoAsistencia =
-        await procesarAsistencia({
-          telefono: telefonoAsistencia,
-          texto: normalized,
-          foto: fotoAsistencia,
-          messageId: messageId || ""
-        });
+  await procesarAsistencia({
+    telefono: telefonoAsistencia,
+    texto: normalized,
+
+    // ID original de WhatsApp.
+    // Se conserva para registrar/reenviar la foto.
+    foto: fotoAsistencia,
+
+    // Imagen real descargada.
+    // Claude recibe Base64 + MIME para validar el gesto.
+    imagen: imagenAsistencia,
+
+    messageId: messageId || ""
+  });
 
 
       console.log(
