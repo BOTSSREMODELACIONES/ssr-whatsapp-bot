@@ -470,12 +470,15 @@ async function validarRetoFotograficoIA(imageData, retoEsperado) {
 
     const response = await client.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 150,
+      max_tokens: 120,
 
       system:
-        "Eres un sistema de verificación visual de asistencia laboral. " +
-        "Tu única tarea es clasificar el gesto visible de una mano en una fotografía. " +
-        "No converses con el usuario. No expliques nada fuera del JSON solicitado.",
+        "Eres un clasificador visual estricto de gestos de manos para " +
+        "un sistema antifraude de asistencia laboral. " +
+        "Debes observar la mano y contar ÚNICAMENTE los dedos claramente EXTENDIDOS. " +
+        "Los dedos doblados, recogidos, parcialmente visibles o apoyados NO cuentan. " +
+        "Debes distinguir especialmente un dedo índice extendido de un pulgar arriba. " +
+        "No converses. No expliques. Devuelve únicamente el JSON solicitado.",
 
       messages: [
         {
@@ -492,17 +495,58 @@ async function validarRetoFotograficoIA(imageData, retoEsperado) {
             {
               type: "text",
               text:
-                "Analiza únicamente el gesto de la mano visible en esta fotografía.\n\n" +
-                "Clasifícalo EXACTAMENTE como uno de estos valores:\n" +
-                "- pulgar_arriba = pulgar claramente levantado\n" +
-                "- un_dedo = exactamente un dedo extendido que NO sea el gesto de pulgar arriba\n" +
-                "- dos_dedos = exactamente dos dedos extendidos\n" +
-                "- tres_dedos = exactamente tres dedos extendidos\n" +
-                "- no_identificable = no se distingue claramente el gesto\n\n" +
-                `El reto esperado es: ${retoEsperado}\n\n` +
-                "IMPORTANTE: no declares válido un gesto diferente aunque sea parecido.\n" +
-                "Responde ÚNICAMENTE JSON válido con este formato:\n" +
-                '{"gestoDetectado":"pulgar_arriba"}'
+                "CLASIFICA EL GESTO DE LA MANO DE LA FOTOGRAFÍA.\n\n" +
+
+                "REGLAS OBLIGATORIAS:\n\n" +
+
+                "1. Cuenta solamente los dedos CLARAMENTE EXTENDIDOS.\n" +
+                "2. NO cuentes dedos doblados contra la palma.\n" +
+                "3. NO cuentes dedos parcialmente visibles que estén recogidos.\n" +
+                "4. La orientación de la mano o de la cámara NO cambia la clasificación.\n\n" +
+
+                "CLASIFICACIONES:\n\n" +
+
+                "pulgar_arriba:\n" +
+                "- SOLO cuando el PULGAR es el dedo extendido principal.\n" +
+                "- Los otros cuatro dedos deben estar recogidos/doblados.\n" +
+                "- Un dedo índice apuntando hacia arriba NO es pulgar_arriba.\n\n" +
+
+                "un_dedo:\n" +
+                "- EXACTAMENTE UN dedo NO-PULGAR está claramente extendido.\n" +
+                "- Normalmente será el índice.\n" +
+                "- Los demás dedos pueden verse, pero deben estar doblados/recogidos.\n" +
+                "- IMPORTANTE: si ves un índice extendido y los demás dedos doblados, " +
+                "clasifica como un_dedo.\n\n" +
+
+                "dos_dedos:\n" +
+                "- EXACTAMENTE DOS dedos están claramente extendidos.\n" +
+                "- Ejemplo típico: índice + medio formando V.\n\n" +
+
+                "tres_dedos:\n" +
+                "- EXACTAMENTE TRES dedos están claramente extendidos.\n\n" +
+
+                "no_identificable:\n" +
+                "- La mano no se ve suficientemente bien.\n" +
+                "- Hay ambigüedad real sobre cuántos dedos están extendidos.\n" +
+                "- Hay más de tres dedos claramente extendidos.\n" +
+                "- No existe un gesto clasificable con seguridad.\n\n" +
+
+                "MUY IMPORTANTE:\n" +
+                "No confundas los dedos DOBLADOS visibles con dedos extendidos.\n" +
+                "La presencia visual de cinco dedos NO significa que cinco estén extendidos.\n" +
+                "Cuenta exclusivamente los que sobresalen claramente extendidos desde la mano.\n\n" +
+
+                `El reto solicitado por el sistema es: ${retoEsperado}\n\n` +
+
+                "Primero determina visualmente el gesto SIN intentar favorecer el reto esperado.\n" +
+                "Después devuelve solamente la clasificación observada.\n\n" +
+
+                "RESPONDE ÚNICAMENTE UNO DE ESTOS JSON:\n" +
+                '{"gestoDetectado":"pulgar_arriba"}\n' +
+                '{"gestoDetectado":"un_dedo"}\n' +
+                '{"gestoDetectado":"dos_dedos"}\n' +
+                '{"gestoDetectado":"tres_dedos"}\n' +
+                '{"gestoDetectado":"no_identificable"}'
             }
           ]
         }
@@ -525,7 +569,9 @@ async function validarRetoFotograficoIA(imageData, retoEsperado) {
     let resultado;
 
     try {
+
       resultado = JSON.parse(limpio);
+
     } catch (err) {
 
       console.warn(
@@ -541,7 +587,9 @@ async function validarRetoFotograficoIA(imageData, retoEsperado) {
     }
 
     let gestoDetectado =
-      String(resultado.gestoDetectado || "").trim();
+      String(resultado.gestoDetectado || "")
+        .trim()
+        .toLowerCase();
 
     if (!gestosPermitidos.includes(gestoDetectado)) {
       gestoDetectado = "no_identificable";
