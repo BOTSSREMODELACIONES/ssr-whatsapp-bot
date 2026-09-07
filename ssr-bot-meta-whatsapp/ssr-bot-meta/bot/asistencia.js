@@ -356,6 +356,16 @@ async function registrarEntrada({
 
     pendientesProyecto.delete(telefono);
 
+    // Conservamos también la información descriptiva del proyecto
+    // que venga desde Apps Script.
+    const etiquetaProyecto =
+      resultado.etiquetaProyecto ||
+      resultado.proyectoEtiqueta ||
+      (
+        resultado.cliente && resultado.proyecto
+          ? `${resultado.proyecto} — ${resultado.cliente}`
+          : resultado.proyecto || ""
+      );
 
     return {
 
@@ -368,6 +378,12 @@ async function registrarEntrada({
       hora: resultado.hora,
 
       proyecto: resultado.proyecto,
+
+      cliente: resultado.cliente || "",
+
+      nombreProyecto: resultado.nombreProyecto || "",
+
+      etiquetaProyecto: etiquetaProyecto,
 
       asignacionAutomatica:
         resultado.asignacionAutomatica === true,
@@ -454,6 +470,54 @@ async function asignarProyecto({
     resultado.status === "ok"
   ) {
 
+    // IMPORTANTE:
+    // Capturamos el pendiente ANTES de eliminarlo,
+    // porque ahí tenemos proyectosDetalle con código + cliente.
+    const pendienteActual =
+      pendientesProyecto.get(telefono);
+
+    const proyectosDetalle =
+      pendienteActual &&
+      Array.isArray(pendienteActual.proyectosDetalle)
+        ? pendienteActual.proyectosDetalle
+        : [];
+
+    const detalleSeleccionado =
+      proyectosDetalle.find(
+        item =>
+          item &&
+          String(item.codigo || "").trim() ===
+          String(resultado.proyecto || proyecto || "").trim()
+      ) || null;
+
+    const cliente =
+      resultado.cliente ||
+      (detalleSeleccionado
+        ? detalleSeleccionado.cliente
+        : "") ||
+      "";
+
+    const nombreProyecto =
+      resultado.nombreProyecto ||
+      (detalleSeleccionado
+        ? detalleSeleccionado.nombreProyecto
+        : "") ||
+      "";
+
+    const etiquetaProyecto =
+      resultado.etiquetaProyecto ||
+      resultado.proyectoEtiqueta ||
+      (
+        detalleSeleccionado &&
+        detalleSeleccionado.etiqueta
+          ? detalleSeleccionado.etiqueta
+          : (
+              cliente && (resultado.proyecto || proyecto)
+                ? `${resultado.proyecto || proyecto} — ${cliente}`
+                : resultado.proyecto || proyecto || ""
+            )
+      );
+
     pendientesProyecto.delete(telefono);
 
 
@@ -465,7 +529,14 @@ async function asignarProyecto({
 
       trabajador: resultado.trabajador,
 
-      proyecto: resultado.proyecto,
+      proyecto:
+        resultado.proyecto || proyecto,
+
+      cliente: cliente,
+
+      nombreProyecto: nombreProyecto,
+
+      etiquetaProyecto: etiquetaProyecto,
 
       idJornada: resultado.id,
 
@@ -781,10 +852,19 @@ function mensajeEntradaRegistrada(resultado) {
 
 function mensajeProyectoAsignado(resultado) {
 
+  const proyectoMostrar =
+    resultado.etiquetaProyecto ||
+    resultado.proyectoEtiqueta ||
+    (
+      resultado.cliente && resultado.proyecto
+        ? `${resultado.proyecto} — ${resultado.cliente}`
+        : resultado.proyecto || ""
+    );
+
   return (
     `✅ Proyecto asignado\n\n` +
     `👷 ${resultado.trabajador || ""}\n` +
-    `🏗️ ${resultado.proyecto || ""}\n\n` +
+    `🏗️ ${proyectoMostrar}\n\n` +
     `Tu entrada quedó registrada correctamente.`
   );
 }
