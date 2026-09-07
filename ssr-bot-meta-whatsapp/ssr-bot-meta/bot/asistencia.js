@@ -46,6 +46,150 @@ const pendientesProyecto = new Map();
 
 const PENDIENTE_TTL_MS = 15 * 60 * 1000;
 
+// ============================================================
+// VERIFICACIÓN ANTIFRAUDE DE FOTOGRAFÍA DE ASISTENCIA
+// ============================================================
+
+// Trabajadores que tienen pendiente un reto fotográfico.
+//
+// Map:
+// telefono -> {
+//   tipo: "entrada" | "salida",
+//   reto,
+//   creado,
+//   trabajador
+// }
+
+const retosFotograficos = new Map();
+
+
+// El trabajador dispone de 3 minutos para responder
+// con la fotografía solicitada.
+
+const RETO_FOTO_TTL_MS = 3 * 60 * 1000;
+
+
+// Retos permitidos.
+// Por ahora usamos únicamente gestos sencillos.
+
+const RETOS_FOTO = [
+  {
+    id: "pulgar_arriba",
+    texto: "mostrar el pulgar arriba 👍"
+  },
+  {
+    id: "un_dedo",
+    texto: "mostrar 1 dedo ☝️"
+  },
+  {
+    id: "dos_dedos",
+    texto: "mostrar 2 dedos ✌️"
+  },
+  {
+    id: "tres_dedos",
+    texto: "mostrar 3 dedos"
+  }
+];
+
+
+function generarRetoFotografico() {
+
+  const indice =
+    Math.floor(
+      Math.random() * RETOS_FOTO.length
+    );
+
+  return RETOS_FOTO[indice];
+}
+
+
+function crearRetoFotografico({
+  telefono,
+  tipo,
+  trabajador
+}) {
+
+  telefono = normalizarTelefono(telefono);
+
+  const reto = generarRetoFotografico();
+
+  const dato = {
+    tipo: tipo,
+    reto: reto,
+    creado: Date.now(),
+    trabajador: trabajador || ""
+  };
+
+  retosFotograficos.set(
+    telefono,
+    dato
+  );
+
+  console.log(
+    `🔐 ASISTENCIA — reto creado | ${telefono} | ${tipo} | ${reto.id}`
+  );
+
+  return dato;
+}
+
+
+function obtenerRetoFotografico(telefono) {
+
+  telefono = normalizarTelefono(telefono);
+
+  const dato =
+    retosFotograficos.get(telefono);
+
+  if (!dato) {
+    return null;
+  }
+
+  if (
+    !dato.creado ||
+    Date.now() - dato.creado > RETO_FOTO_TTL_MS
+  ) {
+
+    retosFotograficos.delete(telefono);
+
+    console.log(
+      `⌛ ASISTENCIA — reto expirado | ${telefono}`
+    );
+
+    return null;
+  }
+
+  return dato;
+}
+
+
+function eliminarRetoFotografico(telefono) {
+
+  telefono = normalizarTelefono(telefono);
+
+  retosFotograficos.delete(telefono);
+}
+
+
+function mensajeRetoFotografico(
+  trabajador,
+  reto,
+  tipo
+) {
+
+  const movimiento =
+    tipo === "salida"
+      ? "salida"
+      : "entrada";
+
+  return (
+    `👷 ${trabajador || "Trabajador"}\n\n` +
+    `🔐 Verificación de ${movimiento}\n\n` +
+    `📸 Toma AHORA una nueva fotografía ` +
+    `${reto.texto}.\n\n` +
+    `⏱️ Tienes 3 minutos para enviarla.\n\n` +
+    `⚠️ La fotografía debe ser tomada en este momento.`
+  );
+}
 
 // ============================================================
 // UTILIDADES
