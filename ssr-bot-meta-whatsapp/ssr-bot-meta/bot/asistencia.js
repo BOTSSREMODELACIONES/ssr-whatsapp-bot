@@ -1409,26 +1409,35 @@ async function procesarAsistencia({
 
     if (!retoExistente) {
 
-      const nuevoReto =
-        crearRetoFotografico(telefono);
+  const tipoMovimiento =
+    estado.jornadaAbierta === true
+      ? "salida"
+      : "entrada";
 
-      console.log(
-        `📸 SASHA ASISTENCIA — reto fotográfico creado para ${telefono}:`,
-        nuevoReto
-      );
+  const nuevoReto =
+    crearRetoFotografico({
+      telefono: telefono,
+      tipo: tipoMovimiento,
+      trabajador: estado.trabajador
+    });
 
-      return {
-        manejado: true,
-        tipo: "reto_fotografico",
-        reto: nuevoReto,
-        mensaje:
-          "📸 Para validar tu asistencia necesito una fotografía tomada ahora.\n\n" +
-          "Haz lo siguiente:\n\n" +
-          `👉 ${nuevoReto.texto}\n\n` +
-          "Toma una nueva fotografía cumpliendo esta instrucción y envíamela."
-      };
-    }
+  console.log(
+    `📸 SASHA ASISTENCIA — reto fotográfico creado para ${telefono}:`,
+    nuevoReto
+  );
 
+  return {
+    manejado: true,
+    tipo: "reto_fotografico",
+    reto: nuevoReto.reto,
+    mensaje:
+      mensajeRetoFotografico(
+        estado.trabajador,
+        nuevoReto.reto,
+        tipoMovimiento
+      )
+  };
+}
 
     // ------------------------------------------------------
     // C. YA EXISTE RETO:
