@@ -28,6 +28,13 @@
 
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 
+// ============================================================
+// CLAUDE — VALIDACIÓN VISUAL DE RETOS DE ASISTENCIA
+// ============================================================
+
+const {
+  validarRetoFotograficoIA
+} = require("./claude");
 
 // Estado temporal de trabajadores que deben escoger proyecto.
 //
@@ -1439,20 +1446,77 @@ async function procesarAsistencia({
   };
 }
 
-    // ------------------------------------------------------
-    // C. YA EXISTE RETO:
-    //    ESTA FOTO ES LA RESPUESTA AL RETO.
-    // ------------------------------------------------------
+  // ------------------------------------------------------
+// C. YA EXISTE RETO:
+//    VALIDAR CON IA QUE LA FOTO CUMPLE EL GESTO.
+// ------------------------------------------------------
 
-    console.log(
-      `📸 SASHA ASISTENCIA — fotografía recibida como respuesta al reto de ${telefono}`
-    );
+console.log(
+  `📸 SASHA ASISTENCIA — validando reto fotográfico de ${telefono}`
+);
+
+const retoEsperado =
+  retoExistente &&
+  retoExistente.reto
+    ? retoExistente.reto.id
+    : "";
 
 
-    // Consumimos el reto para impedir que la misma validación
-    // quede activa para movimientos posteriores.
+// ------------------------------------------------------
+// VALIDAR FOTOGRAFÍA CON CLAUDE
+// ------------------------------------------------------
 
-    eliminarRetoFotografico(telefono);
+const validacionFoto =
+  await validarRetoFotograficoIA(
+    foto,
+    retoEsperado
+  );
+
+
+console.log(
+  `🔎 SASHA ASISTENCIA — validación IA | ` +
+  `esperado=${retoEsperado} | ` +
+  `detectado=${validacionFoto?.gestoDetectado || "no_identificable"} | ` +
+  `valido=${validacionFoto?.valido === true}`
+);
+
+
+// ------------------------------------------------------
+// EL GESTO NO COINCIDE
+// NO REGISTRAR ENTRADA NI SALIDA.
+// CONSERVAR EL MISMO RETO PARA QUE PUEDA INTENTAR OTRA VEZ.
+// ------------------------------------------------------
+
+if (
+  !validacionFoto ||
+  validacionFoto.valido !== true
+) {
+
+  return {
+    manejado: true,
+    tipo: "reto_fotografico_incorrecto",
+    reto: retoExistente.reto,
+    validacion: validacionFoto,
+
+    mensaje:
+      `❌ La fotografía no cumple con la señal solicitada.\n\n` +
+      `🔐 Para validar tu asistencia debes ${retoExistente.reto.texto}.\n\n` +
+      `📸 Toma otra fotografía AHORA realizando exactamente esa señal y envíamela.\n\n` +
+      `⏱️ El reto original sigue vigente.`
+  };
+}
+
+
+// ------------------------------------------------------
+// EL GESTO SÍ COINCIDE.
+// AHORA SÍ CONSUMIMOS EL RETO.
+// ------------------------------------------------------
+
+console.log(
+  `✅ SASHA ASISTENCIA — reto fotográfico validado correctamente | ${telefono}`
+);
+
+eliminarRetoFotografico(telefono);
 
 
     // ======================================================
