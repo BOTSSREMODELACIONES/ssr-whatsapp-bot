@@ -1157,9 +1157,8 @@ if (fotoAsistencia) {
               `📸 Fotografía registrada`;
           }
 
-
           // ====================================================
-          // SALIDA
+          // SALIDA — REPORTE COMPLETO A DARWIN
           // ====================================================
 
           if (
@@ -1181,28 +1180,59 @@ if (fotoAsistencia) {
               "";
 
 
-            const horas =
-              resultadoAsistencia.horas ??
-              resultadoAsistencia.horasTrabajadas ??
-              resultadoAsistencia.totalHoras ??
+            const horasHoy =
+              resultadoAsistencia.horasHoyTexto ||
+              resultadoAsistencia.resultado?.horasHoyTexto ||
+              (
+                resultadoAsistencia.horas !== undefined &&
+                resultadoAsistencia.horas !== null
+                  ? String(resultadoAsistencia.horas)
+                  : ""
+              );
+
+
+            const horasSemana =
+              resultadoAsistencia.horasSemanaTexto ||
+              resultadoAsistencia.resultado?.horasSemanaTexto ||
+              "";
+
+
+            const pagoSemana =
+              resultadoAsistencia.pagoSemanaTexto ||
+              resultadoAsistencia.resultado?.pagoSemanaTexto ||
               "";
 
 
             mensajeDarwin =
-              `📤 *ASISTENCIA — SALIDA*\n\n` +
+              `📋 *REPORTE DE SALIDA — SUPERVISIÓN*\n\n` +
+
               `👷 ${trabajador}\n` +
-              `🏗️ ${proyecto}\n` +
+              `🏗️ ${proyecto}\n\n` +
+
               (entrada
                 ? `🕐 Entrada: ${entrada}\n`
                 : "") +
+
               (salida
-                ? `🕐 Salida: ${salida}\n`
+                ? `🕔 Salida: ${salida}\n\n`
+                : "\n") +
+
+              (horasHoy
+                ? `⏱️ Horas laboradas hoy: ${horasHoy}\n`
                 : "") +
-              (horas !== ""
-                ? `⏱️ Horas: ${horas}\n`
+
+              (horasSemana
+                ? `📊 Horas acumuladas en la semana: ${horasSemana}\n`
                 : "") +
+
+              (pagoSemana
+                ? `💰 Pago acumulado de la semana: ${pagoSemana}\n`
+                : "") +
+
+              `\n🧾 Monto acumulado antes de vales.\n` +
               `📸 Fotografía registrada`;
           }
+          
 
 if (mensajeDarwin) {
 
