@@ -679,6 +679,10 @@ async function asignarProyecto({
       tipo: "proyecto_asignado",
 
       trabajador: resultado.trabajador,
+      hora:
+  resultado.hora ||
+  resultado.entrada ||
+  "",
 
       proyecto:
         resultado.proyecto || proyecto,
@@ -750,25 +754,48 @@ async function registrarSalida({
     pendientesProyecto.delete(telefono);
 
 
-    return {
+return {
 
-      manejado: true,
+  manejado: true,
 
-      tipo: "salida_registrada",
+  tipo: "salida_registrada",
 
-      trabajador: resultado.trabajador,
+  trabajador: resultado.trabajador,
 
-      proyecto: resultado.proyecto,
+  proyecto: resultado.proyecto,
 
-      entrada: resultado.entrada,
+  entrada: resultado.entrada,
 
-      salida: resultado.salida,
+  salida: resultado.salida,
 
-      horas: resultado.horas,
+  // Compatibilidad
+  horas: resultado.horas,
 
-      resultado: resultado
+  // NUEVOS DATOS DEL RESUMEN
+  horasHoy: resultado.horasHoy,
 
-    };
+  horasHoyTexto:
+    resultado.horasHoyTexto,
+
+  horasSemana:
+    resultado.horasSemana,
+
+  horasSemanaTexto:
+    resultado.horasSemanaTexto,
+
+  tarifaHora:
+    resultado.tarifaHora,
+
+  pagoSemana:
+    resultado.pagoSemana,
+
+  pagoSemanaTexto:
+    resultado.pagoSemanaTexto,
+
+  resultado: resultado
+
+};
+    
   }
 
 
@@ -1015,6 +1042,7 @@ function mensajeProyectoAsignado(resultado) {
   return (
     `✅ Proyecto asignado\n\n` +
     `👷 ${resultado.trabajador || ""}\n` +
+    `🕐 Hora: ${resultado.hora || ""}\n` +
     `🏗️ ${proyectoMostrar}\n\n` +
     `Tu entrada quedó registrada correctamente.`
   );
@@ -1023,13 +1051,36 @@ function mensajeProyectoAsignado(resultado) {
 
 function mensajeSalidaRegistrada(resultado) {
 
+  const horasHoy =
+    resultado.horasHoyTexto ||
+    resultado.resultado?.horasHoyTexto ||
+    "";
+
+  const horasSemana =
+    resultado.horasSemanaTexto ||
+    resultado.resultado?.horasSemanaTexto ||
+    "";
+
+  const pagoSemana =
+    resultado.pagoSemanaTexto ||
+    resultado.resultado?.pagoSemanaTexto ||
+    "";
+
   return (
-    `✅ Salida registrada\n\n` +
+    `📤 ASISTENCIA — SALIDA\n\n` +
+
     `👷 ${resultado.trabajador || ""}\n` +
-    `🏗️ ${resultado.proyecto || ""}\n` +
+    `🏗️ ${resultado.proyecto || ""}\n\n` +
+
     `🕐 Entrada: ${resultado.entrada || ""}\n` +
-    `🕔 Salida: ${resultado.salida || ""}\n` +
-    `⏱️ Horas: ${resultado.horas ?? ""}`
+    `🕔 Salida: ${resultado.salida || ""}\n\n` +
+
+    `⏱️ Horas laboradas hoy: ${horasHoy}\n` +
+    `📊 Horas acumuladas en la semana: ${horasSemana}\n` +
+    `💰 Pago acumulado de la semana: ${pagoSemana}\n\n` +
+
+    `🧾 Monto acumulado antes de vales.\n` +
+    `📸 Fotografía registrada`
   );
 }
 
