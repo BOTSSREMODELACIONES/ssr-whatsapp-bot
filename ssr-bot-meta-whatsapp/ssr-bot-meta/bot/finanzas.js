@@ -1885,29 +1885,50 @@ function postProcesarMovimiento(
 
 
   // ==========================================================
-  // 2.5 CORRECCIÓN DETERMINÍSTICA DE PROYECTO — v10.5
+  // 2.5 AVISO (NO CORRECCIÓN) DE POSIBLE DESACUERDO DE PROYECTO
   //
-  // PROBLEMA QUE RESUELVE:
-  // Claude decidía "proyecto_codigo" libremente cuando el mensaje
-  // era demasiado largo para los parsers locales (>11 palabras,
-  // dictado natural). Si no reconocía bien el alias del proyecto
-  // (fraseo raro, ruido de Whisper, orden de palabras distinto al
-  // listado en el prompt), caía en el default "SSR" — en silencio,
-  // sin error visible. Resultado: gastos de proyectos específicos
-  // terminaban mezclados en el centro de costo general SSR.
+  // HISTORIAL:
+  // v10.5 agregó esta lógica porque Claude a veces se rendía y
+  // devolvía "SSR" en mensajes largos que no lograba mapear bien
+  // contra el listado de proyectos. La solución de entonces era
+  // que, si detectarProyectoLocal() encontraba un proyecto
+  // específico distinto al de Claude, SE SOBREESCRIBÍA la
+  // respuesta del modelo con la de la detección local.
   //
-  // FIX:
-  // detectarProyectoLocal() ya es la fuente de verdad confiable
-  // que usan los otros dos parsers (crudo y natural corto). Ahora
-  // se corre SIEMPRE sobre el texto original (salvo que el guardia
-  // de trabajador ya haya resuelto el proyecto en el paso 2) y, si
-  // encuentra un proyecto específico que Claude no detectó, se
-  // sobreescribe el resultado del modelo — mismo patrón que ya se
-  // usa para moneda y tipo INGRESO/GASTO más arriba.
+  // v10.7 (10 septiembre 2026) — REVERTIDO A SOLO AVISO. Se
+  // confirmaron dos casos reales donde esta sobreescritura
+  // automática pisó una respuesta CORRECTA y explícita de Claude:
+  //   1) "Registra este gasto en el proyecto de Sthephanie" →
+  //      Claude resolvió correctamente PROY 074/2026 (Stephanie
+  //      Jiménez); detectarProyectoLocal(), por coincidencia de
+  //      typo/Levenshtein en el texto crudo, "encontró" PROY
+  //      CASA-DG/2026 (un cliente completamente distinto) y
+  //      sobrescribió la respuesta correcta.
+  //   2) "...a nombre de SSR" (instrucción explícita del usuario)
+  //      → Claude respondió correctamente SSR; detectarProyectoLocal()
+  //      encontró por casualidad PROY 018/2026 y sobrescribió una
+  //      instrucción explícita del usuario.
   //
-  // v10.6: detectarProyectoLocal() ahora usa coincidencia por límite
-  // de palabra (ver coincideComoPalabra()), así que esta corrección
-  // determinística ya no hereda el bug de "lore" dentro de "Flores".
+  // CAUSA: detectarProyectoLocal() corre sobre el texto crudo sin
+  // el contexto que sí tiene Claude (conversación previa,
+  // instrucciones explícitas), y su segunda pasada de coincidencia
+  // por distancia de Levenshtein puede "encontrar" un alias de
+  // proyecto por pura casualidad en cualquier palabra del mensaje,
+  // sin que el usuario haya mencionado ese proyecto en absoluto.
+  // Confiar en ella MÁS que en Claude —al punto de sobrescribirlo
+  // en silencio— resultó ser la decisión equivocada: el costo de
+  // un falso positivo (asignar el gasto al cliente incorrecto) es
+  // mucho más grave que el costo del problema original (un gasto
+  // cae en SSR genérico y hay que reasignarlo a mano una vez).
+  //
+  // FIX: esta sección ya NUNCA modifica out.proyecto_codigo ni
+  // out.proyecto. Cuando la detección local encuentra un proyecto
+  // específico que no coincide con el de Claude, solo se deja una
+  // nota en observaciones para revisión humana — la decisión de
+  // Claude se respeta siempre. (El motor de Apps Script que lee
+  // este payload ya excluye "observaciones" de su emparejamiento
+  // de proyecto, así que esta nota no puede volver a corromper
+  // la asignación aguas abajo.)
   // ==========================================================
 
   if (
@@ -1937,30 +1958,20 @@ function postProcesarMovimiento(
         .toUpperCase();
 
 
-    // Solo corregimos cuando la detección local SÍ encontró un
-    // proyecto específico (no "SSR") y difiere de lo que devolvió
-    // Claude. Si la detección local también da "SSR", no forzamos
-    // nada: puede que el mensaje genuinamente no mencione proyecto,
-    // y ahí sí confiamos en el criterio de Claude (p. ej. reconoció
-    // el proyecto por contexto de la conversación, no solo del texto
-    // suelto).
+    // v10.7 — Solo se anota el desacuerdo, NUNCA se sobrescribe
+    // out.proyecto_codigo / out.proyecto. La respuesta de Claude
+    // (que sí tiene contexto completo) es la que se conserva
+    // siempre.
     if (
       codigoLocal !== "SSR" &&
       codigoLocal !== codigoModelo
     ) {
 
-      out.proyecto_codigo =
-        proyectoLocal.codigo;
-
-      out.proyecto =
-        proyectoLocal.nombre;
-
-
       out.observaciones = [
 
         out.observaciones || "",
 
-        `Proyecto corregido por regla local (modelo devolvió "${codigoModelo}")`
+        `Aviso: la detección local sugiere ${codigoLocal}, pero se mantiene ${codigoModelo} (respuesta de Claude). Verificar si corresponde.`
 
       ]
         .filter(Boolean)
