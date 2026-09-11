@@ -74,6 +74,64 @@ const { google } = require("googleapis");
 //   ese es un error del cliente/supervisor que debe corregirse explícitamente,
 //   no algo que el sistema deba adivinar.
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ── v16 (11 septiembre 2026) — FIX CRÍTICO DOBLE: "Sasha choca contra su
+//    propia cita recién creada" ────────────────────────────────────────────
+//
+// BUG REAL (reportado por Darwin con capturas de WhatsApp): a una clienta
+// (Shirley Vargas) se le confirmó el viernes 18 de septiembre a las 9:00
+// a.m., se le pidió dirección y correo, y el sistema emitió "NUEVA VISITA
+// AGENDADA... Visita confirmada automáticamente por Sasha." Milisegundos
+// después, para el MISMO cliente y el MISMO horario, apareció una SEGUNDA
+// "NUEVA VISITA AGENDADA" que esta vez falló con "⚠️ Intento de agendar
+// chocó con un bloqueo/cita existente (slot_ocupado)" — y el conflicto
+// reportado fue justamente "🏗️ Visita SSR — ... | Heredia - San Isidro",
+// es decir, EL EVENTO QUE EL PROPIO SISTEMA ACABABA DE CREAR un mensaje
+// antes para ese mismo cliente. Sasha, sin saber que ese "conflicto" era
+// la cita de su propio cliente, le dijo que el horario ya no estaba
+// disponible y arrancó a ofrecer fechas alternativas — confundiendo
+// muchísimo a una clienta que ya tenía su cita bien agendada.
+//
+// CAUSA RAÍZ (dos bugs combinados):
+//
+// 1) verificarDisponibilidadExacta() revisa TODOS los eventos del día sin
+//    excepción — correcto para no pisar citas de otros clientes o bloqueos
+//    de administradores, pero no tenía forma de reconocer "este evento en
+//    conflicto es la cita que ya tiene ESTE MISMO cliente" (algo que sí
+//    puede pasar si createVisitEvent() se invoca dos veces seguidas para
+//    la misma solicitud — típicamente por un reintento de entrega de
+//    webhook de WhatsApp procesando el mismo mensaje dos veces, algo que
+//    debe revisarse en index.js, fuera de este archivo).
+//
+// 2) extraerTelefonoDeEvento() agravaba esto: para CUALQUIER número que no
+//    empezara con "506", le anteponía "+506" a ciegas — pensado para
+//    números locales costarricenses de 8 dígitos, pero aplicado también a
+//    números que YA venían con código de país (ej. el "+17542496480" del
+//    caso real), produciendo un número completamente distinto
+//    ("+50617542496480"). Esto habría roto cualquier intento de comparar
+//    "es el mismo cliente" por teléfono, aunque se hubiera agregado esa
+//    comparación.
+//
+// FIX (dos partes):
+//   a) extraerTelefonoDeEvento() ahora solo antepone "+506" cuando el
+//      número extraído tiene exactamente 8 dígitos (formato local CR sin
+//      código de país). Para cualquier otra longitud, se asume que ya
+//      viene con código de país y solo se le agrega el "+".
+//   b) verificarDisponibilidadExacta() acepta un parámetro opcional
+//      `phone`. Al revisar cada evento del día, si el teléfono del evento
+//      en conflicto coincide con `phone` (comparando los últimos 8
+//      dígitos, para tolerar diferencias menores de formato), ese evento
+//      se IGNORA como conflicto — es una cita propia de este mismo
+//      cliente, que createVisitEvent() de todas formas reemplaza vía
+//      cancelClientEvents() antes de insertar la nueva. createVisitEvent()
+//      ahora pasa el teléfono del cliente en esa llamada.
+//
+// Esto no resuelve por sí solo la causa de fondo de por qué
+// createVisitEvent() se está invocando dos veces para la misma solicitud
+// (eso vive en index.js, que hay que revisar aparte), pero sí hace que,
+// aunque eso vuelva a pasar, el sistema nunca le diga a un cliente que su
+// propia cita recién confirmada "ya no está disponible".
+// ─────────────────────────────────────────────────────────────────────────────
 const BUSINESS_DAYS = [1, 2, 5]; // 1=lunes, 2=martes, 5=viernes (0=domingo)
 
 function esDiaLaborable(date) {
@@ -241,15 +299,33 @@ async function getCalendarClient() {
   return google.calendar({ version: "v3", auth });
 }
 
+// v16 — FIX: antes, cualquier número extraído que no empezara con "506" se
+// forzaba a "+506<lo-que-sea>" — pensado solo para números locales CR de 8
+// dígitos, pero aplicado también a números que YA traían código de país
+// (ej. "+17542496480"), produciendo un número inventado ("+50617542496480")
+// que nunca podría compararse correctamente contra el teléfono real del
+// cliente. Ahora solo se antepone "+506" cuando el número extraído tiene
+// EXACTAMENTE 8 dígitos (formato local CR sin código de país); para
+// cualquier otra longitud se asume que ya incluye código de país.
 function extraerTelefonoDeEvento(description) {
   if (!description) return null;
   const m = description.match(/WhatsApp:\s*\+?(\d{8,15})/i);
   if (m) {
     const digits = m[1];
-    return digits.startsWith("506") ? `+${digits}` : `+506${digits}`;
+    if (digits.length === 8) return `+506${digits}`;
+    return `+${digits}`;
   }
   const m2 = description.match(/\+?(506\d{8})/);
   return m2 ? `+${m2[1]}` : null;
+}
+
+// v16 — comparador tolerante a diferencias menores de formato (con/sin "+",
+// con/sin código de país repetido, etc.): compara los últimos 8 dígitos,
+// que es la longitud de un número costarricense sin código de país. Para
+// esta empresa (una sola operación, clientes mayormente de Costa Rica) es
+// una comparación segura y evita falsos negativos por formato.
+function normalizarTelefono(tel) {
+  return String(tel || "").replace(/\D/g, "").slice(-8);
 }
 
 function formatearFechaEvento(startRaw) {
@@ -372,6 +448,15 @@ async function getAvailableSlots(dayName) {
 // ANTES de llamar a esta función, para no gastar una consulta a la API en
 // una fecha que de entrada nunca se iba a poder agendar).
 //
+// v16 — parámetro opcional `phone`: si el evento en conflicto pertenece al
+// MISMO cliente (mismo teléfono en su descripción), se ignora como
+// conflicto — es una cita propia que createVisitEvent() de todas formas
+// reemplaza vía cancelClientEvents() antes de insertar la nueva. Sin esto,
+// una segunda invocación para la misma solicitud (ej. reintento de webhook
+// de WhatsApp) choca contra la cita que el propio cliente ya tiene, y el
+// sistema le dice que su propio horario recién confirmado ya no está
+// disponible. Ver nota de v16 al inicio del archivo.
+//
 // Devuelve:
 //   { disponible: true }                            → se puede agendar
 //   { disponible: false, motivo: "dia_bloqueado" }  → día completo reservado
@@ -379,7 +464,7 @@ async function getAvailableSlots(dayName) {
 //   { disponible: false, motivo: "error_calendario" } → falla al consultar
 //     (por seguridad se trata como NO disponible; nunca se agenda a ciegas)
 // ─────────────────────────────────────────────────────────────────────────────
-async function verificarDisponibilidadExacta(startDate) {
+async function verificarDisponibilidadExacta(startDate, phone = null) {
   try {
     const calendar = await getCalendarClient();
 
@@ -404,11 +489,23 @@ async function verificarDisponibilidadExacta(startDate) {
     const nuevoInicioMin = startDate.getHours() * 60 + startDate.getMinutes();
     const nuevoFinMin    = nuevoInicioMin + 60;
 
+    const phoneNorm = phone ? normalizarTelefono(phone) : null;
+
     for (const event of events) {
       // Evento de día completo → día bloqueado, no se agenda nada
       if (event.start.date && !event.start.dateTime) {
         console.log(`⛔ verificarDisponibilidadExacta: día bloqueado por "${event.summary}"`);
         return { disponible: false, motivo: "dia_bloqueado", conflicto: event.summary || "Día reservado" };
+      }
+
+      // v16 — si este evento es una cita propia del mismo cliente que está
+      // agendando, no cuenta como conflicto.
+      if (phoneNorm) {
+        const telefonoEvento = extraerTelefonoDeEvento(event.description);
+        if (telefonoEvento && normalizarTelefono(telefonoEvento) === phoneNorm) {
+          console.log(`↪️ verificarDisponibilidadExacta: conflicto ignorado — "${event.summary}" es una cita propia del mismo cliente (${phone})`);
+          continue;
+        }
       }
 
       const evInicioMin = toCRMinutes(event.start.dateTime);
@@ -612,6 +709,12 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
   // Y citas manuales de administradores — ver comentario en
   // verificarDisponibilidadExacta). Si el destino no está libre, NO se
   // reagenda encima; se aborta antes de tocar el calendario.
+  //
+  // NOTA v16: no se pasa `phone` acá — el evento que se está moviendo ES la
+  // cita del cliente, así que no aplica la lógica de "ignorar conflicto con
+  // mi propia cita" (esta función mueve una cita existente a un destino
+  // nuevo, no crea una cita nueva que pueda chocar con una copia de sí
+  // misma).
   const dispo = await verificarDisponibilidadExacta(nuevaFecha);
   if (!dispo.disponible) {
     return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: dispo.motivo, conflicto: dispo.conflicto };
@@ -754,6 +857,9 @@ function resolveDateHint(hint) {
 //   antes de cualquier otra cosa — esto es lo que evita que una fecha
 //   específica mal etiquetada (ej. "viernes 8 de agosto" cuando el 8 es
 //   sábado) termine agendando una visita en un día que la empresa no trabaja.
+// v16: la verificación de disponibilidad ahora recibe el teléfono del
+//   cliente, para ignorar como conflicto una cita propia de este mismo
+//   cliente (ver nota extensa de v16 al inicio del archivo).
 // Si el día no es hábil, o el slot está bloqueado/ocupado (por Sasha o por
 // un administrador a mano), NO crea el evento y devuelve
 // { ok:false, motivo, conflicto } para que el llamador (flujo cliente o
@@ -786,7 +892,10 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
     // ejecuta ANTES de borrar citas previas o insertar nada. Si el destino
     // no está libre, abortamos sin tocar la agenda — nunca se reagenda
     // encima de una cita manual.
-    const dispo = await verificarDisponibilidadExacta(startDate);
+    // v16: se pasa `phone` para que una cita propia de este mismo cliente
+    // (ej. por una segunda invocación de esta misma función para la misma
+    // solicitud) no cuente como conflicto.
+    const dispo = await verificarDisponibilidadExacta(startDate, phone);
     if (!dispo.disponible) {
       console.warn(`⛔ createVisitEvent abortado: ${dispo.motivo} (${dispo.conflicto || "—"})`);
       return {
