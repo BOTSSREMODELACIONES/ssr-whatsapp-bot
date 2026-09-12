@@ -2114,4 +2114,4 @@ function logLead(from, session, tipo = "lead") {
   }));
 }
 
-module.exports = { 
+module.exports = { handleMessage };
