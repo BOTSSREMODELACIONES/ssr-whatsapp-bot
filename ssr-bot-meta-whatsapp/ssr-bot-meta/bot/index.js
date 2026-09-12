@@ -82,6 +82,34 @@
  *   evalúa en un PASO 0.5, ANTES que finanzas.js, para que ninguna consulta
  *   pueda malinterpretarse como un registro. Usa un endpoint de lectura
  *   nuevo en Apps Script (accion=consulta_movimientos) que nunca escribe.
+ *
+ * ── CAMBIOS v17 (11 sept 2026) — FIX CRÍTICO: "GRACIAS" RE-DISPARABA UNA
+ *    SEGUNDA VISITA SOBRE UNA CITA YA CONFIRMADA ────────────────────────────
+ * BUG REAL (reportado por Darwin con capturas de WhatsApp): a Shirley
+ *   Vargas se le confirmó exitosamente el viernes 18 de septiembre a las
+ *   9:00 a.m. ("✅ ¡Listo! Su cita quedó agendada..."). La clienta respondió
+ *   simplemente "Gracias" — y ese mensaje, sin mencionar ningún día ni
+ *   pedir cambios, disparó una SEGUNDA emisión del flag [VISITA:...] con el
+ *   MISMO día y hora ya confirmados, lo que volvió a invocar
+ *   createVisitEvent() para una cita que YA EXISTÍA. El evento chocó contra
+ *   sí mismo (mitigado aparte en calendar.js v16, que ahora reconoce citas
+ *   propias del mismo cliente y no las trata como conflicto), pero la causa
+ *   de fondo — intentar crear de nuevo algo que ya existe — vivía acá.
+ *
+ * CAUSA RAÍZ: nada en el código impedía que el flag VISITA se procesara de
+ *   nuevo si Claude lo reemitía — y nada en claude.js le decía
+ *   explícitamente a Claude que un simple agradecimiento después de una
+ *   cita ya confirmada NO amerita un nuevo flag. Ambas capas fallaron a la
+ *   vez: el prompt (ver fix correspondiente en claude.js) y el código, que
+ *   confiaba ciegamente en que Claude nunca reemitiría el flag de más.
+ *
+ * FIX: guarda de idempotencia ANTES de tocar el calendario. Si
+ *   session.visit_confirmed ya es true y el nuevo flag [VISITA:...] trae el
+ *   MISMO día y la MISMA hora que ya están confirmados para este cliente,
+ *   se ignora por completo — nunca se vuelve a llamar createVisitEvent().
+ *   Si el cliente de verdad quiere cambiar la cita, el nuevo día u hora
+ *   serán distintos a los guardados y el flujo normal de reagendamiento
+ *   sigue funcionando exactamente igual que antes.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -1637,6 +1665,51 @@ if (mensajeDarwin) {
     // ══════════════════════════════════════════════════════════════════════
     if (flag === "VISITA") {
       const [name, project, zone, day, hour, ubicacion, email] = (flagData || "").split("|");
+
+      // ══════════════════════════════════════════════════════════════════
+      // v17 (11 sept 2026) — GUARDA DE IDEMPOTENCIA: FIX CRÍTICO
+      //
+      // BUG REAL: después de confirmar exitosamente la visita de Shirley
+      // Vargas (viernes 18 de septiembre, 9:00 a.m.), la clienta respondió
+      // simplemente "Gracias". Ese mensaje —sin mencionar ningún día, sin
+      // pedir ningún cambio— disparó una SEGUNDA emisión del flag
+      // [VISITA:...] con el MISMO día y hora ya confirmados, lo que volvió
+      // a invocar createVisitEvent() para una cita que YA EXISTÍA. El
+      // evento chocó contra sí mismo (mitigado aparte en calendar.js v16),
+      // y Sasha terminó diciéndole a la clienta que su propia cita recién
+      // confirmada "ya no estaba disponible" — con el agravante de que
+      // luego ofreció fechas inválidas, arruinando la experiencia.
+      //
+      // FIX: si la visita de este cliente YA está confirmada
+      // (session.visit_confirmed === true) y el nuevo flag trae el MISMO
+      // día y la MISMA hora que ya están guardados en la sesión, se ignora
+      // por completo — nunca se vuelve a llamar createVisitEvent(). Si el
+      // cliente de verdad pide otro día/hora, day/hour serán distintos a
+      // los guardados y el flujo de reagendamiento sigue funcionando
+      // exactamente igual que siempre (createVisitEvent ya maneja
+      // reagendamientos vía cancelClientEvents()).
+      // ══════════════════════════════════════════════════════════════════
+      const diaNuevoNorm  = (day  || "").trim().toLowerCase();
+      const horaNuevaNorm = (hour || "09:00").trim();
+      const yaConfirmadaMismoHorario =
+        session.visit_confirmed === true &&
+        (session.visit_day  || "").trim().toLowerCase() === diaNuevoNorm &&
+        (session.visit_hour || "09:00").trim() === horaNuevaNorm;
+
+      if (yaConfirmadaMismoHorario) {
+        console.log(`↪️ VISITA ignorada — ya estaba confirmada para ${from} en "${session.visit_day}" ${session.visit_hour}. No se vuelve a tocar el calendario.`);
+
+        if (cleanMessage) {
+          await sendText(from, cleanMessage);
+          addMsg(from, "assistant", cleanMessage);
+          if (!esSupervisor) {
+            memoria.guardarMensaje({ phone: fromE164, clientName: session.name || null, direction: "out", type: "text", content: cleanMessage, session }).catch(() => {});
+          }
+        }
+
+        return; // Nunca se llega a createVisitEvent() para este caso.
+      }
+
       const updated = update(from, {
         name:            name?.trim()      || session.name,
         project_desc:    project?.trim()   || session.project_desc,
@@ -2041,4 +2114,4 @@ function logLead(from, session, tipo = "lead") {
   }));
 }
 
-module.exports = { handleMessage };
+module.exports = { 
