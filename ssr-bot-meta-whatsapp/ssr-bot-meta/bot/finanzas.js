@@ -1,5 +1,54 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v11 (14 sept 2026) — FIX CRÍTICO: "OK_CON_ADVERTENCIA" SE
+//        REPORTABA COMO RECHAZADO AUNQUE EL MOVIMIENTO SÍ SE
+//        HABÍA REGISTRADO ────────────────────────────────────
+//
+//        BUG REAL (reportado por Darwin con captura real): un
+//        ingreso de ₡25.000 por "visita de especialista en
+//        reparaciones", enviado como comprobante SINPE, se reportó
+//        como "❌ El sistema rechazó el comprobante" — sin ningún
+//        motivo después del punto — cuando en la práctica estos
+//        ingresos por visita técnica venían fallando de forma
+//        intermitente ("a veces no los registra").
+//
+//        CAUSA RAÍZ: tanto procesarComandoFinanciero() como
+//        procesarComprobanteImagen() decidían si un movimiento se
+//        había rechazado con esta condición:
+//
+//          resultado?.success === false ||
+//          resultado?.ok === false ||
+//          (status && status !== "OK")
+//
+//        El webhook de Apps Script (99_SASHA_WEBHOOK_V13.gs) ya
+//        calcula correctamente su propio campo `success` como
+//        status === "OK" || "OK_CON_ADVERTENCIA" || "DUPLICADO" —
+//        es decir, un movimiento que se registró bien pero además
+//        disparó una advertencia no crítica al reconstruir vistas
+//        (dashboards, resúmenes — algo que pasa seguido y no tiene
+//        nada que ver con si el dinero quedó bien anotado) queda
+//        marcado success:true por el propio Apps Script. Pero la
+//        tercera condición de acá, `status !== "OK"`, ignoraba por
+//        completo ese `success` ya calculado y volvía a evaluar el
+//        status por su cuenta — así que CUALQUIER movimiento que
+//        terminara en "OK_CON_ADVERTENCIA" (registrado, con solo un
+//        aviso menor) se reportaba igual que un rechazo real.
+//
+//        FIX: se elimina la condición redundante y buggy
+//        `(status && status !== "OK")` — ahora se confía
+//        directamente en `resultado?.success === false`, el mismo
+//        cálculo que ya hace correctamente Apps Script (y que ya
+//        contempla OK, OK_CON_ADVERTENCIA y DUPLICADO como éxito).
+//        DUPLICADO se sigue informando aparte, como ya se hacía.
+//        De paso, si algún día un rechazo real llega sin mensaje
+//        (mensajeAS vacío — lo que pasó en el caso real de Darwin,
+//        donde el motivo terminaba mostrando un simple punto sin
+//        ninguna explicación), ahora se muestra al menos el status
+//        crudo devuelto por Apps Script en vez de dejarlo en blanco,
+//        para que un futuro rechazo real sea diagnosticable de
+//        inmediato en vez de ser una caja negra.
+// ────────────────────────────────────────────────────────────────
+//
 // v10.6 — FIX MATCHING DE PROYECTO POR SUBSTRING (18 agosto 2026):
 //        PROBLEMA: detectarProyectoLocal() comparaba alias contra el
 //        texto completo con `t.includes(alias)`, sin límite de palabra.
@@ -3084,6 +3133,17 @@ async function procesarComandoFinanciero(texto) {
         // con ERROR_VALIDACION / success:false,
         // Sasha podía responder "registrado"
         // aunque el dato realmente no existiera.
+        //
+        // FIX v11 (14 sept 2026):
+        //
+        // La condición de rechazo usaba
+        // `status && status !== "OK"`, que trataba
+        // "OK_CON_ADVERTENCIA" (registrado bien, con solo
+        // un aviso no crítico de actualización de vistas)
+        // como si fuera un rechazo real. Se elimina esa
+        // condición redundante — resultado?.success ya
+        // viene calculado correctamente por Apps Script
+        // (true para OK, OK_CON_ADVERTENCIA y DUPLICADO).
         // ====================================================
 
         const status =
@@ -3099,7 +3159,9 @@ async function procesarComandoFinanciero(texto) {
 
           resultado?.error ||
 
-          "";
+          // v11 — si de verdad no hay mensaje, al menos mostrar
+          // el status crudo en vez de dejar un rechazo mudo.
+          (status ? `status: ${status}` : "");
 
 
         if (
@@ -3115,14 +3177,7 @@ async function procesarComandoFinanciero(texto) {
 
         } else if (
 
-          resultado?.success === false ||
-
-          resultado?.ok === false ||
-
-          (
-            status &&
-            status !== "OK"
-          )
+          resultado?.success === false
 
         ) {
 
@@ -3485,16 +3540,19 @@ async function procesarComprobanteImagen(
     }
 
 
+    // ========================================================
+    // FIX v11 (14 sept 2026): se elimina la condición redundante
+    // `(status && status !== "OK")` — trataba "OK_CON_ADVERTENCIA"
+    // (registrado bien, solo con un aviso no crítico de
+    // actualización de vistas) como un rechazo real. Ahora se
+    // confía directamente en resultado?.success, que Apps Script
+    // ya calcula correctamente (true para OK, OK_CON_ADVERTENCIA
+    // y DUPLICADO — este último ya se maneja aparte arriba).
+    // ========================================================
+
     if (
 
-      resultado?.success === false ||
-
-      resultado?.ok === false ||
-
-      (
-        status &&
-        status !== "OK"
-      )
+      resultado?.success === false
 
     ) {
 
@@ -3504,7 +3562,11 @@ async function procesarComprobanteImagen(
 
         resultado?.error ||
 
-        "";
+        // v11 — si de verdad no hay mensaje, mostrar al menos el
+        // status crudo en vez de un rechazo mudo (esto era
+        // exactamente lo que le pasó a Darwin: "El sistema rechazó
+        // el comprobante." sin ninguna razón después del punto).
+        (status ? `status: ${status}` : "");
 
 
       return `❌ El sistema rechazó el comprobante${mensajeAS ? `: ${mensajeAS}` : "."} Registralo a mano si querés.`;
