@@ -19,6 +19,50 @@
  * - Apps Script sigue siendo la fuente de verdad.
  *
  * ============================================================
+ *
+ * ── CAMBIOS v2 (12 sept 2026) — DOS FIXES CRÍTICOS REPORTADOS POR
+ *    DARWIN CON CAPTURAS REALES DE FERNANDO CHEVEZ ──────────────────
+ *
+ * BUG 1 — "Sasha trató a un trabajador como cliente nuevo": Fernando
+ *   mandó su foto del reto de dedos (frente a una cerca de zinc
+ *   oxidada de la obra) y Sasha le respondió describiendo la cerca
+ *   como si fuera la foto de un cliente pidiendo cotización —
+ *   exactamente el comportamiento de claude.js para fotos de
+ *   clientes. Eso solo puede pasar si esTrabajadorSSR() devolvió
+ *   esTrabajador:false SIN error — index.js entonces deja caer al
+ *   trabajador al flujo comercial normal (ver el fail-closed de
+ *   index.js, que solo protege contra el caso error:true).
+ *
+ *   CAUSA: esTrabajadorSSR() clasificaba como "no es trabajador"
+ *   (error:false) cualquier respuesta de Apps Script que NO tuviera
+ *   esTrabajador===true, incluida una respuesta ambigua o incompleta
+ *   (ej. si el campo esTrabajador viene undefined por un hiccup
+ *   puntual del lado de Apps Script, sin ser un error de red). Una
+ *   respuesta ambigua se trataba exactamente igual que "esta persona
+ *   genuinamente no es trabajador" — con la consecuencia de exponer
+ *   a un trabajador real al flujo comercial.
+ *
+ *   FIX: ahora solo se clasifica como "no es trabajador" cuando Apps
+ *   Script lo dice EXPLÍCITAMENTE (status === "no_es_trabajador").
+ *   Cualquier otra respuesta que no sea ni eso ni esTrabajador===true
+ *   se trata como error (fail closed) — index.js ya sabe manejar ese
+ *   caso sin mandar a nadie al flujo comercial.
+ *
+ * BUG 2 — "hay que repetir el proceso varias veces": cuando el gesto
+ *   de los dedos no se reconocía bien, el sistema NUNCA registraba
+ *   la entrada/salida — devolvía "reto_fotografico_incorrecto" y le
+ *   pedía al trabajador otra foto, indefinidamente, mientras el
+ *   reconocimiento de gestos siguiera fallando. El antifraude se
+ *   convirtió en un bloqueo real de la asistencia.
+ *
+ *   FIX: la verificación del gesto ya NO bloquea el registro. Si la
+ *   foto no cumple el gesto pedido, se registra la entrada/salida de
+ *   todas formas — el resultado incluye `gestoVerificado:false` para
+ *   que quede visible en los logs (y disponible para quien construya
+ *   la notificación a Darwin) que esa jornada en particular no pasó
+ *   la verificación antifraude, sin que eso le impida al trabajador
+ *   fichar.
+ * ────────────────────────────────────────────────────────────────
  */
 
 
@@ -399,7 +443,8 @@ async function consultarEstado(telefono) {
 async function registrarEntrada({
   telefono,
   foto,
-  messageId
+  messageId,
+  gestoVerificado = true
 }) {
 
   telefono = normalizarTelefono(telefono);
@@ -471,7 +516,8 @@ async function registrarEntrada({
         idJornada: resultado.id,
         proyectos: proyectos,
         proyectosDetalle: proyectosDetalle,
-        creado: Date.now()
+        creado: Date.now(),
+        gestoVerificado: gestoVerificado
       }
     );
 
@@ -489,6 +535,8 @@ async function registrarEntrada({
       proyectos: proyectos,
 
       proyectosDetalle: proyectosDetalle,
+
+      gestoVerificado: gestoVerificado,
 
       resultado: resultado
 
@@ -538,6 +586,8 @@ async function registrarEntrada({
 
       asignacionAutomatica:
         resultado.asignacionAutomatica === true,
+
+      gestoVerificado: gestoVerificado,
 
       resultado: resultado
 
@@ -669,6 +719,11 @@ async function asignarProyecto({
             )
       );
 
+    const gestoVerificado =
+      pendienteActual && typeof pendienteActual.gestoVerificado === "boolean"
+        ? pendienteActual.gestoVerificado
+        : true;
+
     pendientesProyecto.delete(telefono);
 
 
@@ -695,6 +750,8 @@ async function asignarProyecto({
 
       idJornada: resultado.id,
 
+      gestoVerificado: gestoVerificado,
+
       resultado: resultado
 
     };
@@ -720,7 +777,8 @@ async function asignarProyecto({
 async function registrarSalida({
   telefono,
   foto,
-  messageId
+  messageId,
+  gestoVerificado = true
 }) {
 
   telefono = normalizarTelefono(telefono);
@@ -791,6 +849,8 @@ return {
 
   pagoSemanaTexto:
     resultado.pagoSemanaTexto,
+
+  gestoVerificado: gestoVerificado,
 
   resultado: resultado
 
@@ -1195,6 +1255,16 @@ async function procesarRespuestaProyecto({
  * Devuelve:
  * true  -> es trabajador
  * false -> no es trabajador
+ *
+ * v2 — FIX BUG 1: antes, cualquier respuesta de Apps Script que NO
+ * tuviera esTrabajador===true se clasificaba como "no es trabajador"
+ * (error:false) — incluida una respuesta ambigua/incompleta que no
+ * fuera ni un "no_es_trabajador" explícito ni un error de red. Eso
+ * dejaba caer a un trabajador real al flujo comercial por un hiccup
+ * puntual de Apps Script. Ahora solo se clasifica como "no es
+ * trabajador" cuando el status dice EXACTAMENTE "no_es_trabajador".
+ * Cualquier otra respuesta ambigua se trata como error (fail closed),
+ * que index.js ya sabe manejar sin exponer a nadie al flujo comercial.
  */
 
 async function esTrabajadorSSR(telefono) {
@@ -1227,10 +1297,9 @@ async function esTrabajadorSSR(telefono) {
       };
     }
 
-    if (
-      resultado.status === "no_es_trabajador" ||
-      resultado.esTrabajador !== true
-    ) {
+    // Caso explícito e inequívoco: Apps Script confirma que este
+    // número NO pertenece a ningún trabajador registrado.
+    if (resultado.status === "no_es_trabajador") {
 
       return {
         esTrabajador: false,
@@ -1239,9 +1308,30 @@ async function esTrabajadorSSR(telefono) {
       };
     }
 
+    // Caso explícito e inequívoco: SÍ es trabajador.
+    if (resultado.esTrabajador === true) {
+
+      return {
+        esTrabajador: true,
+        error: false,
+        estado: resultado
+      };
+    }
+
+    // v2 — Ni lo uno ni lo otro: respuesta ambigua/incompleta de
+    // Apps Script (ej. campo esTrabajador ausente por un hiccup
+    // puntual). NO asumimos que es cliente — se trata como error
+    // para que index.js falle cerrado, igual que con cualquier otro
+    // error de comunicación.
+    console.warn(
+      "⚠️ ASISTENCIA: respuesta ambigua de asistencia_estado (ni no_es_trabajador ni esTrabajador:true) — se trata como error para no exponer al flujo comercial:",
+      JSON.stringify(resultado)
+    );
+
     return {
-      esTrabajador: true,
-      error: false,
+      esTrabajador: false,
+      error: true,
+      motivo: "respuesta_ambigua",
       estado: resultado
     };
 
@@ -1434,18 +1524,20 @@ async function procesarAsistencia({
   // 5 Y 6. FOTO -> VALIDACIÓN FOTOGRÁFICA
   // ========================================================
   //
-  // NUEVA LÓGICA:
+  // v2 — LA VERIFICACIÓN DEL GESTO YA NO BLOQUEA EL REGISTRO.
   //
   // Primera foto:
-  //   NO registra asistencia.
-  //   Crea un reto fotográfico aleatorio.
+  //   NO registra asistencia todavía.
+  //   Crea un reto fotográfico aleatorio (sigue teniendo valor
+  //   como señal antifraude para revisión posterior).
   //
   // Segunda foto:
-  //   Si existe un reto vigente, se acepta como fotografía
-  //   de comprobación y entonces:
-  //
-  //   - jornada abierta  -> SALIDA
-  //   - sin jornada      -> ENTRADA
+  //   Se valida el gesto contra el reto. Si coincide, perfecto.
+  //   Si NO coincide, YA NO se le pide reintentar — se registra
+  //   la entrada/salida de todas formas, marcada con
+  //   gestoVerificado:false para que quede visible en los logs
+  //   (y disponible para una futura notificación a Darwin) sin
+  //   bloquear al trabajador.
   //
   // El reto expira automáticamente según FOTO_RETO_TTL_MS.
   // ========================================================
@@ -1501,6 +1593,8 @@ async function procesarAsistencia({
   // ------------------------------------------------------
 // C. YA EXISTE RETO:
 //    VALIDAR CON IA QUE LA FOTO CUMPLE EL GESTO.
+//    v2 — el resultado de esta validación YA NO decide si se
+//    registra o no; solo se guarda como bandera informativa.
 // ------------------------------------------------------
 
 console.log(
@@ -1518,11 +1612,28 @@ const retoEsperado =
 // VALIDAR FOTOGRAFÍA CON CLAUDE
 // ------------------------------------------------------
 
-const validacionFoto =
-  await validarRetoFotograficoIA(
-    imagen,
-    retoEsperado
+let validacionFoto = null;
+
+try {
+
+  validacionFoto =
+    await validarRetoFotograficoIA(
+      imagen,
+      retoEsperado
+    );
+
+} catch (errValidacion) {
+
+  // v2 — si la propia validación falla (ej. imagen ilegible,
+  // timeout de Claude), tampoco bloqueamos: se trata igual que
+  // un gesto no coincidente, y se registra la asistencia igual.
+  console.warn(
+    `⚠️ SASHA ASISTENCIA — la validación del gesto falló técnicamente, se registra igual | ${telefono}:`,
+    errValidacion.message
   );
+
+  validacionFoto = null;
+}
 
 
 console.log(
@@ -1533,41 +1644,30 @@ console.log(
 );
 
 
-// ------------------------------------------------------
-// EL GESTO NO COINCIDE
-// NO REGISTRAR ENTRADA NI SALIDA.
-// CONSERVAR EL MISMO RETO PARA QUE PUEDA INTENTAR OTRA VEZ.
-// ------------------------------------------------------
+const gestoVerificado =
+  !!(validacionFoto && validacionFoto.valido === true);
 
-if (
-  !validacionFoto ||
-  validacionFoto.valido !== true
-) {
+if (!gestoVerificado) {
 
-  return {
-    manejado: true,
-    tipo: "reto_fotografico_incorrecto",
-    reto: retoExistente.reto,
-    validacion: validacionFoto,
+  // v2 — FIX BUG 2: antes acá se retornaba
+  // "reto_fotografico_incorrecto" y se le pedía al trabajador
+  // reintentar indefinidamente mientras el gesto no coincidiera.
+  // Ahora solo se deja constancia en el log — el registro de
+  // entrada/salida sigue su curso normal más abajo.
+  console.warn(
+    `⚠️ SASHA ASISTENCIA — gesto NO coincide, se registra de todas formas (ya no se bloquea) | ${telefono} | esperado=${retoEsperado} detectado=${validacionFoto?.gestoDetectado || "no_identificable"}`
+  );
 
-    mensaje:
-      `❌ La fotografía no cumple con la señal solicitada.\n\n` +
-      `🔐 Para validar tu asistencia debes ${retoExistente.reto.texto}.\n\n` +
-      `📸 Toma otra fotografía AHORA realizando exactamente esa señal y envíamela.\n\n` +
-      `⏱️ El reto original sigue vigente.`
-  };
+} else {
+
+  console.log(
+    `✅ SASHA ASISTENCIA — reto fotográfico validado correctamente | ${telefono}`
+  );
 }
 
-
-// ------------------------------------------------------
-// EL GESTO SÍ COINCIDE.
-// AHORA SÍ CONSUMIMOS EL RETO.
-// ------------------------------------------------------
-
-console.log(
-  `✅ SASHA ASISTENCIA — reto fotográfico validado correctamente | ${telefono}`
-);
-
+// El reto (haya coincidido o no) ya cumplió su función para este
+// intento — se libera para no dejar al trabajador "atascado" en
+// un reto viejo en su próximo movimiento.
 eliminarRetoFotografico(telefono);
 
 
@@ -1581,7 +1681,8 @@ eliminarRetoFotografico(telefono);
         await registrarSalida({
           telefono: telefono,
           foto: foto,
-          messageId: messageId
+          messageId: messageId,
+          gestoVerificado: gestoVerificado
         });
 
 
@@ -1611,7 +1712,8 @@ eliminarRetoFotografico(telefono);
         telefono: telefono,
         foto: foto,
         messageId: messageId,
-        texto: texto
+        texto: texto,
+        gestoVerificado: gestoVerificado
       });
 
 
