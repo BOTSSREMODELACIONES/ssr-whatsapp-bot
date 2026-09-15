@@ -2386,6 +2386,12 @@ function extraerComandoFinancieroCrudo(texto) {
 
         confianza: 90,
 
+        // v12 — ver nota extensa en interpretarComprobante(): sin
+        // esto, Apps Script nunca ve el texto real del comando y
+        // depende de que los campos ya resumidos casualmente
+        // contengan las mismas palabras que busca su emparejador.
+        mensaje_original: texto,
+
         observaciones:
           proyectoTexto
             ? `Proyecto detectado: ${proyectoTexto}`
@@ -2584,6 +2590,10 @@ function extraerMovimientoNaturalLocal(texto) {
         confianza:
           95,
 
+        // v12 — ver nota extensa en interpretarComprobante().
+        mensaje_original:
+          original,
+
         observaciones:
           proyectoTexto
             ? `Proyecto detectado: ${proyectoTexto}`
@@ -2662,11 +2672,20 @@ async function interpretarMovimientos(texto) {
   // - trabajador vs proyecto
   // - SSR operativo vs proyecto real
   return movimientos.map(
-    m =>
-      postProcesarMovimiento(
+    m => {
+
+      // v12 — ver nota extensa en interpretarComprobante(): sin
+      // esto, Apps Script nunca ve el mensaje real del usuario y
+      // depende de que la descripción/categoría que arme Claude
+      // casualmente contenga las mismas palabras que busca su
+      // emparejador de proyecto y su detector de "a nombre de SSR".
+      m.mensaje_original = texto;
+
+      return postProcesarMovimiento(
         m,
         texto
-      )
+      );
+    }
   );
 }
 
@@ -3445,6 +3464,53 @@ Respondé ÚNICAMENTE con el JSON, sin markdown, sin texto extra.`;
     };
 
   }
+
+
+  // ============================================================
+  // v12 (14 sept 2026) — FIX CRÍTICO: reenviar la instrucción
+  // ORIGINAL del usuario a Apps Script.
+  //
+  // BUG REAL (Darwin, caso del alquiler del taller): "Registra a
+  // nombre de SSR el pago de alquiler de taller... esto es un gasto
+  // operativo de SSR, no se asigna a ningún proyecto" + foto del
+  // comprobante (destinatario "Darwin Jose Guillon Mata", detalle
+  // "Pago alquiler Taller septiembre") se rechazó pidiendo elegir
+  // entre PROY CASA-DG/2026 (cliente "Darwin Guillón") y PROY
+  // 083/2026 ("...taller Tuco Racing") — dos proyectos que no tienen
+  // NADA que ver con lo pedido.
+  //
+  // CAUSA RAÍZ: el objeto que se manda a Apps Script (`parsed`, y de
+  // ahí a registrarEnSheets) nunca incluía el texto ORIGINAL del
+  // usuario — solo los campos ya resumidos por Claude (descripcion,
+  // categoria, responsable, proyecto...). El emparejador de proyecto
+  // de Apps Script (SASHA_SAFE_V135_TEXTO_PAYLOAD_) arma su texto de
+  // búsqueda a partir de mensaje_original/texto_usuario PRIMERO — si
+  // esos campos nunca llegan, solo le queda el resumen de Claude. En
+  // este caso ese resumen incluía "Taller" (que coincidió con el
+  // nombre de PROY 083/2026) y el nombre del destinatario bancario
+  // "Darwin Guillon" (que coincidió con el cliente de PROY
+  // CASA-DG/2026) — coincidencias de palabras sueltas totalmente
+  // ajenas a la instrucción real. Y la frase explícita "a nombre de
+  // SSR" / "gasto operativo" que el usuario SÍ escribió nunca llegó
+  // a estar en el texto que Apps Script revisa, así que el camino de
+  // resolución SSR_EXPLICITO tampoco podía dispararse — dependía
+  // pura casualidad de que la categoría que asignara Claude dijera
+  // textualmente "Gasto Operativo" (a veces pasaba, a veces no; de
+  // ahí la intermitencia reportada).
+  //
+  // FIX: se agrega mensaje_original con el texto tal cual lo
+  // escribió el usuario (textoAdicional, que ya incluye cualquier
+  // instrucción de texto previa enviada antes de la foto — ver
+  // pendingReceiptContext en index.js). Apps Script ya usa ese campo
+  // como la fuente PRINCIPAL para su emparejador de proyecto y para
+  // reconocer frases explícitas como "a nombre de SSR" — con esto,
+  // la instrucción real del usuario vuelve a pesar más que cualquier
+  // coincidencia incidental de palabras en el resumen de Claude.
+  // ============================================================
+  parsed.mensaje_original =
+    textoAdicional ||
+    parsed.descripcion ||
+    "";
 
 
   // IMPORTANTE V10.4:
