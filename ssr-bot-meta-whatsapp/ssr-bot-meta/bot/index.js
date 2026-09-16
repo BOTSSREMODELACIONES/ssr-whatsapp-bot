@@ -158,6 +158,92 @@ function consumirContextoPendiente(phoneE164) {
   return entry.texto;
 }
 
+// ══════════════════════════════════════════════════════════════════════════
+// v18 (15 sept 2026) — FUSIÓN FOTO+TEXTO EN UN SOLO REGISTRO FINANCIERO
+//
+// BUG REAL (Darwin): mandó la foto de un comprobante SINPE (₡150.000,
+// "Pago alquiler Taller septiembre") y, aparte, un mensaje de texto
+// explicando "Registra a nombre de SSR el pago de alquiler..., esto es
+// un gasto operativo de SSR, no se asigna a ningún proyecto". Como
+// llegaron como DOS mensajes de WhatsApp separados, el sistema los trató
+// como DOS intentos de registro totalmente independientes:
+//   1) la foto sola (sin el texto, que aún no existía) → Claude solo
+//      tuvo el "Detalle" del banco para trabajar, "Taller" chocó contra
+//      un proyecto no relacionado, y el intento se rechazó.
+//   2) el texto solo, con su propio monto → se procesó de inmediato como
+//      comando financiero completo, sin esperar ni combinarse con la
+//      foto, y ESE fue el que terminó escribiendo en la hoja.
+// Si ambos hubieran tenido éxito, el gasto habría quedado DUPLICADO.
+//
+// El mecanismo pendingReceiptContext de arriba (v8) ya resolvía la mitad
+// de este problema — pero solo cuando el TEXTO llega primero y SIN
+// monto (deja dicho "mandame la foto para completar"). No cubría el
+// caso de Darwin: la FOTO llega primero, sin texto, y el texto que la
+// completa trae su propio monto y por eso se procesaba solo.
+//
+// FIX: mecanismo simétrico para fotos sin texto. Cuando llega una foto
+// de comprobante sin ningún texto que la acompañe (ni caption, ni
+// contexto pendiente), en vez de procesarla de inmediato se guarda unos
+// segundos dándole chance a que llegue el mensaje de texto aclaratorio
+// que Darwin suele mandar aparte. Si ese texto llega mientras la foto
+// espera —tenga o no monto propio—, se fusionan en UN solo registro
+// (la foto se interpreta con el texto como contexto adicional, igual
+// que ya hacía procesarComprobanteImagen). Si no llega nada, la foto se
+// procesa sola exactamente como antes.
+// ══════════════════════════════════════════════════════════════════════════
+
+// Map<supervisorPhoneE164, Array<{ imgData, ts }>> — cola de fotos de
+// comprobante recibidas sin texto que las acompañe todavía, en espera
+// de que llegue un mensaje de texto que las complete.
+const pendingPhotosByPhone = new Map();
+
+const PENDING_PHOTO_WAIT_MS = 5000;          // margen para que llegue el texto aclaratorio
+const PENDING_PHOTO_TTL_MS  = 3 * 60 * 1000; // igual que el contexto de texto (v8)
+
+// Encola una foto pendiente y devuelve la entrada (se usa como "ticket"
+// para saber después, tras la espera, si alguien más ya la reclamó).
+function agregarFotoPendiente(phoneE164, imgData) {
+  const lista = pendingPhotosByPhone.get(phoneE164) || [];
+  const entry = { imgData, ts: Date.now() };
+  lista.push(entry);
+  pendingPhotosByPhone.set(phoneE164, lista);
+  return entry;
+}
+
+// Quita una entrada puntual de la cola (si sigue ahí). Devuelve true si
+// todavía estaba pendiente (nadie la había reclamado), false si ya no
+// está (un mensaje de texto la tomó primero, o expiró).
+function quitarFotoPendiente(phoneE164, entry) {
+  const lista = pendingPhotosByPhone.get(phoneE164);
+  if (!lista) return false;
+  const idx = lista.indexOf(entry);
+  if (idx === -1) return false;
+  lista.splice(idx, 1);
+  if (lista.length === 0) pendingPhotosByPhone.delete(phoneE164);
+  return true;
+}
+
+// Toma (y remueve) la foto pendiente más antigua para este número, si
+// hay alguna vigente — se usa cuando llega un mensaje de texto que
+// podría completarla.
+function tomarFotoPendienteMasAntigua(phoneE164) {
+  const lista = pendingPhotosByPhone.get(phoneE164);
+  if (!lista || !lista.length) return null;
+
+  const ahora = Date.now();
+  while (lista.length && ahora - lista[0].ts > PENDING_PHOTO_TTL_MS) {
+    lista.shift();
+  }
+  if (!lista.length) {
+    pendingPhotosByPhone.delete(phoneE164);
+    return null;
+  }
+
+  const entry = lista.shift();
+  if (lista.length === 0) pendingPhotosByPhone.delete(phoneE164);
+  return entry;
+}
+
 // ¿El texto es un comando financiero pero SIN monto detectable? (típico:
 // "registra este gasto para el proyecto de X" seguido de una foto).
 function esComandoFinancieroSinMonto(texto) {
@@ -1363,10 +1449,16 @@ if (mensajeDarwin) {
   // FIN SASHA ASISTENCIA V1
   // ═════════════════════════════════════════════════════════════════════════════
         
-  // ── v4/v8: lectura de comprobantes bancarios por imagen ──────────────────────
+  // ── v4/v8/v18: lectura de comprobantes bancarios por imagen ──────────────────
   // v8: se fusiona con cualquier contexto de texto pendiente de ESTE supervisor
   // (ej. "regístrame esto a nombre del proyecto de Christian" mandado como
   // mensaje aparte, segundos antes de la foto).
+  // v18: si la foto llega SIN texto que la acompañe (ni caption, ni contexto
+  // previo), no se procesa de inmediato — se deja pendiente unos segundos por
+  // si llega un mensaje de texto aclaratorio aparte (ver nota extensa junto a
+  // pendingPhotosByPhone, arriba). Si ese texto llega, PASO 1 más abajo la
+  // reclama y la fusiona en un solo registro; si no llega nada, se procesa
+  // sola exactamente como antes.
   if (esSupervisor && mediaIds) {
     const idsComprobante = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
     for (const id of idsComprobante) {
@@ -1375,7 +1467,25 @@ if (mensajeDarwin) {
         if (!imgData) continue;
 
         const contextoPrevio = consumirContextoPendiente(fromE164);
-        const textoParaImagen = [contextoPrevio, normalized].filter(Boolean).join(". ").trim();
+        let textoParaImagen = [contextoPrevio, normalized].filter(Boolean).join(". ").trim();
+
+        if (!textoParaImagen) {
+          const entry = agregarFotoPendiente(fromE164, imgData);
+
+          await new Promise(resolve => setTimeout(resolve, PENDING_PHOTO_WAIT_MS));
+
+          const seguiaPendiente = quitarFotoPendiente(fromE164, entry);
+          if (!seguiaPendiente) {
+            // Un mensaje de texto ya la reclamó y la procesó combinada
+            // mientras esperábamos — no hacer nada más con esta foto.
+            continue;
+          }
+
+          // Nadie la reclamó en la ventana de espera. Revisamos una vez
+          // más por si quedó contexto de texto pendiente mientras
+          // esperábamos, y seguimos con la foto sola.
+          textoParaImagen = consumirContextoPendiente(fromE164);
+        }
 
         const respuestaComprobante = await procesarComprobanteImagen(imgData.base64, imgData.mimeType, textoParaImagen);
 
@@ -1412,10 +1522,31 @@ if (mensajeDarwin) {
       return;
     }
 
-    // ── PASO 1 (v6): Finanzas en lenguaje natural → DIRECTO a finanzas.js ─────
+    // ── PASO 1 (v6/v18): Finanzas en lenguaje natural → DIRECTO a finanzas.js ─
     const cmd = normalized;
 
     if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(textoLimpio)) {
+
+      // v18 — si hay una foto de comprobante esperando (mandada segundos
+      // antes, sin texto todavía), la fusionamos con ESTE texto en un solo
+      // registro, tenga o no monto propio el texto. Esto es lo que evita
+      // el bug real: una foto y un texto mandados por separado para el
+      // MISMO gasto ya no se procesan como dos intentos independientes
+      // (con riesgo de registrar el mismo gasto dos veces).
+      const fotoPendiente = tomarFotoPendienteMasAntigua(fromE164);
+      if (fotoPendiente) {
+        const respuestaComprobante = await procesarComprobanteImagen(
+          fotoPendiente.imgData.base64,
+          fotoPendiente.imgData.mimeType,
+          textoLimpio
+        );
+        if (respuestaComprobante) {
+          const respuestaLimpia = sanitizarRespuestaFinanciera(respuestaComprobante);
+          await sendText(from, respuestaLimpia);
+          await copiaFinancieraADarwin(fromE164, respuestaLimpia);
+        }
+        return;
+      }
 
       // v8 — si el comando NO trae ningún monto, lo más probable es que el
       // supervisor va a mandar la foto del comprobante a continuación. En
@@ -2114,4 +2245,4 @@ function logLead(from, session, tipo = "lead") {
   }));
 }
 
-module.exports = { handleMessage };
+module.exports = { han
