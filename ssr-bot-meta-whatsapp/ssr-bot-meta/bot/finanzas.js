@@ -2725,26 +2725,62 @@ async function registrarEnSheets(data) {
   }
 
 
-  const res =
-    await fetch(
-      APPS_SCRIPT_URL,
-      {
+  // ══════════════════════════════════════════════════════════════
+  // v13 (16 sept 2026) — FIX CRÍTICO: mismo bug identificado y
+  // corregido en asistencia.js — ver la nota extensa en
+  // llamarAppsScript() de ese archivo para la explicación completa.
+  //
+  // RESUMEN: fetch() convierte automáticamente un POST en GET al
+  // seguir una redirección 301/302/303 (comportamiento estándar de
+  // WHATWG Fetch), y las Web Apps de Apps Script casi siempre
+  // responden con una redirección. Sin este fix, un registro
+  // financiero podía perderse en silencio de la misma forma que le
+  // pasó a la asistencia: la petición real que le llega a Apps
+  // Script termina siendo un GET vacío, sin el movimiento a
+  // registrar. Se sigue la redirección a mano, preservando el
+  // método POST y el cuerpo original en cada salto.
+  // ══════════════════════════════════════════════════════════════
 
-        method:
-          "POST",
+  const MAX_REDIRECTS_FINANZAS = 5;
 
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
+  async function hacerPostFinanzas(url, intento) {
 
-        body:
-          JSON.stringify(
-            data
-          )
+    if (intento > MAX_REDIRECTS_FINANZAS) {
+      throw new Error(
+        `Demasiadas redirecciones (${MAX_REDIRECTS_FINANZAS}) al llamar Apps Script.`
+      );
+    }
 
-      }
-    );
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+      redirect: "manual"
+    });
+
+    if (
+      resp.status >= 300 &&
+      resp.status < 400 &&
+      resp.headers.get("location")
+    ) {
+
+      const destino = new URL(
+        resp.headers.get("location"),
+        url
+      ).toString();
+
+      console.log(
+        `↪️ FINANZAS — Apps Script redirigió (HTTP ${resp.status}), reenviando POST a: ${destino}`
+      );
+
+      return hacerPostFinanzas(destino, intento + 1);
+    }
+
+    return resp;
+  }
+
+
+  const res = await hacerPostFinanzas(APPS_SCRIPT_URL, 1);
 
 
   const bodyText =
