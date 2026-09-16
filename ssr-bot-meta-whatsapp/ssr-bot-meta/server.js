@@ -4,6 +4,7 @@ const cron    = require("node-cron");
 const path    = require("path");
 const { handleMessage }       = require("./bot/index");
 const { sendDailyReminders }  = require("./bot/reminders");
+const { enviarConfirmacionesVisitasManana } = require("./bot/confirmaciones");
 const memoria                 = require("./bot/memoria");
 
 // ── KEEP-ALIVE: evita que Railway duerma el proceso ─────────────────────────────
@@ -62,6 +63,17 @@ cron.schedule("0 8 * * *", async () => {
   await sendDailyReminders();
 }, { timezone: "America/Costa_Rica" });
 console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
+
+// ── Cron: confirmación de visitas de mañana, 7:00 PM Costa Rica ───────────────
+// v18 (16 sept 2026) — pedido por Darwin: la noche anterior a cada visita
+// agendada, mandarle al cliente un recordatorio con botones Sí/No
+// preguntando si confirma. Ver bot/confirmaciones.js para el detalle
+// completo (envío + manejo de la respuesta + aviso a Darwin y Melvin).
+cron.schedule("0 19 * * *", async () => {
+  console.log("🕖 Cron activado → enviando confirmaciones de visitas de mañana...");
+  await enviarConfirmacionesVisitasManana();
+}, { timezone: "America/Costa_Rica" });
+console.log("✅ Cron de confirmaciones de visita registrado (7:00 PM CR diario)");
 
 // ── Números internos (supervisores / Melvin) ──────────────────────────────────
 const NUMEROS_INTERNOS = new Set([
@@ -470,6 +482,15 @@ app.get("/test-reminders", async (_req, res) => {
   res.json({ ok: true, message: "Recordatorios ejecutados" });
 });
 
+// ── Test de confirmaciones de visita ────────────────────────────────────────────
+// v18 (16 sept 2026) — permite a Darwin disparar manualmente el envío de
+// confirmaciones sin esperar hasta las 7:00 PM, igual que /test-reminders
+// ya existía para los recordatorios de las 8:00 AM.
+app.get("/test-confirmaciones-visita", async (_req, res) => {
+  await enviarConfirmacionesVisitasManana();
+  res.json({ ok: true, message: "Confirmaciones de visita ejecutadas" });
+});
+
 // ── Test de Meta Lead ──────────────────────────────────────────────────────────
 app.get("/test-meta-lead", async (req, res) => {
   try {
@@ -781,6 +802,7 @@ app.listen(PORT, () => {
 │  🏗️  SS Remodelaciones ∙ WhatsApp Bot (Sasha)              │
 │  🤖  IA: Claude Sonnet 4.6 (visión) + Whisper (audio)      │
 │  ⏰  Recordatorios: 8:00 AM CR diario                      │
+│  📋  Confirmación visitas: 7:00 PM CR diario                │
 │  💓  KeepAlive: ping cada 14 min (siempre activa)          │
 │  🛡️  Anti-loop leads v7: dedup 10 min + marcador origen    │
 │  🚀  Puerto: ${PORT}                                           │
@@ -790,6 +812,7 @@ app.listen(PORT, () => {
 │  🧾  Cotizador: GET /cotizador                              │
 │  🩺  Health check: GET /health                             │
 │  🧪  Test leads: GET /test-meta-lead                       │
+│  🧪  Test confirmaciones: GET /test-confirmaciones-visita  │
 └────────────────────────────────────────────────────────────┘
   `);
 });
