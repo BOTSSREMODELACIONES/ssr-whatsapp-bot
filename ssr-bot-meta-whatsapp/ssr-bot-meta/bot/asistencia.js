@@ -523,7 +523,14 @@ async function registrarEntrada({
 
     telefono: telefono,
 
-    foto: foto || "",
+    // v7 (16 sept 2026) — FIX: SASHA_WEBHOOK_ASISTENCIA_ENTRADA_ en
+    // Apps Script lee data.fotoId, no data.foto. Con el nombre
+    // equivocado, Apps Script nunca recibía el ID de la fotografía —
+    // las columnas FOTO_ENTRADA/FOTO_SALIDA quedaban siempre vacías
+    // en ASISTENCIA_SASHA, aunque el resto del registro funcionara
+    // bien. Se corrige el nombre del campo; no hace falta tocar nada
+    // en Apps Script, que ya esperaba "fotoId" desde el principio.
+    fotoId: foto || "",
 
     messageId: messageId || ""
 
@@ -906,7 +913,9 @@ async function registrarSalida({
 
     telefono: telefono,
 
-    foto: foto || "",
+    // v7 — ver nota extensa en registrarEntrada(): Apps Script lee
+    // data.fotoId, no data.foto.
+    fotoId: foto || "",
 
     messageId: messageId || ""
 
