@@ -2726,18 +2726,65 @@ async function registrarEnSheets(data) {
 
 
   // ══════════════════════════════════════════════════════════════
-  // v14 (16 sept 2026) — FIX del fix de ayer (v13): el primer salto
-  // (a /exec, donde Apps Script REALMENTE ejecuta el código) va por
-  // POST — eso seguía bien. Pero la redirección que Apps Script
-  // devuelve apunta a una URL de
+  // v15 (16 sept 2026) — REINTENTO AUTOMÁTICO ANTE BLOQUEO TEMPORAL
+  // DE GOOGLE. Mismo mecanismo agregado en asistencia.js (v9) — ver
+  // la nota extensa ahí para la explicación completa. Resumen: la
+  // página anti-bot 'ppConfig' de Google es un bloqueo TEMPORAL e
+  // intermitente (la misma llamada funciona bien la mayoría de las
+  // veces), así que reintentar la petición completa después de una
+  // breve espera resuelve la mayoría de los casos sin que el
+  // supervisor tenga que volver a mandar el comando a mano.
+  // ══════════════════════════════════════════════════════════════
+
+  const MAX_REINTENTOS_FINANZAS = 2; // + el intento original = 3 en total
+  const ESPERA_REINTENTO_FINANZAS_MS = 2000;
+
+  function esperarFinanzas(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  let ultimoErrorFinanzas = null;
+
+  for (let intentoGlobal = 0; intentoGlobal <= MAX_REINTENTOS_FINANZAS; intentoGlobal++) {
+
+    if (intentoGlobal > 0) {
+      console.warn(
+        `⚠️ FINANZAS — reintentando llamada a Apps Script (intento ${intentoGlobal + 1}/${MAX_REINTENTOS_FINANZAS + 1}) tras ${ESPERA_REINTENTO_FINANZAS_MS}ms...`
+      );
+      await esperarFinanzas(ESPERA_REINTENTO_FINANZAS_MS);
+    }
+
+    try {
+
+      return await SASHA_FINANZAS_UN_INTENTO_(APPS_SCRIPT_URL, data);
+
+    } catch (err) {
+
+      ultimoErrorFinanzas = err;
+
+      console.warn(
+        `⚠️ FINANZAS — intento ${intentoGlobal + 1}/${MAX_REINTENTOS_FINANZAS + 1} falló: ${err.message}`
+      );
+    }
+  }
+
+  throw ultimoErrorFinanzas;
+}
+
+
+// Un único intento completo (POST inicial + redirecciones + parseo
+// de JSON). Separado de registrarEnSheets() para que el bucle de
+// reintentos (v15, arriba) pueda invocarlo varias veces limpiamente.
+async function SASHA_FINANZAS_UN_INTENTO_(appsScriptUrl, data) {
+
+  // v14 (16 sept 2026) — el primer salto (a /exec, donde Apps
+  // Script REALMENTE ejecuta el código) va por POST. La redirección
+  // que Apps Script devuelve apunta a una URL de
   // script.googleusercontent.com/macros/echo — un servidor de
   // CONTENIDO que solo sirve el resultado ya calculado, y que
   // ÚNICAMENTE acepta GET (confirmado: forzar POST ahí devuelve HTTP
-  // 405 Method Not Allowed, visto en producción en asistencia.js).
-  // v13 forzaba POST también en ese segundo salto por error. Ahora:
-  // POST solo en el primer salto; cualquier redirección posterior se
-  // sigue con GET (sin cuerpo).
-  // ══════════════════════════════════════════════════════════════
+  // 405 Method Not Allowed). POST solo en el primer salto; cualquier
+  // redirección posterior se sigue con GET (sin cuerpo).
 
   const MAX_REDIRECTS_FINANZAS = 5;
 
@@ -2785,7 +2832,7 @@ async function registrarEnSheets(data) {
   }
 
 
-  const res = await hacerPostFinanzas(APPS_SCRIPT_URL, 1, "POST");
+  const res = await hacerPostFinanzas(appsScriptUrl, 1, "POST");
 
 
   const bodyText =
