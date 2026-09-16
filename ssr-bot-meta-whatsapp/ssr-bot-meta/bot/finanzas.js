@@ -2726,24 +2726,22 @@ async function registrarEnSheets(data) {
 
 
   // ══════════════════════════════════════════════════════════════
-  // v13 (16 sept 2026) — FIX CRÍTICO: mismo bug identificado y
-  // corregido en asistencia.js — ver la nota extensa en
-  // llamarAppsScript() de ese archivo para la explicación completa.
-  //
-  // RESUMEN: fetch() convierte automáticamente un POST en GET al
-  // seguir una redirección 301/302/303 (comportamiento estándar de
-  // WHATWG Fetch), y las Web Apps de Apps Script casi siempre
-  // responden con una redirección. Sin este fix, un registro
-  // financiero podía perderse en silencio de la misma forma que le
-  // pasó a la asistencia: la petición real que le llega a Apps
-  // Script termina siendo un GET vacío, sin el movimiento a
-  // registrar. Se sigue la redirección a mano, preservando el
-  // método POST y el cuerpo original en cada salto.
+  // v14 (16 sept 2026) — FIX del fix de ayer (v13): el primer salto
+  // (a /exec, donde Apps Script REALMENTE ejecuta el código) va por
+  // POST — eso seguía bien. Pero la redirección que Apps Script
+  // devuelve apunta a una URL de
+  // script.googleusercontent.com/macros/echo — un servidor de
+  // CONTENIDO que solo sirve el resultado ya calculado, y que
+  // ÚNICAMENTE acepta GET (confirmado: forzar POST ahí devuelve HTTP
+  // 405 Method Not Allowed, visto en producción en asistencia.js).
+  // v13 forzaba POST también en ese segundo salto por error. Ahora:
+  // POST solo en el primer salto; cualquier redirección posterior se
+  // sigue con GET (sin cuerpo).
   // ══════════════════════════════════════════════════════════════
 
   const MAX_REDIRECTS_FINANZAS = 5;
 
-  async function hacerPostFinanzas(url, intento) {
+  async function hacerPostFinanzas(url, intento, metodo) {
 
     if (intento > MAX_REDIRECTS_FINANZAS) {
       throw new Error(
@@ -2751,12 +2749,19 @@ async function registrarEnSheets(data) {
       );
     }
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
+    const esPrimerSalto = metodo === "POST";
+
+    const opciones = {
+      method: metodo,
       redirect: "manual"
-    });
+    };
+
+    if (esPrimerSalto) {
+      opciones.headers = { "Content-Type": "application/json" };
+      opciones.body = JSON.stringify(data);
+    }
+
+    const resp = await fetch(url, opciones);
 
     if (
       resp.status >= 300 &&
@@ -2770,17 +2775,17 @@ async function registrarEnSheets(data) {
       ).toString();
 
       console.log(
-        `↪️ FINANZAS — Apps Script redirigió (HTTP ${resp.status}), reenviando POST a: ${destino}`
+        `↪️ FINANZAS — Apps Script redirigió (HTTP ${resp.status}), siguiendo con GET a: ${destino}`
       );
 
-      return hacerPostFinanzas(destino, intento + 1);
+      return hacerPostFinanzas(destino, intento + 1, "GET");
     }
 
     return resp;
   }
 
 
-  const res = await hacerPostFinanzas(APPS_SCRIPT_URL, 1);
+  const res = await hacerPostFinanzas(APPS_SCRIPT_URL, 1, "POST");
 
 
   const bodyText =
