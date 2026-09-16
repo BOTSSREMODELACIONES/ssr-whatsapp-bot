@@ -1375,7 +1375,13 @@ async function procesarAsistencia({
   texto = "",
   foto = "",
   imagen = null,
-  messageId = ""
+  messageId = "",
+  // v4 (16 sept 2026) — evitar la doble consulta de estado.
+  // index.js ya llama a esTrabajadorSSR() (que internamente hace un
+  // consultarEstado()) ANTES de llegar acá. Si ese resultado viene
+  // fresco y confirma esTrabajador:true, se reutiliza en vez de
+  // volver a preguntarle lo mismo a Apps Script un instante después.
+  estadoPrevio = null
 }) {
 
   try {
@@ -1457,17 +1463,39 @@ async function procesarAsistencia({
 
     // ========================================================
     // 2. CONSULTAR ESTADO ACTUAL EN APPS SCRIPT
+    //
+    // v4 — FIX: index.js ya consultó esto milisegundos antes, vía
+    // esTrabajadorSSR(). Repetir la misma pregunta acá duplicaba
+    // TODAS las llamadas a Apps Script (una foto = 2 consultas de
+    // estado idénticas en vez de 1), lo que multiplica el tráfico
+    // hacia Apps Script sin necesidad. Se reutiliza el resultado ya
+    // fetcheado cuando viene disponible y confirma esTrabajador:true;
+    // si no viene (o viene incompleto), se hace la consulta propia
+    // como respaldo, igual que antes.
     // ========================================================
 
-    const respuestaEstado =
-      await consultarEstado(telefono);
+    let estado;
+
+    if (
+      estadoPrevio &&
+      estadoPrevio.esTrabajador === true
+    ) {
+
+      estado = estadoPrevio;
+
+    } else {
+
+      const respuestaEstado =
+        await consultarEstado(telefono);
 
 
-    const estado =
-      respuestaEstado &&
-      respuestaEstado.resultado
-        ? respuestaEstado.resultado
-        : respuestaEstado;
+      estado =
+        respuestaEstado &&
+        respuestaEstado.resultado
+          ? respuestaEstado.resultado
+          : respuestaEstado;
+
+    }
 
 
     if (!estado) {
@@ -1478,6 +1506,7 @@ async function procesarAsistencia({
         error: "estado_invalido"
       };
     }
+
 
 
     // ========================================================
