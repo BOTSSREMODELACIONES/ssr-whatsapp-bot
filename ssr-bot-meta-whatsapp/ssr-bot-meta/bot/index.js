@@ -2245,4 +2245,4 @@ function logLead(from, session, tipo = "lead") {
   }));
 }
 
-module.exports = { han
+module.exports = { handleMessage };
