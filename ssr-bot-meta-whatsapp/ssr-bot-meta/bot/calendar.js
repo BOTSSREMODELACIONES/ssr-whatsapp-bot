@@ -242,15 +242,8 @@ function getNextAvailableDate(dayName, hourStr) {
 
     if (specificDate <= now) {
       if (parsed.explicitYear) {
-        // El usuario dio un año explícito y ya pasó — no lo reinterpretamos,
-        // eso sería adivinar la intención. Se deja tal cual; verificarDisponibilidadExacta
-        // / esDiaLaborable seguirán aplicando sobre esta fecha (probablemente
-        // resultará en un rechazo aguas abajo, que es lo correcto).
         console.warn(`⚠️ Calendar: fecha "${dayName}" con año explícito ya pasó. No se reinterpreta.`);
       } else {
-        // v10 FIX: antes se sumaban "+7 días" a ciegas (sin relación con la
-        // fecha pedida). Ahora se interpreta correctamente como el mismo
-        // día/mes del PRÓXIMO AÑO.
         console.warn(`⚠️ Calendar: fecha "${dayName}" ya pasó este año, usando el próximo año.`);
         specificDate.setFullYear(specificDate.getFullYear() + 1);
       }
@@ -273,13 +266,6 @@ function getNextAvailableDate(dayName, hourStr) {
 
   const currentDay = result.getDay();
   let daysUntil = (targetDay - currentDay + 7) % 7;
-  // v12 — FIX: antes esto solo empujaba a la próxima semana si YA había
-  // pasado la hora del slot pedido (now.getHours() >= hour). Eso dejaba una
-  // ventana real: si alguien escribía temprano en la mañana (antes de las
-  // 9am) un lunes/martes/viernes preguntando por ese mismo día, el sistema
-  // SÍ lo consideraba agendable hoy — contradiciendo la regla de negocio
-  // explícita de Darwin ("las visitas siempre son para el día hábil
-  // siguiente, sin excepción, sin importar la hora"). Ahora es incondicional.
   if (daysUntil === 0) daysUntil = 7;
   result.setDate(result.getDate() + daysUntil);
   return result;
@@ -299,14 +285,6 @@ async function getCalendarClient() {
   return google.calendar({ version: "v3", auth });
 }
 
-// v16 — FIX: antes, cualquier número extraído que no empezara con "506" se
-// forzaba a "+506<lo-que-sea>" — pensado solo para números locales CR de 8
-// dígitos, pero aplicado también a números que YA traían código de país
-// (ej. "+17542496480"), produciendo un número inventado ("+50617542496480")
-// que nunca podría compararse correctamente contra el teléfono real del
-// cliente. Ahora solo se antepone "+506" cuando el número extraído tiene
-// EXACTAMENTE 8 dígitos (formato local CR sin código de país); para
-// cualquier otra longitud se asume que ya incluye código de país.
 function extraerTelefonoDeEvento(description) {
   if (!description) return null;
   const m = description.match(/WhatsApp:\s*\+?(\d{8,15})/i);
@@ -319,11 +297,6 @@ function extraerTelefonoDeEvento(description) {
   return m2 ? `+${m2[1]}` : null;
 }
 
-// v16 — comparador tolerante a diferencias menores de formato (con/sin "+",
-// con/sin código de país repetido, etc.): compara los últimos 8 dígitos,
-// que es la longitud de un número costarricense sin código de país. Para
-// esta empresa (una sola operación, clientes mayormente de Costa Rica) es
-// una comparación segura y evita falsos negativos por formato.
 function normalizarTelefono(tel) {
   return String(tel || "").replace(/\D/g, "").slice(-8);
 }
@@ -334,6 +307,30 @@ function formatearFechaEvento(startRaw) {
     weekday: "long", day: "numeric", month: "long",
     hour: "2-digit", minute: "2-digit",
   });
+}
+
+// ── v18 (16 sept 2026) — Parser de la descripción que arma createVisitEvent ──
+// Extrae los campos que createVisitEvent() escribe en la descripción del
+// evento (👤 Cliente / 📱 WhatsApp / 📧 Email cliente / 🏗️ Proyecto /
+// 📍 Zona), para reutilizarlos en el nuevo módulo de confirmación de visitas
+// (confirmaciones.js) sin tener que rearmar ese parseo ahí. Cada línea de la
+// descripción es su propio campo, así que `.+` (que en JS por defecto no
+// cruza saltos de línea) alcanza para capturar el valor completo de cada una.
+function parseDescripcionEvento(description) {
+  const desc = String(description || "");
+
+  function campo(regex) {
+    const m = desc.match(regex);
+    return m ? m[1].trim() : "";
+  }
+
+  return {
+    cliente:  campo(/👤 Cliente:\s*(.+)/),
+    phone:    campo(/📱 WhatsApp:\s*(.+)/),
+    email:    campo(/📧 Email cliente:\s*(.+)/),
+    proyecto: campo(/🏗️ Proyecto:\s*(.+)/),
+    zona:     campo(/📍 Zona:\s*(.+)/),
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -353,13 +350,6 @@ async function getAvailableSlots(dayName) {
   try {
     const dayStart = getNextAvailableDate(dayName, "09:00");
 
-    // v12 — FIX: la etiqueta legible de la fecha REAL resuelta (ej: "lunes
-    // 24 de agosto"), no solo el nombre de día que escribió el cliente. Sin
-    // esto, index.js solo podía decirle a Claude "para lunes" — ambiguo
-    // entre "hoy" y "el próximo lunes" — y Claude terminó asumiendo "hoy"
-    // cuando el cliente preguntó explícitamente. Ahora se calcula acá y se
-    // devuelve junto con los slots para que el mensaje de sistema pueda
-    // ser inequívoco.
     const dateLabel = dayStart.toLocaleDateString("es-CR", {
       timeZone: "America/Costa_Rica",
       weekday: "long",
@@ -367,8 +357,6 @@ async function getAvailableSlots(dayName) {
       month: "long",
     });
 
-    // ── v9: si la fecha resuelta no cae en día hábil (lunes/martes/viernes),
-    // no tiene sentido ni siquiera consultar Calendar — no hay slots posibles.
     if (!esDiaLaborable(dayStart)) {
       console.warn(`⛔ getAvailableSlots: "${dayName}" cae en día NO laborable (${dayStart.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday: "long" })})`);
       return { date: dayStart, dateLabel, slots: [] };
@@ -427,42 +415,6 @@ async function getAvailableSlots(dayName) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // verificarDisponibilidadExacta
-// Verifica si una fecha/hora concreta está libre ANTES de crear el evento.
-// A diferencia de getAvailableSlots (que trabaja sobre el slot fijo de las
-// 9:00 a.m.), esta función chequea el rango real [inicio, inicio+60min] de
-// la cita que se va a crear, contra TODOS los eventos de ese día —
-// incluyendo bloqueos de día completo (ej: Melvin reservó el día para
-// instalar muebles) Y CUALQUIER CITA INTRODUCIDA MANUALMENTE POR UN
-// ADMINISTRADOR directamente en Google Calendar (no solo las que creó
-// Sasha). calendar.events.list() no filtra por origen/creador del evento —
-// trae absolutamente todo lo que exista ese día en el calendario, sin
-// importar si se creó a mano o por el bot — así que un bloqueo o cita
-// manual de un administrador SIEMPRE se respeta acá y NUNCA se reagenda
-// encima. Esta es la verificación que se ejecuta justo antes de insertar
-// (createVisitEvent) y justo antes de mover una cita existente
-// (rescheduleEventByNameAndDate) — en ambos casos, si el resultado es
-// "no disponible", no se toca el calendario.
-//
-// NOTA v9: esta función SOLO revisa conflictos con otros eventos. La
-// validación de "¿es un día hábil?" vive en createVisitEvent() (se hace
-// ANTES de llamar a esta función, para no gastar una consulta a la API en
-// una fecha que de entrada nunca se iba a poder agendar).
-//
-// v16 — parámetro opcional `phone`: si el evento en conflicto pertenece al
-// MISMO cliente (mismo teléfono en su descripción), se ignora como
-// conflicto — es una cita propia que createVisitEvent() de todas formas
-// reemplaza vía cancelClientEvents() antes de insertar la nueva. Sin esto,
-// una segunda invocación para la misma solicitud (ej. reintento de webhook
-// de WhatsApp) choca contra la cita que el propio cliente ya tiene, y el
-// sistema le dice que su propio horario recién confirmado ya no está
-// disponible. Ver nota de v16 al inicio del archivo.
-//
-// Devuelve:
-//   { disponible: true }                            → se puede agendar
-//   { disponible: false, motivo: "dia_bloqueado" }  → día completo reservado
-//   { disponible: false, motivo: "slot_ocupado", conflicto: "..." }
-//   { disponible: false, motivo: "error_calendario" } → falla al consultar
-//     (por seguridad se trata como NO disponible; nunca se agenda a ciegas)
 // ─────────────────────────────────────────────────────────────────────────────
 async function verificarDisponibilidadExacta(startDate, phone = null) {
   try {
@@ -481,25 +433,19 @@ async function verificarDisponibilidadExacta(startDate, phone = null) {
       orderBy: "startTime",
     });
 
-    // Sin filtro de creador/origen: esto trae TODOS los eventos del día,
-    // los que creó Sasha y los que un administrador metió a mano.
     const events = (response.data.items || []).filter(e => e.status !== "cancelled");
 
-    // Rango de la cita que se quiere crear, en minutos CR
     const nuevoInicioMin = startDate.getHours() * 60 + startDate.getMinutes();
     const nuevoFinMin    = nuevoInicioMin + 60;
 
     const phoneNorm = phone ? normalizarTelefono(phone) : null;
 
     for (const event of events) {
-      // Evento de día completo → día bloqueado, no se agenda nada
       if (event.start.date && !event.start.dateTime) {
         console.log(`⛔ verificarDisponibilidadExacta: día bloqueado por "${event.summary}"`);
         return { disponible: false, motivo: "dia_bloqueado", conflicto: event.summary || "Día reservado" };
       }
 
-      // v16 — si este evento es una cita propia del mismo cliente que está
-      // agendando, no cuenta como conflicto.
       if (phoneNorm) {
         const telefonoEvento = extraerTelefonoDeEvento(event.description);
         if (telefonoEvento && normalizarTelefono(telefonoEvento) === phoneNorm) {
@@ -512,10 +458,6 @@ async function verificarDisponibilidadExacta(startDate, phone = null) {
       let   evFinMin    = toCRMinutes(event.end.dateTime);
       if (evFinMin < evInicioMin) evFinMin = 23 * 60 + 59;
 
-      // Solapamiento con margen de 30 min antes y después (igual que getAvailableSlots).
-      // Este margen es lo que garantiza que una cita manual de un administrador
-      // cercana en el tiempo (aunque no coincida exacto con el rango 9:00-10:00)
-      // también bloquee el slot, en vez de dejar dos citas pegadas sin espacio real.
       const solapa = (nuevoInicioMin - 30) < evFinMin && (nuevoFinMin + 30) > evInicioMin;
       if (solapa) {
         console.log(`⛔ verificarDisponibilidadExacta: choca con "${event.summary}"`);
@@ -527,17 +469,11 @@ async function verificarDisponibilidadExacta(startDate, phone = null) {
 
   } catch (err) {
     console.error("❌ verificarDisponibilidadExacta error:", err.message);
-    // SEGURIDAD: si no podemos verificar, NO agendamos a ciegas.
     return { disponible: false, motivo: "error_calendario" };
   }
 }
 
 // ── Buscar y eliminar eventos futuros de un cliente por teléfono ─────────────
-// IMPORTANTE: esto SOLO borra eventos cuya descripción contiene el teléfono
-// del MISMO cliente que está reagendando (matching por "WhatsApp: +506...."
-// en la descripción que arma createVisitEvent). Nunca toca eventos de otros
-// clientes ni bloqueos/citas manuales de administradores, porque esos no
-// contienen el teléfono de este cliente en su descripción.
 async function cancelClientEvents(calendar, phone) {
   try {
     const now    = new Date();
@@ -698,23 +634,11 @@ async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, n
     return { moved: 0, ambiguous: false, events: [], error: "fecha_pasada" };
   }
 
-  // ── v9: si el destino cae en día NO laborable (lunes/martes/viernes),
-  // rechazar de una vez — mismo blindaje que createVisitEvent.
   if (!esDiaLaborable(nuevaFecha)) {
     console.warn(`⛔ rescheduleEventByNameAndDate: destino "${newDateHint}" cae en día NO laborable`);
     return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: "dia_no_laborable", conflicto: null };
   }
 
-  // v8: verificar que el destino esté libre antes de mover (respeta bloqueos
-  // Y citas manuales de administradores — ver comentario en
-  // verificarDisponibilidadExacta). Si el destino no está libre, NO se
-  // reagenda encima; se aborta antes de tocar el calendario.
-  //
-  // NOTA v16: no se pasa `phone` acá — el evento que se está moviendo ES la
-  // cita del cliente, así que no aplica la lógica de "ignorar conflicto con
-  // mi propia cita" (esta función mueve una cita existente a un destino
-  // nuevo, no crea una cita nueva que pueda chocar con una copia de sí
-  // misma).
   const dispo = await verificarDisponibilidadExacta(nuevaFecha);
   if (!dispo.disponible) {
     return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: dispo.motivo, conflicto: dispo.conflicto };
@@ -808,6 +732,87 @@ async function listUpcomingEvents({ dateHint } = {}) {
   }));
 }
 
+// ── v18 (16 sept 2026) — NUEVO: listado de visitas de un día con TODOS sus
+// datos (nombre, teléfono, hora, proyecto, zona), para el módulo de
+// confirmación de visitas (confirmaciones.js). A diferencia de
+// listUpcomingEvents() (pensado para que un supervisor pregunte "qué citas
+// hay" y solo necesita un resumen de texto), esta función devuelve los
+// campos estructurados que createVisitEvent() ya escribe en la descripción
+// del evento, parseados con parseDescripcionEvento(). Se filtra únicamente
+// a eventos cuyo summary contiene "Visita SSR" — el prefijo fijo que
+// createVisitEvent() siempre usa — para no confundir con bloqueos internos
+// u otros eventos que un administrador haya puesto directo en el calendario
+// y que no son visitas de cliente.
+async function listVisitsForDate(dateHint) {
+  const calendar = await getCalendarClient();
+
+  const targetDate = resolveDateHint(dateHint);
+  if (!targetDate) return [];
+
+  const dayStart = new Date(targetDate);
+  dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = new Date(targetDate);
+  dayEnd.setHours(23, 59, 59, 999);
+
+  const response = await calendar.events.list({
+    calendarId: process.env.GOOGLE_CALENDAR_ID,
+    timeMin: dayStart.toISOString(),
+    timeMax: dayEnd.toISOString(),
+    singleEvents: true,
+    orderBy: "startTime",
+  });
+
+  const events = (response.data.items || []).filter(e =>
+    e.status !== "cancelled" &&
+    (e.summary || "").includes("Visita SSR")
+  );
+
+  return events.map(e => {
+    const info = parseDescripcionEvento(e.description);
+    const startRaw = e.start.dateTime || e.start.date;
+
+    const hourStr = e.start.dateTime
+      ? new Date(e.start.dateTime).toLocaleString("es-CR", {
+          timeZone: "America/Costa_Rica", hour: "numeric", minute: "2-digit", hour12: true,
+        })
+      : "";
+
+    return {
+      eventId:  e.id,
+      summary:  e.summary,
+      dateStr:  formatearFechaEvento(startRaw),
+      hourStr,
+      name:     info.cliente || (e.summary || "").replace(/^🏗️ Visita SSR — /, "").split("|")[0].trim(),
+      phone:    info.phone || extraerTelefonoDeEvento(e.description),
+      email:    info.email,
+      project:  info.proyecto,
+      zone:     info.zona,
+    };
+  });
+}
+
+// ── v18 (16 sept 2026) — NUEVO: obtener un evento puntual por su ID.
+// Se usa como respaldo en confirmaciones.js: si el proceso se reinició
+// entre el envío de la pregunta de confirmación (7pm) y la respuesta del
+// cliente (que puede llegar horas después), la caché en memoria de ese
+// módulo se pierde — esta función permite reconstruir los datos de la
+// visita directamente desde Calendar usando el eventId que ya viaja en el
+// ID del botón, sin depender de que el proceso siga siendo el mismo.
+async function getEventById(eventId) {
+  if (!eventId) return null;
+  try {
+    const calendar = await getCalendarClient();
+    const response = await calendar.events.get({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      eventId,
+    });
+    return response.data;
+  } catch (err) {
+    console.warn(`⚠️ getEventById: no se pudo obtener el evento ${eventId}:`, err.message);
+    return null;
+  }
+}
+
 function resolveDateHint(hint) {
   if (!hint) return null;
 
@@ -837,8 +842,6 @@ function resolveDateHint(hint) {
     return d;
   }
 
-  // v10: unificar con la misma lógica de rollover-al-próximo-año que
-  // getNextAvailableDate (antes esta rama no aplicaba ningún rollover).
   const parsed = parseSpecificDate(sDia) || parseSpecificDate(s);
   if (!parsed) return null;
   const d = parsed.date;
@@ -850,21 +853,6 @@ function resolveDateHint(hint) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // createVisitEvent
-// v8: VERIFICA disponibilidad (bloqueos/citas — incluidas las introducidas
-//   manualmente por un administrador directo en Google Calendar) antes de
-//   insertar.
-// v9: TAMBIÉN verifica que el día resultante sea hábil (lunes/martes/viernes)
-//   antes de cualquier otra cosa — esto es lo que evita que una fecha
-//   específica mal etiquetada (ej. "viernes 8 de agosto" cuando el 8 es
-//   sábado) termine agendando una visita en un día que la empresa no trabaja.
-// v16: la verificación de disponibilidad ahora recibe el teléfono del
-//   cliente, para ignorar como conflicto una cita propia de este mismo
-//   cliente (ver nota extensa de v16 al inicio del archivo).
-// Si el día no es hábil, o el slot está bloqueado/ocupado (por Sasha o por
-// un administrador a mano), NO crea el evento y devuelve
-// { ok:false, motivo, conflicto } para que el llamador (flujo cliente o
-// [VISITA:] de supervisor) informe en vez de duplicar/pisar la agenda o
-// confirmar algo que no existe.
 // ─────────────────────────────────────────────────────────────────────────────
 async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail, skipAvailabilityCheck = false }) {
   if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
@@ -875,8 +863,6 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
   const startDate = getNextAvailableDate(day, hour);
 
   if (!skipAvailabilityCheck) {
-    // ── v9: PRIMERO validar día hábil (no gasta llamada a la API si ya de
-    // entrada la fecha no es agendable).
     if (!esDiaLaborable(startDate)) {
       console.warn(`⛔ createVisitEvent abortado: "${day}" cae en día NO laborable (${startDate.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday: "long" })})`);
       return {
@@ -887,20 +873,12 @@ async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLin
       };
     }
 
-    // ── v8: VERIFICACIÓN DE DISPONIBILIDAD (respeta bloqueos, citas creadas
-    // por Sasha y citas introducidas manualmente por administradores). Se
-    // ejecuta ANTES de borrar citas previas o insertar nada. Si el destino
-    // no está libre, abortamos sin tocar la agenda — nunca se reagenda
-    // encima de una cita manual.
-    // v16: se pasa `phone` para que una cita propia de este mismo cliente
-    // (ej. por una segunda invocación de esta misma función para la misma
-    // solicitud) no cuente como conflicto.
     const dispo = await verificarDisponibilidadExacta(startDate, phone);
     if (!dispo.disponible) {
       console.warn(`⛔ createVisitEvent abortado: ${dispo.motivo} (${dispo.conflicto || "—"})`);
       return {
         ok: false,
-        motivo: dispo.motivo,          // "dia_bloqueado" | "slot_ocupado" | "error_calendario"
+        motivo: dispo.motivo,
         conflicto: dispo.conflicto || null,
         startDate,
       };
@@ -970,6 +948,8 @@ module.exports = {
   cancelEventByNameAndDate,
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
+  listVisitsForDate,
+  getEventById,
   esDiaLaborable,
   proximosDiasHabiles,
 };
