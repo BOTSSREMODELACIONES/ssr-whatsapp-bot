@@ -306,27 +306,94 @@ async function llamarAppsScript(payload) {
   );
 
 
+  // ══════════════════════════════════════════════════════════════
+  // v6 (16 sept 2026) — FIX CRÍTICO: SEGUIR REDIRECCIONES A MANO,
+  // PRESERVANDO EL MÉTODO POST Y EL CUERPO ORIGINAL.
+  //
+  // BUG REAL: una entrada de Darwin se registró con el gesto
+  // correcto, pero la respuesta que Apps Script le devolvió al bot
+  // fue {"status":"ok","mensaje":"Sasha Financiero SSR V13
+  // activo",...} — el mensaje de RESPALDO que doGet() devuelve
+  // cuando no reconoce ninguna acción. El bot manda esto por POST,
+  // nunca por GET — así que no debería poder caer ahí jamás.
+  //
+  // CAUSA RAÍZ: las Web Apps de Apps Script casi siempre responden
+  // con una redirección 302 hacia una URL de
+  // script.googleusercontent.com. El fetch() de Node, por
+  // especificación (WHATWG Fetch Standard), CONVIERTE
+  // AUTOMÁTICAMENTE un POST en GET al seguir una redirección 301,
+  // 302 o 303 — y descarta el cuerpo (body) en el proceso. La
+  // segunda petición (ya GET, sin accion ni ningún dato) le llega a
+  // Apps Script vacía, y cae directo en el mensaje genérico de
+  // doGet(). Como no todas las llamadas generan esa redirección de
+  // la misma forma, el bug es intermitente — coincide exactamente
+  // con lo que reportaste.
+  //
+  // FIX: en vez de dejar que fetch() siga la redirección solo
+  // (redirect: "follow"), la seguimos NOSOTROS a mano
+  // (redirect: "manual"), reenviando la misma petición POST con el
+  // mismo cuerpo a la URL indicada en el header Location. Esto
+  // preserva el método y los datos en cada salto, así que Apps
+  // Script siempre recibe el POST real, sin importar cuántas
+  // redirecciones haga Google por el camino.
+  // ══════════════════════════════════════════════════════════════
+
+  const MAX_REDIRECTS = 5;
+
+  async function hacerPost(url, intento) {
+
+    if (intento > MAX_REDIRECTS) {
+      throw new Error(
+        `Demasiadas redirecciones (${MAX_REDIRECTS}) al llamar Apps Script.`
+      );
+    }
+
+    const resp = await fetch(url, {
+      method: "POST",
+
+      headers: {
+        "Content-Type": "application/json"
+      },
+
+      body: JSON.stringify(payload),
+
+      redirect: "manual",
+
+      // Evita que Sasha quede esperando indefinidamente.
+      signal: AbortSignal.timeout(45000)
+    });
+
+    // status 0 / type "opaqueredirect" es lo que devuelve fetch en
+    // algunos entornos con redirect:"manual" cuando no expone el
+    // Location directamente; para el fetch nativo de Node (undici)
+    // sí exponemos el header Location normalmente en 301/302/303/307/308.
+    if (
+      resp.status >= 300 &&
+      resp.status < 400 &&
+      resp.headers.get("location")
+    ) {
+
+      const destino = new URL(
+        resp.headers.get("location"),
+        url
+      ).toString();
+
+      console.log(
+        `↪️ ASISTENCIA — Apps Script redirigió (HTTP ${resp.status}), reenviando POST a: ${destino}`
+      );
+
+      return hacerPost(destino, intento + 1);
+    }
+
+    return resp;
+  }
+
+
   let response;
 
   try {
 
-    response = await fetch(
-      APPS_SCRIPT_URL,
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type": "application/json"
-        },
-
-        body: JSON.stringify(payload),
-
-        redirect: "follow",
-
-        // Evita que Sasha quede esperando indefinidamente.
-        signal: AbortSignal.timeout(45000)
-      }
-    );
+    response = await hacerPost(APPS_SCRIPT_URL, 1);
 
   } catch (err) {
 
