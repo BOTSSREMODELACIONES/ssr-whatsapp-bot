@@ -1135,7 +1135,12 @@ if (fotoAsistencia) {
     // Claude recibe Base64 + MIME para validar el gesto.
     imagen: imagenAsistencia,
 
-    messageId: messageId || ""
+    messageId: messageId || "",
+
+    // v4 — reutilizar el estado que esTrabajadorSSR() ya consultó
+    // hace un instante, para no volver a preguntarle lo mismo a
+    // Apps Script (ver nota extensa en asistencia.js).
+    estadoPrevio: verificacion.estado || null
   });
 
 
