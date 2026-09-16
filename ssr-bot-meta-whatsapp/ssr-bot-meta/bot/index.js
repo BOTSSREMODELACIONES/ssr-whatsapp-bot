@@ -127,6 +127,7 @@ const memoria                        = require("./memoria");
 const { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImagen } = require("./finanzas");
 const { esConsultaFinanciera, procesarConsultaFinanciera } = require("./consultas");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
+const { manejarRespuestaConfirmacion } = require("./confirmaciones");
 
 // ── MÓDULO ASISTENCIA SASHA V1 ───────────────────────────────────────────────
 const {
@@ -994,6 +995,25 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   if (IGNORAR_PREFIJOS.some(p => fromE164.startsWith(p) || from.startsWith(p))) {
     console.log(`🚫 Mensaje bloqueado de país restringido: ${from}`);
     return;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════
+  // v18 (16 sept 2026) — CONFIRMACIÓN DE VISITA (botones Sí/No)
+  //
+  // Cuando un cliente toca uno de los botones del recordatorio de las 7pm
+  // (ver confirmaciones.js), WhatsApp devuelve el ID de ese botón como si
+  // fuera el texto del mensaje (ver server.js, msg.interactive.button_reply.id
+  // → addToBuffer). Se revisa ACÁ, antes de cualquier otro procesamiento
+  // (asistencia, financiero, flujo comercial), porque no es ninguna de esas
+  // cosas — es la respuesta a una pregunta puntual que ya sabemos qué
+  // significa por el propio ID. Si manejarRespuestaConfirmacion() reconoce
+  // el patrón, se encarga de todo (mensaje al cliente + aviso a Darwin y
+  // Melvin) y no hay que seguir procesando este mensaje de ninguna otra
+  // forma.
+  // ══════════════════════════════════════════════════════════════════════
+  if (normalized) {
+    const manejadaConfirmacion = await manejarRespuestaConfirmacion(from, normalized);
+    if (manejadaConfirmacion) return;
   }
 
 // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
