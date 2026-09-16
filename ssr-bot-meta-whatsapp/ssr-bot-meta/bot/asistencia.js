@@ -340,7 +340,19 @@ async function llamarAppsScript(payload) {
 
   const MAX_REDIRECTS = 5;
 
-  async function hacerPost(url, intento) {
+  // v8 (16 sept 2026) — FIX del fix de ayer: el primer salto (a
+  // /exec, donde Apps Script REALMENTE ejecuta el código) debe ir
+  // por POST — eso ya estaba bien. Pero la redirección que Apps
+  // Script devuelve apunta a una URL de
+  // script.googleusercontent.com/macros/echo — un servidor de
+  // CONTENIDO que solo sirve el resultado que Apps Script ya
+  // calculó en la primera petición. Esa URL únicamente acepta GET
+  // (confirmado: forzar POST ahí devolvía HTTP 405 Method Not
+  // Allowed). El fix de ayer forzaba POST también en ese segundo
+  // salto por error. Ahora: POST solo en el primer salto; cualquier
+  // redirección posterior se sigue con GET (sin cuerpo), que es lo
+  // que ese servidor de contenido espera.
+  async function hacerPost(url, intento, metodo) {
 
     if (intento > MAX_REDIRECTS) {
       throw new Error(
@@ -348,20 +360,23 @@ async function llamarAppsScript(payload) {
       );
     }
 
-    const resp = await fetch(url, {
-      method: "POST",
+    const esPrimerSalto = metodo === "POST";
 
-      headers: {
-        "Content-Type": "application/json"
-      },
-
-      body: JSON.stringify(payload),
+    const opciones = {
+      method: metodo,
 
       redirect: "manual",
 
       // Evita que Sasha quede esperando indefinidamente.
       signal: AbortSignal.timeout(45000)
-    });
+    };
+
+    if (esPrimerSalto) {
+      opciones.headers = { "Content-Type": "application/json" };
+      opciones.body = JSON.stringify(payload);
+    }
+
+    const resp = await fetch(url, opciones);
 
     // status 0 / type "opaqueredirect" es lo que devuelve fetch en
     // algunos entornos con redirect:"manual" cuando no expone el
@@ -379,10 +394,10 @@ async function llamarAppsScript(payload) {
       ).toString();
 
       console.log(
-        `↪️ ASISTENCIA — Apps Script redirigió (HTTP ${resp.status}), reenviando POST a: ${destino}`
+        `↪️ ASISTENCIA — Apps Script redirigió (HTTP ${resp.status}), siguiendo con GET a: ${destino}`
       );
 
-      return hacerPost(destino, intento + 1);
+      return hacerPost(destino, intento + 1, "GET");
     }
 
     return resp;
@@ -393,7 +408,7 @@ async function llamarAppsScript(payload) {
 
   try {
 
-    response = await hacerPost(APPS_SCRIPT_URL, 1);
+    response = await hacerPost(APPS_SCRIPT_URL, 1, "POST");
 
   } catch (err) {
 
