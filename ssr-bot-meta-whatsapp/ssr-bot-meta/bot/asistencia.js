@@ -546,11 +546,32 @@ async function registrarEntrada({
 
   // ----------------------------------------------------------
   // CASO: proyecto único / entrada completa
+  //
+  // v5 (16 sept 2026) — FIX: se agrega "&& resultado.trabajador" a
+  // la condición de éxito.
+  //
+  // BUG REAL: Apps Script devolvió, para una llamada real de
+  // asistencia_entrada, esto: {"status":"ok","mensaje":"Sasha
+  // Financiero SSR V13 activo","motor":"..."} — una respuesta
+  // genérica sin trabajador/hora/proyecto, como si hubiera
+  // respondido el handler equivocado. Como antes solo se exigía
+  // status==="ok", esto se tomaba como un registro EXITOSO y se le
+  // confirmaba al trabajador "✅ Entrada registrada" con todos los
+  // campos vacíos — una confirmación falsa, mucho peor que un error
+  // honesto, porque no hay forma de saber si el ERP realmente
+  // guardó algo.
+  //
+  // FIX: una respuesta "ok" real de asistencia_entrada SIEMPRE trae
+  // el nombre del trabajador (es el primer dato que llena Apps
+  // Script). Si falta, ya no se trata como éxito — cae al bloque de
+  // error de abajo con un mensaje honesto pidiendo reintentar, en
+  // vez de una confirmación inventada.
   // ----------------------------------------------------------
 
   if (
     resultado &&
-    resultado.status === "ok"
+    resultado.status === "ok" &&
+    resultado.trabajador
   ) {
 
     pendientesProyecto.delete(telefono);
@@ -588,6 +609,34 @@ async function registrarEntrada({
         resultado.asignacionAutomatica === true,
 
       gestoVerificado: gestoVerificado,
+
+      resultado: resultado
+
+    };
+  }
+
+
+  // v5 — caso nuevo: Apps Script respondió "ok" pero sin los datos
+  // esperados (respuesta ajena/incompleta). Se distingue del error
+  // genérico de abajo para poder dar un mensaje más claro.
+  if (
+    resultado &&
+    resultado.status === "ok" &&
+    !resultado.trabajador
+  ) {
+
+    console.error(
+      `❌ ASISTENCIA — asistencia_entrada respondió "ok" sin datos de trabajador (respuesta ajena/incompleta) para ${telefono}:`,
+      JSON.stringify(resultado)
+    );
+
+    return {
+
+      manejado: true,
+
+      tipo: "error",
+
+      error: "respuesta_incompleta",
 
       resultado: resultado
 
@@ -804,9 +853,12 @@ async function registrarSalida({
       : respuesta;
 
 
+  // v5 — mismo blindaje que registrarEntrada(): una respuesta "ok"
+  // real de asistencia_salida siempre trae el nombre del trabajador.
   if (
     resultado &&
-    resultado.status === "ok"
+    resultado.status === "ok" &&
+    resultado.trabajador
   ) {
 
     pendientesProyecto.delete(telefono);
@@ -856,6 +908,33 @@ return {
 
 };
     
+  }
+
+
+  // v5 — "ok" sin datos de trabajador: respuesta ajena/incompleta,
+  // no se confirma como éxito (ver nota extensa en registrarEntrada).
+  if (
+    resultado &&
+    resultado.status === "ok" &&
+    !resultado.trabajador
+  ) {
+
+    console.error(
+      `❌ ASISTENCIA — asistencia_salida respondió "ok" sin datos de trabajador (respuesta ajena/incompleta) para ${telefono}:`,
+      JSON.stringify(resultado)
+    );
+
+    return {
+
+      manejado: true,
+
+      tipo: "error",
+
+      error: "respuesta_incompleta",
+
+      resultado: resultado
+
+    };
   }
 
 
@@ -1736,9 +1815,19 @@ if (!gestoVerificado) {
       }
 
 
+      // v5 — FIX: antes esta rama devolvía el objeto de error SIN
+      // mensaje. index.js solo envía texto al trabajador si
+      // resultadoAsistencia.mensaje viene con algo — si no, se queda
+      // en silencio total (registra un warning en el log nomás, y
+      // el trabajador nunca se entera de nada). Con el nuevo chequeo
+      // de "ok sin trabajador" (ver registrarSalida), este caso
+      // ahora se puede dar más seguido, así que es importante que
+      // siempre lleve un mensaje real.
       return {
         ...registro,
-        gestoVerificado
+        gestoVerificado,
+        mensaje:
+          "⚠️ Tu salida quedó pendiente de confirmar — el sistema no pudo darme el resultado completo en este momento. Probá de nuevo en unos segundos; si ya marcaste salida, no hace falta repetirlo dos veces."
       };
     }
 
@@ -1799,10 +1888,14 @@ if (!gestoVerificado) {
     // ------------------------------------------------------
     // CUALQUIER OTRO RESULTADO
     // ------------------------------------------------------
+    // v5 — mismo fix que en la rama de salida: siempre con mensaje,
+    // nunca en silencio.
 
     return {
       ...entrada,
-      gestoVerificado
+      gestoVerificado,
+      mensaje:
+        "⚠️ Tu entrada quedó pendiente de confirmar — el sistema no pudo darme el resultado completo en este momento. Probá de nuevo en unos segundos; si ya marcaste entrada, no hace falta repetirlo dos veces."
     };
   }   
 
