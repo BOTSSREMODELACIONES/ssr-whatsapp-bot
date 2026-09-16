@@ -307,51 +307,83 @@ async function llamarAppsScript(payload) {
 
 
   // ══════════════════════════════════════════════════════════════
-  // v6 (16 sept 2026) — FIX CRÍTICO: SEGUIR REDIRECCIONES A MANO,
-  // PRESERVANDO EL MÉTODO POST Y EL CUERPO ORIGINAL.
+  // v9 (16 sept 2026) — REINTENTO AUTOMÁTICO ANTE BLOQUEO TEMPORAL
+  // DE GOOGLE (página ppConfig / HTTP no-JSON).
   //
-  // BUG REAL: una entrada de Darwin se registró con el gesto
-  // correcto, pero la respuesta que Apps Script le devolvió al bot
-  // fue {"status":"ok","mensaje":"Sasha Financiero SSR V13
-  // activo",...} — el mensaje de RESPALDO que doGet() devuelve
-  // cuando no reconoce ninguna acción. El bot manda esto por POST,
-  // nunca por GET — así que no debería poder caer ahí jamás.
+  // BUG REAL: incluso con el fix de redirección (v8) funcionando
+  // bien la mayoría de las veces, sigue apareciendo de forma
+  // intermitente una página de verificación anti-bot de Google
+  // (identificable por 'ppConfig' en el HTML) en vez de la
+  // respuesta JSON real. Es un bloqueo TEMPORAL — se confirmó que
+  // la misma llamada (asistencia_estado) funcionó bien varias veces
+  // seguidas antes y después de fallar, lo cual es la firma típica
+  // de un límite de tasa intermitente, no un bloqueo permanente.
   //
-  // CAUSA RAÍZ: las Web Apps de Apps Script casi siempre responden
-  // con una redirección 302 hacia una URL de
-  // script.googleusercontent.com. El fetch() de Node, por
-  // especificación (WHATWG Fetch Standard), CONVIERTE
-  // AUTOMÁTICAMENTE un POST en GET al seguir una redirección 301,
-  // 302 o 303 — y descarta el cuerpo (body) en el proceso. La
-  // segunda petición (ya GET, sin accion ni ningún dato) le llega a
-  // Apps Script vacía, y cae directo en el mensaje genérico de
-  // doGet(). Como no todas las llamadas generan esa redirección de
-  // la misma forma, el bug es intermitente — coincide exactamente
-  // con lo que reportaste.
-  //
-  // FIX: en vez de dejar que fetch() siga la redirección solo
-  // (redirect: "follow"), la seguimos NOSOTROS a mano
-  // (redirect: "manual"), reenviando la misma petición POST con el
-  // mismo cuerpo a la URL indicada en el header Location. Esto
-  // preserva el método y los datos en cada salto, así que Apps
-  // Script siempre recibe el POST real, sin importar cuántas
-  // redirecciones haga Google por el camino.
+  // FIX: si la respuesta no es JSON válido, se reintenta la
+  // petición COMPLETA (desde el primer POST) después de una breve
+  // espera, hasta 2 veces más (3 intentos en total). La mayoría de
+  // los bloqueos deberían resolverse solos en ese margen — el
+  // trabajador no debería notar nada, salvo un par de segundos más
+  // de espera en la confirmación. Solo si los 3 intentos fallan se
+  // devuelve el error hacia arriba, igual que antes.
   // ══════════════════════════════════════════════════════════════
+
+  const MAX_REINTENTOS = 2; // + el intento original = 3 llamadas en total
+  const ESPERA_REINTENTO_MS = 2000;
+
+  function esperar(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  let ultimoError = null;
+
+  for (let intentoGlobal = 0; intentoGlobal <= MAX_REINTENTOS; intentoGlobal++) {
+
+    if (intentoGlobal > 0) {
+      console.warn(
+        `⚠️ ASISTENCIA — reintentando llamada a Apps Script (intento ${intentoGlobal + 1}/${MAX_REINTENTOS + 1}) tras ${ESPERA_REINTENTO_MS}ms...`
+      );
+      await esperar(ESPERA_REINTENTO_MS);
+    }
+
+    try {
+
+      const resultado = await SASHA_ASISTENCIA_UN_INTENTO_(APPS_SCRIPT_URL, payload);
+      return resultado; // éxito — no hace falta reintentar más.
+
+    } catch (err) {
+
+      ultimoError = err;
+
+      console.warn(
+        `⚠️ ASISTENCIA — intento ${intentoGlobal + 1}/${MAX_REINTENTOS + 1} falló: ${err.message}`
+      );
+    }
+  }
+
+  // Se agotaron todos los reintentos — el error se propaga igual
+  // que antes, para que index.js/procesarAsistencia lo maneje
+  // (fail closed).
+  throw ultimoError;
+}
+
+
+// Un único intento completo (POST inicial + redirecciones + parseo
+// de JSON). Separado de llamarAppsScript() para que el bucle de
+// reintentos (v9, arriba) pueda invocarlo varias veces limpiamente.
+async function SASHA_ASISTENCIA_UN_INTENTO_(appsScriptUrl, payload) {
 
   const MAX_REDIRECTS = 5;
 
-  // v8 (16 sept 2026) — FIX del fix de ayer: el primer salto (a
+  // v8 (16 sept 2026) — FIX del fix anterior: el primer salto (a
   // /exec, donde Apps Script REALMENTE ejecuta el código) debe ir
-  // por POST — eso ya estaba bien. Pero la redirección que Apps
-  // Script devuelve apunta a una URL de
-  // script.googleusercontent.com/macros/echo — un servidor de
-  // CONTENIDO que solo sirve el resultado que Apps Script ya
-  // calculó en la primera petición. Esa URL únicamente acepta GET
-  // (confirmado: forzar POST ahí devolvía HTTP 405 Method Not
-  // Allowed). El fix de ayer forzaba POST también en ese segundo
-  // salto por error. Ahora: POST solo en el primer salto; cualquier
-  // redirección posterior se sigue con GET (sin cuerpo), que es lo
-  // que ese servidor de contenido espera.
+  // por POST. Pero la redirección que Apps Script devuelve apunta a
+  // una URL de script.googleusercontent.com/macros/echo — un
+  // servidor de CONTENIDO que solo sirve el resultado que Apps
+  // Script ya calculó en la primera petición. Esa URL únicamente
+  // acepta GET (confirmado: forzar POST ahí devolvía HTTP 405
+  // Method Not Allowed). Ahora: POST solo en el primer salto;
+  // cualquier redirección posterior se sigue con GET (sin cuerpo).
   async function hacerPost(url, intento, metodo) {
 
     if (intento > MAX_REDIRECTS) {
@@ -408,7 +440,7 @@ async function llamarAppsScript(payload) {
 
   try {
 
-    response = await hacerPost(APPS_SCRIPT_URL, 1, "POST");
+    response = await hacerPost(appsScriptUrl, 1, "POST");
 
   } catch (err) {
 
