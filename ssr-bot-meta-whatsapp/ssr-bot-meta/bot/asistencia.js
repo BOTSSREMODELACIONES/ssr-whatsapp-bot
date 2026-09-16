@@ -1608,32 +1608,52 @@ const retoEsperado =
     : "";
 
 
-// ------------------------------------------------------
-// VALIDAR FOTOGRAFÍA CON CLAUDE
-// ------------------------------------------------------
+// El reto ya cumplió su función para este intento — se libera de
+// inmediato (no hace falta esperar a nada más) para no dejar al
+// trabajador "atascado" en un reto viejo en su próximo movimiento.
+eliminarRetoFotografico(telefono);
 
-let validacionFoto = null;
 
-try {
+// ══════════════════════════════════════════════════════════════
+// v3 (16 sept 2026) — PARALELIZAR VALIDACIÓN DE GESTO + REGISTRO
+//
+// Como el resultado de la validación del gesto YA NO decide si se
+// registra la asistencia (v2), no hay ninguna razón para esperar a
+// que Claude termine de analizar la foto ANTES de escribir en Apps
+// Script. Antes las dos llamadas corrían EN SERIE (primero Claude,
+// después Apps Script), sumando sus tiempos — eso es lo que hacía
+// que la confirmación tardara más de lo normal. Ahora corren EN
+// PARALELO: el trabajador espera lo que tarde la más lenta de las
+// dos, no la suma de ambas.
+// ══════════════════════════════════════════════════════════════
 
-  validacionFoto =
-    await validarRetoFotograficoIA(
-      imagen,
-      retoEsperado
-    );
+const validacionPromise =
+  validarRetoFotograficoIA(imagen, retoEsperado)
+    .catch(errValidacion => {
 
-} catch (errValidacion) {
+      // v2 — si la propia validación falla (ej. imagen ilegible,
+      // timeout de Claude), tampoco bloqueamos: se trata igual que
+      // un gesto no coincidente, y la asistencia se registra igual.
+      console.warn(
+        `⚠️ SASHA ASISTENCIA — la validación del gesto falló técnicamente, se registra igual | ${telefono}:`,
+        errValidacion.message
+      );
 
-  // v2 — si la propia validación falla (ej. imagen ilegible,
-  // timeout de Claude), tampoco bloqueamos: se trata igual que
-  // un gesto no coincidente, y se registra la asistencia igual.
-  console.warn(
-    `⚠️ SASHA ASISTENCIA — la validación del gesto falló técnicamente, se registra igual | ${telefono}:`,
-    errValidacion.message
-  );
+      return null;
+    });
 
-  validacionFoto = null;
-}
+const esSalida = estado.jornadaAbierta === true;
+
+const registroPromise =
+  esSalida
+    ? registrarSalida({ telefono, foto, messageId })
+    : registrarEntrada({ telefono, foto, messageId, texto });
+
+const [validacionFoto, registro] =
+  await Promise.all([
+    validacionPromise,
+    registroPromise
+  ]);
 
 
 console.log(
@@ -1653,9 +1673,10 @@ if (!gestoVerificado) {
   // "reto_fotografico_incorrecto" y se le pedía al trabajador
   // reintentar indefinidamente mientras el gesto no coincidiera.
   // Ahora solo se deja constancia en el log — el registro de
-  // entrada/salida sigue su curso normal más abajo.
+  // entrada/salida ya corrió en paralelo más arriba, sin esperar
+  // este resultado.
   console.warn(
-    `⚠️ SASHA ASISTENCIA — gesto NO coincide, se registra de todas formas (ya no se bloquea) | ${telefono} | esperado=${retoEsperado} detectado=${validacionFoto?.gestoDetectado || "no_identificable"}`
+    `⚠️ SASHA ASISTENCIA — gesto NO coincide, se registró de todas formas (ya no se bloquea) | ${telefono} | esperado=${retoEsperado} detectado=${validacionFoto?.gestoDetectado || "no_identificable"}`
   );
 
 } else {
@@ -1665,56 +1686,39 @@ if (!gestoVerificado) {
   );
 }
 
-// El reto (haya coincidido o no) ya cumplió su función para este
-// intento — se libera para no dejar al trabajador "atascado" en
-// un reto viejo en su próximo movimiento.
-eliminarRetoFotografico(telefono);
-
 
     // ======================================================
-    // D. SI YA TIENE JORNADA ABIERTA -> REGISTRAR SALIDA
+    // D. SI YA TENÍA JORNADA ABIERTA -> ERA UNA SALIDA
     // ======================================================
 
-    if (estado.jornadaAbierta === true) {
-
-      const salida =
-        await registrarSalida({
-          telefono: telefono,
-          foto: foto,
-          messageId: messageId,
-          gestoVerificado: gestoVerificado
-        });
-
+    if (esSalida) {
 
       if (
-        salida &&
-        salida.tipo === "salida_registrada"
+        registro &&
+        registro.tipo === "salida_registrada"
       ) {
 
         return {
-          ...salida,
+          ...registro,
+          gestoVerificado,
           mensaje:
-            mensajeSalidaRegistrada(salida)
+            mensajeSalidaRegistrada(registro)
         };
       }
 
 
-      return salida;
+      return {
+        ...registro,
+        gestoVerificado
+      };
     }
 
 
     // ======================================================
-    // E. SI NO TIENE JORNADA ABIERTA -> REGISTRAR ENTRADA
+    // E. SI NO TENÍA JORNADA ABIERTA -> ERA UNA ENTRADA
     // ======================================================
 
-    const entrada =
-      await registrarEntrada({
-        telefono: telefono,
-        foto: foto,
-        messageId: messageId,
-        texto: texto,
-        gestoVerificado: gestoVerificado
-      });
+    const entrada = registro;
 
 
     // ------------------------------------------------------
@@ -1728,6 +1732,7 @@ eliminarRetoFotografico(telefono);
 
       return {
         ...entrada,
+        gestoVerificado,
         mensaje:
           mensajeEntradaRegistrada(entrada)
       };
@@ -1743,13 +1748,19 @@ eliminarRetoFotografico(telefono);
       entrada.tipo === "requiere_proyecto"
     ) {
 
-      guardarPendienteProyecto(
-        telefono,
-        entrada
-      );
+      // v3 — FIX: acá se llamaba a guardarPendienteProyecto(), una
+      // función que NUNCA existió en este archivo — cualquier
+      // trabajador con más de un proyecto activo que llegara a este
+      // punto hacía crashear procesarAsistencia() con un
+      // ReferenceError real (justo el tipo de excepción que produce
+      // el "⚠️ No pude procesar la asistencia en este momento."
+      // genérico). No hacía falta de todos modos: registrarEntrada()
+      // ya guarda el pendiente internamente (pendientesProyecto.set)
+      // antes de devolver este resultado. Se elimina la llamada rota.
 
       return {
         ...entrada,
+        gestoVerificado,
         mensaje:
           mensajeSeleccionProyecto(entrada)
       };
@@ -1760,7 +1771,10 @@ eliminarRetoFotografico(telefono);
     // CUALQUIER OTRO RESULTADO
     // ------------------------------------------------------
 
-    return entrada;
+    return {
+      ...entrada,
+      gestoVerificado
+    };
   }   
 
     // ========================================================
