@@ -775,19 +775,10 @@ async function fechaSigueDisponibleAgenda(fechaISO) {
   }
 
   try {
-    const [year, month, day] = fechaISO.split("-").map(Number);
-
-    // La visita de clientes siempre es a las 09:00.
-    // Construimos la fecha directamente en hora local de Costa Rica.
-    const startDate = new Date(
-      year,
-      month - 1,
-      day,
-      9,
-      0,
-      0,
-      0
-    );
+// La visita de clientes siempre es a las 09:00 hora Costa Rica.
+// Usamos offset explícito para no depender de la zona horaria de Railway.
+const startDate = new Date(`${fechaISO}T09:00:00-06:00`);
+    
 
     const resultado =
       await verificarDisponibilidadExacta(startDate);
