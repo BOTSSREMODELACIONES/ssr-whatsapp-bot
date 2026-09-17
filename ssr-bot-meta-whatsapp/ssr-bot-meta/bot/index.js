@@ -133,7 +133,6 @@ const {
   cancelEventByNameAndDate,
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
-  proximosDiasHabiles,
 } = require("./calendar");
 
 const { sendVisitConfirmation }      = require("./email");
@@ -1213,32 +1212,112 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
         return `📭 No encontré ninguna cita${q}${c}.\n\nVerificá el nombre o la fecha e intentá de nuevo.`;
       }
 
-      // Notificar a los clientes afectados
-      let notificados = 0;
-      if (intent.avisarCliente !== false) {
-        for (const ev of result.events) {
-          if (ev.clientPhone && !SUPERVISORES.includes(ev.clientPhone)) {
-            const msg = `Hola, le escribimos de *SS Remodelaciones* 🏗️\n\nLe informamos que su visita técnica del *${ev.dateStr}* fue cancelada.\n\nSi desea reprogramarla, con gusto le atendemos por este medio. ¡Disculpe las molestias! 🙏`;
-            sendText(ev.clientPhone, msg).catch(() => {});
-            notificados++;
-          }
+// ── Cancelación confirmada por Google Calendar ──────────────────────────
+// calendar.js devuelve:
+// result.deleted
+// result.events = [{ id, summary, date }]
+//
+// No asumimos clientPhone ni dateStr dentro del evento cancelado.
+
+let clienteNotificado = false;
+let telefonoCliente = null;
+
+// Intentar recuperar el teléfono del cliente únicamente cuando
+// tenemos un nombre confiable.
+if (
+  intent.avisarCliente !== false &&
+  intent.nombre
+) {
+  try {
+    const rowsMem = await memoria
+      .buscarPorNombre(intent.nombre, 5)
+      .catch(() => []);
+
+    if (rowsMem.length > 0) {
+      const tel = String(rowsMem[0][1] || "")
+        .replace(/\D/g, "");
+
+      if (tel.length >= 8) {
+        telefonoCliente = tel.startsWith("506")
+          ? `+${tel}`
+          : `+506${tel}`;
+      }
+    }
+
+    if (!telefonoCliente) {
+      const crmRows = await memoria
+        .buscarClienteEnCRM(intent.nombre)
+        .catch(() => []);
+
+      if (crmRows.length > 0) {
+        const tel = String(crmRows[0][1] || "")
+          .replace(/\D/g, "");
+
+        if (tel.length >= 8) {
+          telefonoCliente = tel.startsWith("506")
+            ? `+${tel}`
+            : `+506${tel}`;
         }
       }
+    }
 
-      const lineas = result.events.map(e => `• ${e.summary} — ${e.dateStr}`).join("\n");
-      const plural = result.deleted > 1;
-      return [
-        `✅ *${plural ? `${result.deleted} citas canceladas` : "Cita cancelada"}*:`,
+    if (
+      telefonoCliente &&
+      !SUPERVISORES.includes(telefonoCliente)
+    ) {
+      const fechasCanceladas = result.events
+        .map(ev => ev.date)
+        .filter(Boolean)
+        .join(", ");
+
+      const msgCliente = [
+        `Hola, le escribimos de *SS Remodelaciones* 🏗️`,
         ``,
-        lineas,
+        `Le informamos que su visita técnica${fechasCanceladas ? ` del *${fechasCanceladas}*` : ""} fue cancelada.`,
         ``,
-        intent.avisarCliente === false
-          ? `🔕 Cliente NO notificado (como pediste).`
-          : notificados > 0
-            ? `✉️ Cliente notificado automáticamente por WhatsApp.`
-            : `ℹ️ No se pudo notificar al cliente (sin teléfono en el evento).`,
-        `👤 Por: ${quien}`,
+        `Si desea reprogramarla, con gusto le atendemos por este medio.`,
+        `¡Disculpe las molestias! 🙏`,
       ].join("\n");
+
+      await sendText(telefonoCliente, msgCliente);
+
+      clienteNotificado = true;
+    }
+
+  } catch (err) {
+    console.warn(
+      "⚠️ La cita se canceló, pero no se pudo notificar al cliente:",
+      err.message
+    );
+  }
+}
+
+
+// ── Respuesta al supervisor ─────────────────────────────────────────────
+
+const lineas = result.events
+  .map(ev =>
+    `• ${ev.summary || intent.nombre || "Visita técnica"} — ${ev.date || "fecha no disponible"}`
+  )
+  .join("\n");
+
+const plural = result.deleted > 1;
+
+return [
+  `✅ *${plural ? `${result.deleted} citas canceladas` : "Cita cancelada"}*:`,
+  ``,
+  lineas,
+  ``,
+  intent.avisarCliente === false
+    ? `🔕 Cliente NO notificado (como pediste).`
+    : clienteNotificado
+      ? `✉️ Cliente notificado automáticamente por WhatsApp.`
+      : `ℹ️ La cita fue cancelada, pero no encontré un teléfono confiable para notificar automáticamente al cliente.`,
+  `👤 Por: ${quien}`,
+]
+  .filter(Boolean)
+  .join("\n");
+      
     } catch (err) {
       console.error("❌ Error cancelando cita:", err.message);
       return `❌ Error al cancelar la cita: ${err.message}`;
