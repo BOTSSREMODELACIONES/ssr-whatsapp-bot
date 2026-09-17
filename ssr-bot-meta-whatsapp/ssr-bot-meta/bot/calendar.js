@@ -378,8 +378,7 @@ async function getAvailableSlots(dayName) {
     const events = (response.data.items || []).filter(e => e.status !== "cancelled");
 
     console.log(`📅 Eventos encontrados para ${dayName} (${dateLabel}): ${events.length}`);
-
-    const occupiedRanges = events.map(event => {
+        const occupiedRanges = events.map(event => {
       if (event.start.date && !event.start.dateTime) {
         console.log(`🔒 Día completo bloqueado: "${event.summary}"`);
         return { startMin: 0, endMin: 24 * 60, allDay: true };
@@ -410,6 +409,191 @@ async function getAvailableSlots(dayName) {
   } catch (err) {
     console.error("❌ Error consultando disponibilidad:", err.message);
     return { date: null, dateLabel: null, slots: [] };
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v19 — FECHAS REALES DISPONIBLES PARA SELECTOR DE WHATSAPP
+//
+// Devuelve únicamente días REALMENTE disponibles en Google Calendar.
+// Reglas SSR:
+//   • lunes, martes y viernes
+//   • único horario: 9:00 a.m.
+//   • nunca ofrece hoy
+//   • revisa eventos/bloqueos reales del calendario
+//   • horizonte configurable (30 días por defecto)
+//
+// Esta función NO agenda nada.
+// Solo construye el catálogo seguro que index.js mostrará al cliente.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getAvailableVisitDates({ daysAhead = 30, maxDates = 10 } = {}) {
+  try {
+    const calendar = await getCalendarClient();
+    const now = nowCR();
+
+    const firstDay = new Date(now);
+    firstDay.setHours(0, 0, 0, 0);
+    firstDay.setDate(firstDay.getDate() + 1);
+
+    const lastDay = new Date(firstDay);
+    lastDay.setDate(lastDay.getDate() + daysAhead - 1);
+    lastDay.setHours(23, 59, 59, 999);
+
+    console.log(
+      `📅 getAvailableVisitDates: buscando disponibilidad desde ` +
+      `${firstDay.toLocaleDateString("es-CR")} hasta ` +
+      `${lastDay.toLocaleDateString("es-CR")}`
+    );
+
+    const response = await calendar.events.list({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      timeMin: firstDay.toISOString(),
+      timeMax: lastDay.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const events = (response.data.items || []).filter(
+      e => e.status !== "cancelled"
+    );
+
+    console.log(
+      `📅 getAvailableVisitDates: ${events.length} evento(s) encontrados en el período`
+    );
+
+    const availableDates = [];
+    const cursor = new Date(firstDay);
+
+    while (cursor <= lastDay && availableDates.length < maxDates) {
+      if (!esDiaLaborable(cursor)) {
+        cursor.setDate(cursor.getDate() + 1);
+        continue;
+      }
+
+      const slotStart = new Date(cursor);
+      slotStart.setHours(9, 0, 0, 0);
+
+      const dayStart = new Date(cursor);
+      dayStart.setHours(0, 0, 0, 0);
+
+      const dayEnd = new Date(cursor);
+      dayEnd.setHours(23, 59, 59, 999);
+
+      const dayEvents = events.filter(event => {
+        // Eventos all-day usan YYYY-MM-DD y necesitan comparación por fecha CR.
+        if (event.start?.date && !event.start?.dateTime) {
+          const ymd =
+            `${cursor.getFullYear()}-` +
+            `${String(cursor.getMonth() + 1).padStart(2, "0")}-` +
+            `${String(cursor.getDate()).padStart(2, "0")}`;
+          return event.start.date === ymd;
+        }
+
+        if (!event.start?.dateTime) return false;
+        const eventStart = new Date(event.start.dateTime);
+        return eventStart >= dayStart && eventStart <= dayEnd;
+      });
+
+      let blocked = false;
+      let blockedBy = null;
+
+      for (const event of dayEvents) {
+        if (event.start?.date && !event.start?.dateTime) {
+          blocked = true;
+          blockedBy = event.summary || "Día bloqueado";
+          break;
+        }
+
+        if (!event.start?.dateTime || !event.end?.dateTime) continue;
+
+        const eventStartMin = toCRMinutes(event.start.dateTime);
+        let eventEndMin = toCRMinutes(event.end.dateTime);
+        if (eventEndMin < eventStartMin) eventEndMin = 23 * 60 + 59;
+
+        const slotStartMin = 9 * 60;
+        const slotEndMin = 10 * 60;
+
+        const overlaps =
+          (slotStartMin - 30) < eventEndMin &&
+          (slotEndMin + 30) > eventStartMin;
+
+        if (overlaps) {
+          blocked = true;
+          blockedBy = event.summary || "Evento existente";
+          break;
+        }
+      }
+
+      const isoDate =
+        `${cursor.getFullYear()}-` +
+        `${String(cursor.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(cursor.getDate()).padStart(2, "0")}`;
+
+      const label = cursor.toLocaleDateString("es-CR", {
+        timeZone: "America/Costa_Rica",
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+      });
+
+      if (!blocked) {
+        availableDates.push({
+          date: isoDate,
+          label,
+          hour: "09:00",
+          timestamp: slotStart.getTime(),
+        });
+        console.log(`✅ Disponible: ${label} — 9:00 a.m.`);
+      } else {
+        console.log(`⛔ No disponible: ${label} — bloqueado por "${blockedBy}"`);
+      }
+
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    const weeks = {};
+
+    for (const item of availableDates) {
+      const d = new Date(`${item.date}T12:00:00`);
+      const monday = new Date(d);
+      const day = monday.getDay();
+      const diff = day === 0 ? -6 : 1 - day;
+      monday.setDate(monday.getDate() + diff);
+      monday.setHours(0, 0, 0, 0);
+
+      const weekKey =
+        `${monday.getFullYear()}-` +
+        `${String(monday.getMonth() + 1).padStart(2, "0")}-` +
+        `${String(monday.getDate()).padStart(2, "0")}`;
+
+      if (!weeks[weekKey]) {
+        weeks[weekKey] = { weekStart: weekKey, dates: [] };
+      }
+      weeks[weekKey].dates.push(item);
+    }
+
+    const result = {
+      ok: true,
+      generatedAt: now.toISOString(),
+      availableDates,
+      weeks: Object.values(weeks),
+    };
+
+    console.log(
+      `✅ getAvailableVisitDates: ${availableDates.length} fecha(s) disponible(s) ` +
+      `en ${result.weeks.length} semana(s)`
+    );
+
+    return result;
+  } catch (err) {
+    console.error("❌ getAvailableVisitDates error:", err.message);
+    return {
+      ok: false,
+      error: err.message,
+      availableDates: [],
+      weeks: [],
+    };
   }
 }
 
@@ -573,377 +757,572 @@ async function cancelEventByNameAndDate({ nameHint, dateHint }) {
     await calendar.events.delete({
       calendarId: process.env.GOOGLE_CALENDAR_ID,
       eventId: event.id,
-      sendUpdates: "none",
+            sendUpdates: "none",
     });
 
-    console.log(`🗑️ Evento cancelado por supervisor: "${event.summary}" (${dateStr})`);
     deleted.push({
-      summary:     event.summary,
-      dateStr,
-      clientPhone: extraerTelefonoDeEvento(event.description),
+      id: event.id,
+      summary: event.summary,
+      date: dateStr,
     });
+
+    console.log(`🗑️ Evento cancelado: "${event.summary}" — ${dateStr}`);
   }
-
-  return { deleted: deleted.length, events: deleted };
-}
-
-async function rescheduleEventByNameAndDate({ nameHint, dateHint, newDateHint, newHour }) {
-  const { calendar, matched } = await buscarEventos({ nameHint, dateHint });
-
-  if (matched.length === 0) {
-    return { moved: 0, ambiguous: false, events: [] };
-  }
-
-  if (matched.length > 1) {
-    const candidatos = matched.map(e => ({
-      summary: e.summary,
-      dateStr: formatearFechaEvento(e.start.dateTime || e.start.date),
-    }));
-    return { moved: 0, ambiguous: true, events: candidatos };
-  }
-
-  const event = matched[0];
-  const oldDateStr = formatearFechaEvento(event.start.dateTime || event.start.date);
-
-  let nuevaFecha = newDateHint ? resolveDateHint(newDateHint) : null;
-
-  if (!nuevaFecha && !newHour) {
-    return { moved: 0, ambiguous: false, events: [], error: "sin_nueva_fecha" };
-  }
-
-  if (!nuevaFecha) {
-    nuevaFecha = new Date(new Date(event.start.dateTime || event.start.date)
-      .toLocaleString("en-US", { timeZone: "America/Costa_Rica" }));
-  }
-
-  let hour = 9, minute = 0;
-  if (newHour) {
-    const parsed = parsearHora(newHour);
-    hour   = parsed.hour;
-    minute = parsed.minute;
-  } else if (event.start.dateTime) {
-    const minCR = toCRMinutes(event.start.dateTime);
-    hour   = Math.floor(minCR / 60);
-    minute = minCR % 60;
-  }
-
-  nuevaFecha.setHours(hour, minute, 0, 0);
-
-  const now = nowCR();
-  if (nuevaFecha <= now) {
-    return { moved: 0, ambiguous: false, events: [], error: "fecha_pasada" };
-  }
-
-  if (!esDiaLaborable(nuevaFecha)) {
-    console.warn(`⛔ rescheduleEventByNameAndDate: destino "${newDateHint}" cae en día NO laborable`);
-    return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: "dia_no_laborable", conflicto: null };
-  }
-
-  const dispo = await verificarDisponibilidadExacta(nuevaFecha);
-  if (!dispo.disponible) {
-    return { moved: 0, ambiguous: false, events: [], error: "destino_ocupado", motivo: dispo.motivo, conflicto: dispo.conflicto };
-  }
-
-  const nuevoFin = new Date(nuevaFecha.getTime() + 60 * 60 * 1000);
-
-  await calendar.events.patch({
-    calendarId: process.env.GOOGLE_CALENDAR_ID,
-    eventId:    event.id,
-    resource: {
-      start: { dateTime: toLocalDateTimeString(nuevaFecha), timeZone: "America/Costa_Rica" },
-      end:   { dateTime: toLocalDateTimeString(nuevoFin),   timeZone: "America/Costa_Rica" },
-    },
-    sendUpdates: "none",
-  });
-
-  const newDateStr = nuevaFecha.toLocaleString("es-CR", {
-    timeZone: "America/Costa_Rica",
-    weekday: "long", day: "numeric", month: "long",
-    hour: "2-digit", minute: "2-digit",
-  });
-
-  console.log(`🔄 Evento reagendado por supervisor: "${event.summary}" ${oldDateStr} → ${newDateStr}`);
 
   return {
-    moved: 1,
-    ambiguous: false,
-    events: [{
-      summary:     event.summary,
-      oldDateStr,
-      newDateStr,
-      clientPhone: extraerTelefonoDeEvento(event.description),
-    }],
+    deleted: deleted.length,
+    events: deleted,
   };
 }
 
-function parsearHora(str) {
-  const s = String(str || "").trim().toLowerCase();
-  const m = s.match(/(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?/);
-  if (!m) return { hour: 9, minute: 0 };
+// ── Resolver pista de fecha para búsquedas/cancelaciones ─────────────────────
+function resolveDateHint(dateHint) {
+  if (!dateHint) return null;
 
-  let hour   = parseInt(m[1]) || 9;
-  const minute = parseInt(m[2]) || 0;
-  const sufijo = m[3] || "";
+  const parsed = parseSpecificDate(dateHint);
+  if (parsed) return parsed.date;
 
-  if (/p/.test(sufijo) && hour < 12) hour += 12;
-  if (/a/.test(sufijo) && hour === 12) hour = 0;
-  if (!sufijo && hour >= 1 && hour <= 6) hour += 12;
+  const normalized = String(dateHint)
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 
-  if (hour < 7)  hour = 9;
-  if (hour > 17) hour = 16;
+  const DAY_MAP = {
+    domingo: 0,
+    lunes: 1,
+    martes: 2,
+    miercoles: 3,
+    jueves: 4,
+    viernes: 5,
+    sabado: 6,
+  };
 
-  return { hour, minute };
+  const targetDay = DAY_MAP[normalized];
+  if (targetDay === undefined) return null;
+
+  const now = nowCR();
+  const result = new Date(now);
+  result.setHours(0, 0, 0, 0);
+
+  let diff = (targetDay - result.getDay() + 7) % 7;
+  if (diff === 0) diff = 7;
+
+  result.setDate(result.getDate() + diff);
+  return result;
 }
 
-async function listUpcomingEvents({ dateHint } = {}) {
-  const calendar = await getCalendarClient();
+// ── Reagendar evento por nombre/fecha ────────────────────────────────────────
+async function rescheduleEventByNameAndDate({
+  nameHint,
+  dateHint,
+  newDay,
+  newHour,
+}) {
+  try {
+    const { calendar, matched } = await buscarEventos({
+      nameHint,
+      dateHint,
+    });
 
-  const now = new Date();
-  let timeMin = now.toISOString();
-  let timeMax = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString();
-
-  if (dateHint) {
-    const targetDate = resolveDateHint(dateHint);
-    if (targetDate) {
-      const dayStart = new Date(targetDate);
-      dayStart.setHours(0, 0, 0, 0);
-      const dayEnd = new Date(targetDate);
-      dayEnd.setHours(23, 59, 59, 999);
-      timeMin = dayStart.toISOString();
-      timeMax = dayEnd.toISOString();
+    if (matched.length === 0) {
+      return {
+        updated: 0,
+        events: [],
+        reason: "not_found",
+      };
     }
-  }
 
-  const response = await calendar.events.list({
-    calendarId: process.env.GOOGLE_CALENDAR_ID,
-    timeMin,
-    timeMax,
-    singleEvents: true,
-    orderBy: "startTime",
-    maxResults: 20,
-  });
+    const target = matched[0];
 
-  const events = (response.data.items || []).filter(e => e.status !== "cancelled");
+    const newStart = getNextAvailableDate(
+      newDay,
+      newHour || "09:00"
+    );
 
-  return events.map(e => ({
-    summary: e.summary,
-    dateStr: formatearFechaEvento(e.start.dateTime || e.start.date),
-    clientPhone: extraerTelefonoDeEvento(e.description),
-  }));
-}
+    if (!esDiaLaborable(newStart)) {
+      console.warn(
+        `⛔ Reagendamiento rechazado: ${newStart.toLocaleDateString(
+          "es-CR",
+          {
+            timeZone: "America/Costa_Rica",
+            weekday: "long",
+            day: "numeric",
+            month: "long",
+          }
+        )} no es día laborable`
+      );
 
-// ── v18 (16 sept 2026) — NUEVO: listado de visitas de un día con TODOS sus
-// datos (nombre, teléfono, hora, proyecto, zona), para el módulo de
-// confirmación de visitas (confirmaciones.js). A diferencia de
-// listUpcomingEvents() (pensado para que un supervisor pregunte "qué citas
-// hay" y solo necesita un resumen de texto), esta función devuelve los
-// campos estructurados que createVisitEvent() ya escribe en la descripción
-// del evento, parseados con parseDescripcionEvento(). Se filtra únicamente
-// a eventos cuyo summary contiene "Visita SSR" — el prefijo fijo que
-// createVisitEvent() siempre usa — para no confundir con bloqueos internos
-// u otros eventos que un administrador haya puesto directo en el calendario
-// y que no son visitas de cliente.
-async function listVisitsForDate(dateHint) {
-  const calendar = await getCalendarClient();
+      return {
+        updated: 0,
+        events: [],
+        reason: "dia_no_laborable",
+      };
+    }
 
-  const targetDate = resolveDateHint(dateHint);
-  if (!targetDate) return [];
+    const disponibilidad =
+      await verificarDisponibilidadExacta(newStart);
 
-  const dayStart = new Date(targetDate);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(targetDate);
-  dayEnd.setHours(23, 59, 59, 999);
+    if (!disponibilidad.disponible) {
+      return {
+        updated: 0,
+        events: [],
+        reason: disponibilidad.motivo,
+        conflict: disponibilidad.conflicto || null,
+      };
+    }
 
-  const response = await calendar.events.list({
-    calendarId: process.env.GOOGLE_CALENDAR_ID,
-    timeMin: dayStart.toISOString(),
-    timeMax: dayEnd.toISOString(),
-    singleEvents: true,
-    orderBy: "startTime",
-  });
+    const newEnd = new Date(
+      newStart.getTime() + 60 * 60 * 1000
+    );
 
-  const events = (response.data.items || []).filter(e =>
-    e.status !== "cancelled" &&
-    (e.summary || "").includes("Visita SSR")
-  );
+    const patch = {
+      start: {
+        dateTime: toLocalDateTimeString(newStart),
+        timeZone: "America/Costa_Rica",
+      },
+      end: {
+        dateTime: toLocalDateTimeString(newEnd),
+        timeZone: "America/Costa_Rica",
+      },
+    };
 
-  return events.map(e => {
-    const info = parseDescripcionEvento(e.description);
-    const startRaw = e.start.dateTime || e.start.date;
+    const response = await calendar.events.patch({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      eventId: target.id,
+      requestBody: patch,
+      sendUpdates: "none",
+    });
 
-    const hourStr = e.start.dateTime
-      ? new Date(e.start.dateTime).toLocaleString("es-CR", {
-          timeZone: "America/Costa_Rica", hour: "numeric", minute: "2-digit", hour12: true,
-        })
-      : "";
+    const startRaw =
+      response.data.start?.dateTime ||
+      response.data.start?.date;
+
+    const result = {
+      id: response.data.id,
+      summary: response.data.summary,
+      date: formatearFechaEvento(startRaw),
+    };
+
+    console.log(
+      `🔄 Evento reagendado: "${response.data.summary}" → ${result.date}`
+    );
 
     return {
-      eventId:  e.id,
-      summary:  e.summary,
-      dateStr:  formatearFechaEvento(startRaw),
-      hourStr,
-      name:     info.cliente || (e.summary || "").replace(/^🏗️ Visita SSR — /, "").split("|")[0].trim(),
-      phone:    info.phone || extraerTelefonoDeEvento(e.description),
-      email:    info.email,
-      project:  info.proyecto,
-      zone:     info.zona,
+      updated: 1,
+      events: [result],
     };
-  });
+
+  } catch (err) {
+    console.error(
+      "❌ Error reagendando evento:",
+      err.message
+    );
+
+    return {
+      updated: 0,
+      events: [],
+      reason: "error_calendario",
+      error: err.message,
+    };
+  }
 }
 
-// ── v18 (16 sept 2026) — NUEVO: obtener un evento puntual por su ID.
-// Se usa como respaldo en confirmaciones.js: si el proceso se reinició
-// entre el envío de la pregunta de confirmación (7pm) y la respuesta del
-// cliente (que puede llegar horas después), la caché en memoria de ese
-// módulo se pierde — esta función permite reconstruir los datos de la
-// visita directamente desde Calendar usando el eventId que ya viaja en el
-// ID del botón, sin depender de que el proceso siga siendo el mismo.
-async function getEventById(eventId) {
-  if (!eventId) return null;
+// ── Listar próximos eventos ──────────────────────────────────────────────────
+async function listUpcomingEvents({
+  days = 30,
+  maxResults = 50,
+} = {}) {
   try {
     const calendar = await getCalendarClient();
+
+    const now = new Date();
+    const future = new Date(
+      now.getTime() + days * 24 * 60 * 60 * 1000
+    );
+
+    const response = await calendar.events.list({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      timeMin: now.toISOString(),
+      timeMax: future.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+      maxResults,
+    });
+
+    const events = (response.data.items || [])
+      .filter(e => e.status !== "cancelled")
+      .map(event => {
+        const startRaw =
+          event.start?.dateTime ||
+          event.start?.date;
+
+        return {
+          id: event.id,
+          summary: event.summary || "Sin título",
+          description: event.description || "",
+          location: event.location || "",
+          start: startRaw,
+          date: startRaw
+            ? formatearFechaEvento(startRaw)
+            : "",
+        };
+      });
+
+    return events;
+
+  } catch (err) {
+    console.error(
+      "❌ Error listando próximos eventos:",
+      err.message
+    );
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v17 — LISTAR VISITAS DE UNA FECHA ESPECÍFICA
+//
+// Usado por módulos internos/administrativos para consultar las visitas
+// existentes de un día concreto.
+// ─────────────────────────────────────────────────────────────────────────────
+async function listVisitsForDate(dateInput) {
+  try {
+    const calendar = await getCalendarClient();
+
+    let targetDate;
+
+    if (dateInput instanceof Date) {
+      targetDate = new Date(dateInput);
+    } else {
+      const parsed = parseSpecificDate(
+        String(dateInput || "")
+      );
+
+      if (!parsed) {
+        return [];
+      }
+
+      targetDate = parsed.date;
+    }
+
+    const dayStart = new Date(targetDate);
+    dayStart.setHours(0, 0, 0, 0);
+
+    const dayEnd = new Date(targetDate);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const response = await calendar.events.list({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      timeMin:
+        toLocalDateTimeString(dayStart) + "-06:00",
+      timeMax:
+        toLocalDateTimeString(dayEnd) + "-06:00",
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const events = (response.data.items || [])
+      .filter(e => e.status !== "cancelled")
+      .map(event => {
+        const startRaw =
+          event.start?.dateTime ||
+          event.start?.date;
+
+        const datos =
+          parseDescripcionEvento(
+            event.description || ""
+          );
+
+        return {
+          id: event.id,
+          summary: event.summary || "",
+          description: event.description || "",
+          location: event.location || "",
+          start: startRaw,
+          end:
+            event.end?.dateTime ||
+            event.end?.date ||
+            null,
+          date: startRaw
+            ? formatearFechaEvento(startRaw)
+            : "",
+          cliente: datos.cliente,
+          phone:
+            datos.phone ||
+            extraerTelefonoDeEvento(
+              event.description || ""
+            ),
+          email: datos.email,
+          proyecto: datos.proyecto,
+          zona: datos.zona,
+        };
+      });
+
+    return events;
+
+  } catch (err) {
+    console.error(
+      "❌ listVisitsForDate error:",
+      err.message
+    );
+    return [];
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v18 — OBTENER EVENTO POR ID
+//
+// Se utiliza especialmente desde confirmaciones.js para volver a consultar
+// una visita concreta antes de enviar recordatorios/confirmaciones.
+// ─────────────────────────────────────────────────────────────────────────────
+async function getEventById(eventId) {
+  if (!eventId) return null;
+
+  try {
+    const calendar = await getCalendarClient();
+
     const response = await calendar.events.get({
       calendarId: process.env.GOOGLE_CALENDAR_ID,
       eventId,
     });
-    return response.data;
+
+    const event = response.data;
+
+    if (!event || event.status === "cancelled") {
+      return null;
+    }
+
+    const startRaw =
+      event.start?.dateTime ||
+      event.start?.date;
+
+    const datos =
+      parseDescripcionEvento(
+        event.description || ""
+      );
+
+    return {
+      id: event.id,
+      summary: event.summary || "",
+      description: event.description || "",
+      location: event.location || "",
+      start: startRaw,
+      end:
+        event.end?.dateTime ||
+        event.end?.date ||
+        null,
+      date: startRaw
+        ? formatearFechaEvento(startRaw)
+        : "",
+      cliente: datos.cliente,
+      phone:
+        datos.phone ||
+        extraerTelefonoDeEvento(
+          event.description || ""
+        ),
+      email: datos.email,
+      proyecto: datos.proyecto,
+      zona: datos.zona,
+      htmlLink: event.htmlLink || null,
+    };
+
   } catch (err) {
-    console.warn(`⚠️ getEventById: no se pudo obtener el evento ${eventId}:`, err.message);
+    if (err?.code === 404) {
+      return null;
+    }
+
+    console.error(
+      "❌ getEventById error:",
+      err.message
+    );
     return null;
   }
 }
 
-function resolveDateHint(hint) {
-  if (!hint) return null;
-
-  const s = hint.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const now = nowCR();
-
-  if (s === "hoy") return now;
-  if (s === "manana" || s === "mañana") {
-    const d = new Date(now);
-    d.setDate(d.getDate() + 1);
-    return d;
-  }
-  if (s === "pasado manana" || s === "pasado mañana") {
-    const d = new Date(now);
-    d.setDate(d.getDate() + 2);
-    return d;
-  }
-
-  const DAY_MAP = { lunes: 1, martes: 2, miercoles: 3, jueves: 4, viernes: 5, sabado: 6, domingo: 0 };
-  const sDia = s.replace(/^(el|este|proximo|próximo|la)\s+/, "");
-  if (DAY_MAP[sDia] !== undefined) {
-    const target = DAY_MAP[sDia];
-    const d = new Date(now);
-    let diff = (target - d.getDay() + 7) % 7;
-    if (diff === 0) diff = 7;
-    d.setDate(d.getDate() + diff);
-    return d;
-  }
-
-  const parsed = parseSpecificDate(sDia) || parseSpecificDate(s);
-  if (!parsed) return null;
-  const d = parsed.date;
-  if (d < now && !parsed.explicitYear) {
-    d.setFullYear(d.getFullYear() + 1);
-  }
-  return d;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// createVisitEvent
+// CREAR VISITA
 // ─────────────────────────────────────────────────────────────────────────────
-async function createVisitEvent({ name, phone, project, zone, day, hour, wazeLink, clientEmail, skipAvailabilityCheck = false }) {
-  if (!process.env.GOOGLE_SERVICE_ACCOUNT) throw new Error("GOOGLE_SERVICE_ACCOUNT no configurado");
-  if (!process.env.GOOGLE_CALENDAR_ID)     throw new Error("GOOGLE_CALENDAR_ID no configurado");
+async function createVisitEvent({
+  name,
+  phone,
+  email,
+  project,
+  zone,
+  day,
+  hour = "09:00",
+  notes = "",
+}) {
+  try {
+    const calendar = await getCalendarClient();
 
-  const calendar = await getCalendarClient();
+    const startDate =
+      getNextAvailableDate(
+        day,
+        hour || "09:00"
+      );
 
-  const startDate = getNextAvailableDate(day, hour);
-
-  if (!skipAvailabilityCheck) {
+    // ── BLINDAJE: solo lunes/martes/viernes ───────────────────────────────
     if (!esDiaLaborable(startDate)) {
-      console.warn(`⛔ createVisitEvent abortado: "${day}" cae en día NO laborable (${startDate.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday: "long" })})`);
+      const weekday =
+        startDate.toLocaleDateString(
+          "es-CR",
+          {
+            timeZone: "America/Costa_Rica",
+            weekday: "long",
+          }
+        );
+
+      console.warn(
+        `⛔ createVisitEvent: fecha rechazada porque cae en ${weekday}`
+      );
+
       return {
-        ok: false,
-        motivo: "dia_no_laborable",
-        conflicto: null,
-        startDate,
+        success: false,
+        reason: "dia_no_laborable",
+        date: startDate,
       };
     }
 
-    const dispo = await verificarDisponibilidadExacta(startDate, phone);
-    if (!dispo.disponible) {
-      console.warn(`⛔ createVisitEvent abortado: ${dispo.motivo} (${dispo.conflicto || "—"})`);
-      return {
-        ok: false,
-        motivo: dispo.motivo,
-        conflicto: dispo.conflicto || null,
+    // ── Verificación FINAL inmediatamente antes de crear ──────────────────
+    // Se pasa el teléfono para que una eventual cita propia del mismo
+    // cliente no se interprete como un conflicto ajeno.
+    const disponibilidad =
+      await verificarDisponibilidadExacta(
         startDate,
+        phone
+      );
+
+    if (!disponibilidad.disponible) {
+      console.warn(
+        `⚠️ Intento de agendar chocó con un bloqueo/cita existente (${disponibilidad.motivo})`
+      );
+
+      return {
+        success: false,
+        reason: disponibilidad.motivo,
+        conflict:
+          disponibilidad.conflicto || null,
+        date: startDate,
       };
     }
+
+    // ── Idempotencia por cliente ──────────────────────────────────────────
+    // Si este cliente ya tenía una cita futura, se elimina antes de insertar
+    // la nueva. Esto evita duplicados por reintentos del webhook.
+    await cancelClientEvents(
+      calendar,
+      phone
+    );
+
+    const endDate = new Date(
+      startDate.getTime() + 60 * 60 * 1000
+    );
+
+    const safeName =
+      String(name || "Cliente").trim();
+
+    const safePhone =
+      String(phone || "").trim();
+
+    const safeEmail =
+      String(email || "").trim();
+
+    const safeProject =
+      String(project || "").trim();
+
+    const safeZone =
+      String(zone || "").trim();
+
+    const safeNotes =
+      String(notes || "").trim();
+
+    const summary =
+      `🏗️ Visita SSR — ${safeName}` +
+      (safeZone ? ` | ${safeZone}` : "");
+
+    const descriptionLines = [
+      `👤 Cliente: ${safeName}`,
+      `📱 WhatsApp: ${safePhone}`,
+      `📧 Email cliente: ${safeEmail || "No indicado"}`,
+      `🏗️ Proyecto: ${safeProject || "No indicado"}`,
+      `📍 Zona: ${safeZone || "No indicada"}`,
+      "",
+      "Visita confirmada automáticamente por Sasha.",
+    ];
+
+    if (safeNotes) {
+      descriptionLines.push(
+        "",
+        `📝 Notas: ${safeNotes}`
+      );
+    }
+
+    const event = {
+      summary,
+      description:
+        descriptionLines.join("\n"),
+      location: safeZone || undefined,
+      start: {
+        dateTime:
+          toLocalDateTimeString(startDate),
+        timeZone: "America/Costa_Rica",
+      },
+      end: {
+        dateTime:
+          toLocalDateTimeString(endDate),
+        timeZone: "America/Costa_Rica",
+      },
+    };
+
+    const response =
+      await calendar.events.insert({
+        calendarId:
+          process.env.GOOGLE_CALENDAR_ID,
+        requestBody: event,
+        sendUpdates: "none",
+      });
+
+    console.log(
+      `✅ Nueva visita agendada: "${summary}" — ${formatearFechaEvento(
+        response.data.start?.dateTime
+      )}`
+    );
+
+    return {
+      success: true,
+      eventId: response.data.id,
+      htmlLink:
+        response.data.htmlLink || null,
+      date: startDate,
+      formattedDate:
+        formatearFechaEvento(
+          response.data.start?.dateTime
+        ),
+      event: response.data,
+    };
+
+  } catch (err) {
+    console.error(
+      "❌ Error creando visita:",
+      err.message
+    );
+
+    return {
+      success: false,
+      reason: "error_calendario",
+      error: err.message,
+    };
   }
-
-  const deleted = await cancelClientEvents(calendar, phone);
-  if (deleted > 0) {
-    console.log(`🔄 Reagendamiento: ${deleted} cita(s) anterior(es) eliminada(s) para ${phone}`);
-  }
-
-  const endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
-
-  const hoursUntilEvent = (startDate.getTime() - Date.now()) / (1000 * 60 * 60);
-  const reminderMinutes = hoursUntilEvent > 24 ? 1440 : 180;
-
-  const description = [
-    `👤 Cliente: ${name || "Sin nombre"}`,
-    `📱 WhatsApp: ${phone}`,
-    clientEmail && clientEmail !== "sin-correo" ? `📧 Email cliente: ${clientEmail}` : "",
-    `🏗️ Proyecto: ${project || "Por definir"}`,
-    `📍 Zona: ${zone || "Por definir"}`,
-    wazeLink ? `🗺️ Ubicación: ${wazeLink}` : "🗺️ Ubicación: pendiente",
-    "",
-    "💰 Costo visita: ₡25.000 (descontable si contrata obra)",
-    "⏱️ Duración aprox: 1 hora",
-    "",
-    "─────────────────────────────────",
-    "Agendado automáticamente por Sasha — Bot SS Remodelaciones",
-  ].filter(Boolean).join("\n");
-
-  const eventBody = {
-    summary:     `🏗️ Visita SSR — ${name || "Cliente"} | ${zone || ""}`,
-    description,
-    start: { dateTime: toLocalDateTimeString(startDate), timeZone: "America/Costa_Rica" },
-    end:   { dateTime: toLocalDateTimeString(endDate),   timeZone: "America/Costa_Rica" },
-    reminders: {
-      useDefault: false,
-      overrides: [
-        { method: "popup", minutes: 60 },
-        { method: "email", minutes: reminderMinutes },
-      ],
-    },
-    colorId: "2",
-  };
-
-  const response = await calendar.events.insert({
-    calendarId: process.env.GOOGLE_CALENDAR_ID,
-    resource:   eventBody,
-    sendUpdates: "none",
-  });
-
-  console.log(`📅 Evento creado: ${response.data.htmlLink}`);
-  return {
-    ok:           true,
-    eventId:      response.data.id,
-    eventLink:    response.data.htmlLink,
-    startDate,
-    rescheduled:  deleted > 0,
-  };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// EXPORTS
+// ─────────────────────────────────────────────────────────────────────────────
 module.exports = {
   createVisitEvent,
   getAvailableSlots,
+  getAvailableVisitDates,
   verificarDisponibilidadExacta,
   cancelEventByNameAndDate,
   rescheduleEventByNameAndDate,
