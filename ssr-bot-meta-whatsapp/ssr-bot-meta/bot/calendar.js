@@ -658,42 +658,125 @@ async function verificarDisponibilidadExacta(startDate, phone = null) {
 }
 
 // ── Buscar y eliminar eventos futuros de un cliente por teléfono ─────────────
-async function cancelClientEvents(calendar, phone) {
+// ─────────────────────────────────────────────────────────────────────────────
+// CANCELAR CITA DEL CLIENTE QUE ESTÁ ESCRIBIENDO
+//
+// Busca las visitas futuras asociadas al número de WhatsApp del cliente.
+// Solo elimina eventos que realmente contengan ese teléfono.
+// Devuelve información explícita para que index.js SOLO confirme la
+// cancelación cuando Google Calendar haya eliminado el evento.
+// ─────────────────────────────────────────────────────────────────────────────
+async function cancelClientVisitByPhone(phone) {
   try {
-    const now    = new Date();
-    const future = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
+    const phoneNorm = normalizarTelefono(phone);
+
+    if (!phoneNorm || phoneNorm.length !== 8) {
+      console.warn(
+        `⚠️ cancelClientVisitByPhone: teléfono inválido "${phone}"`
+      );
+
+      return {
+        success: false,
+        deleted: 0,
+        events: [],
+        reason: "telefono_invalido",
+      };
+    }
+
+    const calendar = await getCalendarClient();
+
+    const now = new Date();
+    const future = new Date(
+      now.getTime() + 180 * 24 * 60 * 60 * 1000
+    );
 
     const response = await calendar.events.list({
       calendarId: process.env.GOOGLE_CALENDAR_ID,
       timeMin: now.toISOString(),
       timeMax: future.toISOString(),
       singleEvents: true,
-      q: phone,
+      orderBy: "startTime",
     });
 
-    const events = response.data.items || [];
-    const clientEvents = events.filter(e =>
-      e.description && (
-        e.description.includes(phone) ||
-        e.description.includes(phone.replace("+", ""))
-      )
+    const events = (response.data.items || []).filter(
+      event => event.status !== "cancelled"
     );
 
+    // Buscamos SOLO eventos cuyo teléfono guardado en la descripción
+    // coincida con el WhatsApp del cliente que está escribiendo.
+    const clientEvents = events.filter(event => {
+      const eventPhone =
+        extraerTelefonoDeEvento(event.description || "");
+
+      if (!eventPhone) return false;
+
+      return normalizarTelefono(eventPhone) === phoneNorm;
+    });
+
+    if (clientEvents.length === 0) {
+      console.log(
+        `ℹ️ cancelClientVisitByPhone: no hay citas futuras para ${phone}`
+      );
+
+      return {
+        success: true,
+        deleted: 0,
+        events: [],
+        reason: "not_found",
+      };
+    }
+
+    const deletedEvents = [];
+
     for (const event of clientEvents) {
+      const startRaw =
+        event.start?.dateTime ||
+        event.start?.date;
+
+      const dateStr = startRaw
+        ? formatearFechaEvento(startRaw)
+        : "";
+
       await calendar.events.delete({
         calendarId: process.env.GOOGLE_CALENDAR_ID,
         eventId: event.id,
         sendUpdates: "none",
       });
-      console.log(`🗑️ Evento anterior eliminado: "${event.summary}" (${event.id})`);
+
+      deletedEvents.push({
+        id: event.id,
+        summary: event.summary || "Visita SSR",
+        date: dateStr,
+      });
+
+      console.log(
+        `🗑️ Cita del cliente cancelada: "${event.summary}" — ${dateStr}`
+      );
     }
 
-    return clientEvents.length;
+    return {
+      success: true,
+      deleted: deletedEvents.length,
+      events: deletedEvents,
+      reason: null,
+    };
+
   } catch (err) {
-    console.error("❌ Error eliminando eventos anteriores:", err.message);
-    return 0;
+    console.error(
+      "❌ cancelClientVisitByPhone error:",
+      err.message
+    );
+
+    return {
+      success: false,
+      deleted: 0,
+      events: [],
+      reason: "error_calendario",
+      error: err.message,
+    };
   }
 }
+
 
 // ── Búsqueda común de eventos por nombre y/o fecha ───────────────────────────
 async function buscarEventos({ nameHint, dateHint }) {
@@ -1325,6 +1408,7 @@ module.exports = {
   getAvailableVisitDates,
   verificarDisponibilidadExacta,
   cancelEventByNameAndDate,
+  cancelClientVisitByPhone,
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
   listVisitsForDate,
