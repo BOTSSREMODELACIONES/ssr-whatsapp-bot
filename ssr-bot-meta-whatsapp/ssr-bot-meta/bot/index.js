@@ -1622,8 +1622,15 @@ if (!esSupervisor) {
     // 1. VERIFICAR SI EL NÚMERO ES DE UN TRABAJADOR SSR
     // ==========================================================
 
-    const verificacion =
-      await esTrabajadorSSR(telefonoAsistencia);
+  // ── NÚMERO TEMPORAL DE PRUEBA COMO CLIENTE ──────────────────────
+// +50670068477 existe como trabajador SSR, pero durante las pruebas
+// debe saltarse Asistencia y continuar por el flujo comercial.
+const ES_CLIENTE_PRUEBA =
+  telefonoAsistencia === "50670068477";
+
+const verificacion = ES_CLIENTE_PRUEBA
+  ? { esTrabajador: false }
+  : await esTrabajadorSSR(telefonoAsistencia);
 
 
     // ==========================================================
