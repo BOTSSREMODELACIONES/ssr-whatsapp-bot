@@ -116,10 +116,26 @@
 const { google }                     = require("googleapis");
 const { get, update, addMsg, reset } = require("./state");
 const { ask }                        = require("./claude");
-const { sendText, markRead, downloadMedia, sendMediaById } = require("./messenger");
-const { createVisitEvent, getAvailableSlots, cancelEventByNameAndDate,
-        rescheduleEventByNameAndDate, listUpcomingEvents,
-        proximosDiasHabiles } = require("./calendar");
+const {
+  sendText,
+  sendButtons,
+  sendList,
+  markRead,
+  downloadMedia,
+  sendMediaById,
+} = require("./messenger");
+
+const {
+  createVisitEvent,
+  getAvailableSlots,
+  getAvailableVisitDates,
+  verificarDisponibilidadExacta,
+  cancelEventByNameAndDate,
+  rescheduleEventByNameAndDate,
+  listUpcomingEvents,
+  proximosDiasHabiles,
+} = require("./calendar");
+
 const { sendVisitConfirmation }      = require("./email");
 const { upsertLead, registerVisit }  = require("./crm");
 const KNOWLEDGE                      = require("./knowledge");
@@ -612,53 +628,301 @@ function formatearListaFechas(fechas) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// v20 — AGENDA INTERACTIVA CON DISPONIBILIDAD REAL DE GOOGLE CALENDAR
+//
+// IMPORTANTE:
+// - Google Calendar es la única fuente de verdad.
+// - Nunca presentamos como "disponible" un simple lunes/martes/viernes.
+// - getAvailableVisitDates() devuelve únicamente fechas cuyo slot real de
+//   visita (09:00–10:00) está libre.
+// - Los IDs agenda_* son determinísticos y server.js ya los entrega a
+//   handleMessage() como texto cuando el cliente toca una opción.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function fechaISOaLegibleAgenda(fechaISO) {
+  if (!fechaISO || !/^\d{4}-\d{2}-\d{2}$/.test(fechaISO)) {
+    return fechaISO || "";
+  }
+
+  const [year, month, day] = fechaISO.split("-").map(Number);
+
+  // Mediodía evita desplazamientos de fecha por diferencias de zona horaria.
+  const fecha = new Date(year, month - 1, day, 12, 0, 0);
+
+  return fecha.toLocaleDateString("es-CR", {
+    timeZone: TZ,
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  });
+}
+
+
+function capitalizarAgenda(texto) {
+  const t = String(texto || "").trim();
+  if (!t) return "";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
+
+// Consulta SIEMPRE Google Calendar.
+// No reutiliza una lista vieja guardada en la sesión.
+async function obtenerFechasRealesAgenda({
+  daysAhead = 35,
+  maxDates = 10,
+} = {}) {
+  const resultado = await getAvailableVisitDates({
+    daysAhead,
+    maxDates,
+  });
+
+  if (!resultado || resultado.ok !== true) {
+    throw new Error("No se pudo obtener disponibilidad real del calendario.");
+  }
+
+  return Array.isArray(resultado.availableDates)
+    ? resultado.availableDates
+    : [];
+}
+
+
+// Muestra al cliente hasta 10 fechas REALES mediante una lista interactiva
+// de WhatsApp. Cada fila devuelve un ID tipo:
+//
+// agenda_fecha_2026-09-21
+//
+// server.js ya convierte ese ID en texto y lo manda a handleMessage().
+async function enviarListaFechasAgenda(from, {
+  daysAhead = 35,
+  maxDates = 10,
+  texto = "Estas son las próximas fechas disponibles para una visita técnica:",
+} = {}) {
+  const fechas = await obtenerFechasRealesAgenda({
+    daysAhead,
+    maxDates,
+  });
+
+  if (fechas.length === 0) {
+    await sendText(
+      from,
+      "📭 En este momento no encuentro fechas disponibles para visita técnica en las próximas semanas.\n\nVoy a necesitar que nuestro equipo revise la agenda."
+    );
+
+    return {
+      ok: false,
+      reason: "sin_fechas",
+      fechas: [],
+    };
+  }
+
+  const rows = fechas.slice(0, 10).map(item => {
+    const fechaISO = item.date;
+    const legible =
+      item.label ||
+      fechaISOaLegibleAgenda(fechaISO);
+
+    return {
+      id: `agenda_fecha_${fechaISO}`,
+      title: capitalizarAgenda(legible).slice(0, 24),
+      description: "Visita técnica · 9:00 a.m.",
+    };
+  });
+
+  await sendList(
+    from,
+    `${texto}\n\n📅 Seleccione el día que le funciona mejor.\n🕘 Las visitas se realizan a las 9:00 a.m.`,
+    "Ver fechas",
+    [
+      {
+        title: "Fechas disponibles",
+        rows,
+      },
+    ]
+  );
+
+  return {
+    ok: true,
+    fechas,
+  };
+}
+
+
+// Reconoce exclusivamente IDs generados por nuestra propia lista.
+// Ejemplo:
+//
+// agenda_fecha_2026-09-21
+//
+// Devuelve "2026-09-21" o null.
+function extraerFechaAgendaInteractiva(texto) {
+  const match = String(texto || "")
+    .trim()
+    .match(/^agenda_fecha_(\d{4}-\d{2}-\d{2})$/);
+
+  return match ? match[1] : null;
+}
+
+
+// Verifica que una fecha seleccionada siga apareciendo como disponible
+// AHORA MISMO.
+//
+// Esto NO sustituye la validación final de createVisitEvent().
+// Es una primera defensa contra listas que quedaron viejas mientras el
+// cliente decidía. createVisitEvent() volverá a validar justo antes de
+// insertar el evento.
+async function fechaSigueDisponibleAgenda(fechaISO) {
+  const fechas = await obtenerFechasRealesAgenda({
+    daysAhead: 35,
+    maxDates: 10,
+  });
+
+  return fechas.some(item => item.date === fechaISO);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // HELPER v9 — Formatear rechazo de disponibilidad (bloqueo/slot ocupado) y
 // sugerir horarios alternativos del mismo día para no dejar al supervisor
 // (ni al flujo automático) sin salida.
 // ═══════════════════════════════════════════════════════════════════════════════
+
 async function formatearRechazoDisponibilidad(eventData, day) {
   const motivoTexto = {
-    dia_bloqueado:     "el día está bloqueado internamente",
-    slot_ocupado:      "ese horario ya está ocupado",
-    dia_no_laborable:  "esa fecha no cae en un día de visitas (solo trabajamos lunes, martes y viernes)",
-    error_calendario:  "no se pudo consultar el calendario en este momento",
-  }[eventData.motivo] || "no está disponible";
+    dia_bloqueado:
+      "el día está bloqueado internamente",
+
+    slot_ocupado:
+      "ese horario ya está ocupado",
+
+    dia_no_laborable:
+      "esa fecha no cae en un día de visitas (solo trabajamos lunes, martes y viernes)",
+
+    error_calendario:
+      "no se pudo consultar el calendario en este momento",
+  }[eventData?.motivo] || "no está disponible";
 
   const lineas = [
-    `⚠️ No se pudo agendar: ${motivoTexto}${eventData.conflicto ? ` (${eventData.conflicto})` : ""}.`,
+    `⚠️ No se pudo agendar: ${motivoTexto}${eventData?.conflicto ? ` (${eventData.conflicto})` : ""}.`,
   ];
 
-  if (eventData.motivo === "dia_no_laborable") {
-    // v11: fechas reales ya calculadas, no un slot-check sobre un día que de
-    // entrada no es agendable.
-    const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
-    lineas.push(`📅 Próximas fechas disponibles: ${formatearListaFechas(proximos)}`);
-  } else if (eventData.motivo !== "error_calendario") {
+  // ─────────────────────────────────────────────────────────────────────
+  // Si el propio Calendar tuvo un error, NO intentamos afirmar ninguna
+  // disponibilidad. Sin Calendar no existe una fecha "disponible".
+  // ─────────────────────────────────────────────────────────────────────
+  if (eventData?.motivo === "error_calendario") {
+    lineas.push(
+      "ℹ️ No pude verificar fechas alternativas en este momento. Reintentá en unos minutos o revisá la agenda manualmente en Calendar."
+    );
+
+    return lineas.join("\n");
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // PRIMER INTENTO:
+  // Si el día solicitado sigue siendo un día válido, verificamos si
+  // todavía existe algún slot REAL disponible ese mismo día.
+  //
+  // Esto es útil principalmente para supervisores y mantiene el
+  // comportamiento anterior, pero siempre respaldado por Calendar.
+  // ─────────────────────────────────────────────────────────────────────
+  if (
+    day &&
+    eventData?.motivo !== "dia_no_laborable" &&
+    eventData?.motivo !== "dia_bloqueado"
+  ) {
     try {
-      // v12: getAvailableSlots ahora devuelve { date, dateLabel, slots }.
       const resultado = await getAvailableSlots(day);
-      const slots = resultado.slots;
+
+      const slots = Array.isArray(resultado?.slots)
+        ? resultado.slots
+        : [];
+
       if (slots.length > 0) {
-        const slotsText = slots.map(s => {
-          const [h, m] = s.split(":");
-          const hNum   = parseInt(h);
-          const h12    = hNum > 12 ? hNum - 12 : hNum;
+        const slotsText = slots.map(slot => {
+          const [h, m] = slot.split(":");
+          const hNum = parseInt(h, 10);
+
+          const h12 =
+            hNum > 12
+              ? hNum - 12
+              : hNum === 0
+                ? 12
+                : hNum;
+
           return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
         }).join(", ");
-        lineas.push(`🕐 Horarios libres ${resultado.dateLabel ? `el ${resultado.dateLabel}` : "ese día"}: ${slotsText}`);
-      } else {
-        // v13 — si tampoco hay horarios libres ese día (ej. bloqueo de día
-        // completo puesto por un administrador), ofrecer directamente los
-        // próximos días hábiles reales en vez de dejar al cliente sin
-        // ninguna salida concreta.
-        const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
-        lineas.push(`📭 No hay horarios libres ese día. Próximas fechas disponibles: ${formatearListaFechas(proximos)}`);
+
+        lineas.push(
+          `🕐 Horarios realmente libres ${
+            resultado?.dateLabel
+              ? `el ${resultado.dateLabel}`
+              : "ese día"
+          }: ${slotsText}`
+        );
+
+        return lineas.join("\n");
       }
-    } catch {
-      lineas.push(`ℹ️ Probá con otro horario o día.`);
+
+    } catch (err) {
+      console.warn(
+        `⚠️ No se pudieron consultar slots alternativos para "${day}":`,
+        err.message
+      );
+
+      // No retornamos todavía:
+      // intentamos buscar otras fechas reales abajo.
     }
-  } else {
-    lineas.push(`ℹ️ Reintentá en unos minutos o agendá manualmente en Calendar.`);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // SEGUNDO INTENTO:
+  // Buscar próximas fechas REALMENTE disponibles.
+  //
+  // IMPORTANTE:
+  // Aquí ya NO usamos proximosDiasHabiles().
+  // getAvailableVisitDates() consulta Google Calendar y devuelve únicamente
+  // fechas cuyo slot de visita está realmente libre.
+  // ─────────────────────────────────────────────────────────────────────
+  try {
+    const disponibilidad = await getAvailableVisitDates({
+      daysAhead: 35,
+      maxDates: 5,
+    });
+
+    const fechas = Array.isArray(disponibilidad?.availableDates)
+      ? disponibilidad.availableDates
+      : [];
+
+    if (disponibilidad?.ok === true && fechas.length > 0) {
+      const fechasTexto = fechas.map(item => {
+        const fechaISO = item.date;
+
+        const legible =
+          item.label ||
+          fechaISOaLegibleAgenda(fechaISO);
+
+        return `${capitalizarAgenda(legible)} a las 9:00 a.m.`;
+      });
+
+      lineas.push(
+        `📅 Próximas fechas realmente disponibles:\n${fechasTexto
+          .map(fecha => `• ${fecha}`)
+          .join("\n")}`
+      );
+
+    } else {
+      lineas.push(
+        "📭 No encontré fechas disponibles para visita técnica en las próximas semanas."
+      );
+    }
+
+  } catch (err) {
+    console.error(
+      "❌ Error buscando fechas alternativas reales:",
+      err.message
+    );
+
+    lineas.push(
+      "ℹ️ No pude consultar fechas alternativas en este momento. Reintentá en unos minutos o revisá la agenda manualmente en Calendar."
+    );
   }
 
   return lineas.join("\n");
@@ -1813,87 +2077,390 @@ if (mensajeDarwin) {
       return;
     }
 
-    // ── Detectar día/fecha para disponibilidad ────────────────────────────────
-    const dayMentioned = detectDayOrDate(normalized);
-    let availabilityContext = "";
+// ══════════════════════════════════════════════════════════════════════
+// v20 — RESPUESTA A LISTA INTERACTIVA DE AGENDA
+//
+// Si el cliente tocó una fecha de la lista enviada por Sasha, server.js
+// entrega acá un ID como:
+//
+//   agenda_fecha_2026-09-21
+//
+// Ese ID NO se manda a Claude para que adivine qué significa.
+// El backend extrae la fecha, vuelve a consultar Google Calendar y solo
+// acepta la selección si el slot continúa realmente disponible.
+//
+// IMPORTANTE:
+// Esta verificación NO crea todavía la cita.
+// createVisitEvent() hará la validación definitiva inmediatamente antes
+// de insertar el evento.
+// ══════════════════════════════════════════════════════════════════════
+const fechaAgendaSeleccionada = extraerFechaAgendaInteractiva(normalized);
 
-    if (dayMentioned === "GENERICO") {
-      // ── v13: el cliente pregunta por disponibilidad en general ("¿Cuándo
-      // se pueden llegar?", "¿tienen espacio?") sin mencionar un día o
-      // fecha puntual. Antes esto NO generaba ningún [SISTEMA:...] y Sasha
-      // improvisaba fechas de memoria — así se originó el primer error de
-      // fecha del incidente de agosto (ofreció "viernes 29 de agosto",
-      // que en realidad es sábado). Ahora se inyectan los próximos días
-      // hábiles reales, ya calculados por JS.
-      update(from, { slots_shown: dayMentioned });
-      const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
-      const proximosTexto = formatearListaFechas(proximos);
-      availabilityContext = `\n\n[SISTEMA: El cliente preguntó por disponibilidad en general, sin especificar un día. Las próximas fechas disponibles (ya calculadas, reales) son: ${proximosTexto}. Ofrecele ESTAS fechas exactas — no calcules ni inventes otras. NO confirmes ni agendes ninguna fecha todavía, solo ofrece opciones y preguntá cuál le sirve.]`;
+if (fechaAgendaSeleccionada) {
+  try {
+    console.log(
+      `📅 Agenda interactiva — ${fromE164} seleccionó ${fechaAgendaSeleccionada}. Revalidando Calendar...`
+    );
 
-    } else if (dayMentioned) {
-      // ── v13: ANTES esto solo corría si dayMentioned era distinto al
-      // último valor guardado en session.slots_shown — lo que en la
-      // práctica significaba que, una vez mostrado un valor (ej. "viernes")
-      // una sola vez en la conversación, NUNCA se volvía a verificar contra
-      // el calendario real, aunque el cliente lo repitiera turnos después y
-      // el intento anterior hubiera fallado. Ahora se verifica SIEMPRE que
-      // el cliente mencione un día/fecha — sin excepción. slots_shown se
-      // sigue guardando, pero solo como referencia.
-      update(from, { slots_shown: dayMentioned });
+    const sigueDisponible = await fechaSigueDisponibleAgenda(
+      fechaAgendaSeleccionada
+    );
 
-      const esNombreDiaNoHabil = NOMBRES_DIA_NO_HABIL.includes(dayMentioned);
+    // ── La fecha se ocupó mientras el cliente decidía ─────────────────
+    if (!sigueDisponible) {
+      console.warn(
+        `⛔ Agenda interactiva — ${fechaAgendaSeleccionada} ya no está disponible para ${fromE164}.`
+      );
 
-      // ── v10/v11: si es una FECHA ESPECÍFICA (no un nombre de día),
-      // calculamos su día de la semana real con JS ANTES de consultar slots.
-      // Si cae en día no hábil (o el cliente nombró directamente un día no
-      // hábil como "miércoles"/"sábado"), le damos a Claude fechas reales ya
-      // calculadas — nunca le pedimos que calcule ni infiera nada.
-      const infoFecha = esNombreDiaNoHabil ? null : calcularFechaYDiaSemana(dayMentioned);
+      await sendText(
+        from,
+        "Disculpe 🙏 Esa fecha acaba de dejar de estar disponible. Le muestro las opciones que siguen libres:"
+      );
 
-      if (esNombreDiaNoHabil || (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana))) {
-        const detalleFecha = infoFecha
-          ? ` La fecha "${dayMentioned}" (${infoFecha.date.toLocaleDateString("es-CR", { timeZone: TZ, day: "numeric", month: "long" })}) cae en ${infoFecha.diaSemana.toUpperCase()}.`
-          : ` "${dayMentioned.charAt(0).toUpperCase() + dayMentioned.slice(1)}" no es un día disponible.`;
+      await enviarListaFechasAgenda(from, {
+        daysAhead: 35,
+        maxDates: 10,
+        texto: "Estas son las fechas disponibles actualmente:",
+      });
 
-        const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
-        const proximosTexto = formatearListaFechas(proximos);
+      return;
+    }
 
-        availabilityContext = `\n\n[SISTEMA:${detalleFecha} Días disponibles: lunes, martes y viernes. Las próximas fechas disponibles son: ${proximosTexto}. Ofrecele ESTAS fechas exactas al cliente — no calcules ni inventes otras. NO confirmes ni agendes esa fecha bajo ninguna circunstancia.]`;
+    // ── La fecha sigue libre ──────────────────────────────────────────
+    // Guardamos la elección en la sesión. La hora es fija: 09:00.
+    const fechaLegible = capitalizarAgenda(
+      fechaISOaLegibleAgenda(fechaAgendaSeleccionada)
+    );
+
+  update(from, {
+  agenda_selected_date: fechaAgendaSeleccionada,
+  visit_day:            fechaAgendaSeleccionada,
+  visit_hour:           "09:00",
+  visit_confirmed:      false,
+  slots_shown:          fechaAgendaSeleccionada,
+});
+
+    // El ID técnico ya quedó registrado como mensaje entrante antes de
+    // llegar a este punto. Agregamos además una representación humana a
+    // la conversación para que el siguiente turno tenga contexto claro.
+    const seleccionHumana =
+      `El cliente seleccionó la fecha ${fechaLegible} a las 9:00 a.m. de las opciones verificadas por el sistema.`;
+
+    addMsg(from, "user", `[SISTEMA AGENDA: ${seleccionHumana}]`);
+
+   const sesionActual = get(from);
+
+const datosFaltantes = [];
+
+if (!sesionActual.name) {
+  datosFaltantes.push("su nombre");
+}
+
+if (!sesionActual.project_desc) {
+  datosFaltantes.push("qué trabajo o remodelación necesita");
+}
+
+if (!sesionActual.zone) {
+  datosFaltantes.push("la zona donde se realizará el trabajo");
+}
+
+if (!sesionActual.waze_link) {
+  datosFaltantes.push("la ubicación o enlace de Waze");
+}
+
+if (!sesionActual.client_email) {
+  datosFaltantes.push("su correo electrónico");
+}
+
+let siguientePregunta = "";
+
+if (datosFaltantes.length > 0) {
+  siguientePregunta =
+    `Para completar la visita todavía necesito ${datosFaltantes.join(", ")}.`;
+} else {
+  siguientePregunta =
+    "Ya tengo los datos necesarios para completar la solicitud de visita.";
+}
+
+const mensajeSeleccion = [
+  `📅 Perfecto. Seleccionó *${fechaLegible} a las 9:00 a.m.*`,
+  ``,
+  `La fecha está disponible en este momento.`,
+  siguientePregunta,
+].join("\n");
+
+    await sendText(from, mensajeSeleccion);
+    addMsg(from, "assistant", mensajeSeleccion);
+
+    if (!esSupervisor) {
+      memoria.guardarMensaje({
+        phone:      fromE164,
+        clientName: session.name || null,
+        direction:  "out",
+        type:       "text",
+        content:    mensajeSeleccion,
+        session:    get(from),
+      }).catch(() => {});
+    }
+
+    console.log(
+      `✅ Agenda interactiva — ${fechaAgendaSeleccionada} sigue disponible. Selección guardada para ${fromE164}.`
+    );
+
+    return;
+
+  } catch (err) {
+    console.error(
+      "❌ Error procesando selección de agenda interactiva:",
+      err.message,
+      err.stack
+    );
+
+    await sendText(
+      from,
+      "Disculpe, tuve un problema al verificar esa fecha en la agenda 🙏. Por favor inténtelo nuevamente."
+    );
+
+    return;
+  }
+}
+          
+   // ═══════════════════════════════════════════════════════════════════════════════
+// v20 — DISPONIBILIDAD REAL DE VISITAS
+//
+// Google Calendar es la única fuente de verdad.
+// proximosDiasHabiles() NO se utiliza para decirle al cliente que una fecha
+// está disponible.
+//
+// Hay tres escenarios:
+// 1. Pregunta genérica de disponibilidad → consultamos Calendar y mostramos
+//    lista interactiva con fechas realmente libres.
+// 2. Pregunta por día/fecha no hábil → explicamos la regla y mostramos fechas
+//    realmente libres.
+// 3. Pregunta por fecha/día hábil concreto → getAvailableSlots() comprueba
+//    específicamente ese día.
+//
+// La selección agenda_fecha_YYYY-MM-DD ya fue interceptada ARRIBA y nunca
+// llega a este bloque.
+// ═══════════════════════════════════════════════════════════════════════════════
+const dayMentioned = detectDayOrDate(normalized);
+let availabilityContext = "";
+
+if (dayMentioned === "GENERICO") {
+
+  update(from, { slots_shown: "GENERICO" });
+
+  try {
+    const disponibilidad = await enviarListaFechasAgenda(from, {
+      daysAhead: 35,
+      maxDates: 10,
+      texto: "Estas son las próximas fechas disponibles para una visita técnica:",
+    });
+
+    if (disponibilidad.ok) {
+      console.log(
+        `📅 Disponibilidad general enviada a ${fromE164}: ${disponibilidad.fechas.length} fecha(s) reales.`
+      );
+
+      // Ya respondimos directamente mediante la lista interactiva.
+      // No necesitamos que Claude invente/redacte opciones adicionales.
+      return;
+    }
+
+    // Si Calendar respondió correctamente pero no encontró fechas, el helper
+    // ya informó al cliente. No continuar hacia Claude.
+    console.warn(
+      `📭 Sin fechas disponibles para ${fromE164} en los próximos 35 días.`
+    );
+    return;
+
+  } catch (err) {
+    console.error(
+      "❌ Error consultando disponibilidad general:",
+      err.message
+    );
+
+    availabilityContext =
+      `\n\n[SISTEMA: El cliente preguntó por disponibilidad para una visita, ` +
+      `pero ocurrió un error técnico al consultar Google Calendar. ` +
+      `NO inventes fechas ni horarios y NO afirmes que existe disponibilidad. ` +
+      `Explícale brevemente que en este momento no pudiste consultar la agenda ` +
+      `y que el equipo puede ayudarle a coordinar.]`;
+  }
+
+} else if (dayMentioned) {
+
+  update(from, { slots_shown: dayMentioned });
+
+  const esNombreDiaNoHabil =
+    NOMBRES_DIA_NO_HABIL.includes(dayMentioned);
+
+  const infoFecha = esNombreDiaNoHabil
+    ? null
+    : calcularFechaYDiaSemana(dayMentioned);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // CASO A — Día no hábil
+  // ───────────────────────────────────────────────────────────────────────
+  if (
+    esNombreDiaNoHabil ||
+    (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana))
+  ) {
+
+    const detalleFecha = infoFecha
+      ? `La fecha solicitada cae en ${infoFecha.diaSemana}.`
+      : `${capitalizarAgenda(dayMentioned)} no es un día de visita.`;
+
+    try {
+      const disponibilidad = await enviarListaFechasAgenda(from, {
+        daysAhead: 35,
+        maxDates: 10,
+        texto:
+          `${detalleFecha} Las visitas se realizan lunes, martes y viernes. ` +
+          `Estas son las próximas fechas realmente disponibles:`,
+      });
+
+      if (disponibilidad.ok) {
+        console.log(
+          `📅 Día no hábil solicitado por ${fromE164}; se enviaron alternativas reales.`
+        );
+      }
+
+      // Tanto si encontró fechas como si no, enviarListaFechasAgenda()
+      // ya respondió al cliente.
+      return;
+
+    } catch (err) {
+      console.error(
+        "❌ Error buscando alternativas para día no hábil:",
+        err.message
+      );
+
+      availabilityContext =
+        `\n\n[SISTEMA: El cliente pidió "${dayMentioned}", pero esa fecha/día ` +
+        `no corresponde a los días de visita (lunes, martes y viernes). ` +
+        `Además ocurrió un error al consultar las alternativas reales en ` +
+        `Google Calendar. NO inventes ninguna fecha. Explica únicamente la ` +
+        `regla de días de visita e indica que la agenda no pudo consultarse ` +
+        `en este momento.]`;
+    }
+
+  } else {
+
+    // ─────────────────────────────────────────────────────────────────────
+    // CASO B — Día/fecha potencialmente hábil.
+    // Consultamos específicamente Calendar.
+    // ─────────────────────────────────────────────────────────────────────
+    try {
+      const resultado = await getAvailableSlots(dayMentioned);
+
+      const slots = Array.isArray(resultado?.slots)
+        ? resultado.slots
+        : [];
+
+      const dateLabel =
+        resultado?.dateLabel ||
+        dayMentioned;
+
+      const nHoyManana = normalized
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+
+      const preguntoHoyOManana =
+        /\bhoy\b/.test(nHoyManana) ||
+        /\bmanana\b/.test(nHoyManana);
+
+      // ── La fecha concreta NO está disponible ──────────────────────────
+      if (slots.length === 0) {
+
+        console.log(
+          `⛔ Fecha solicitada sin disponibilidad: ${dateLabel} — ${fromE164}`
+        );
+
+        try {
+          const disponibilidad = await enviarListaFechasAgenda(from, {
+            daysAhead: 35,
+            maxDates: 10,
+            texto:
+              `${capitalizarAgenda(dateLabel)} no está disponible. ` +
+              `Estas son las próximas fechas que sí están libres:`,
+          });
+
+          if (disponibilidad.ok) {
+            console.log(
+              `📅 Se enviaron alternativas reales a ${fromE164}.`
+            );
+          }
+
+          return;
+
+        } catch (errAlternativas) {
+          console.error(
+            "❌ Error buscando alternativas reales:",
+            errAlternativas.message
+          );
+
+          availabilityContext =
+            `\n\n[SISTEMA: El cliente pidió ${dateLabel}, pero Google Calendar ` +
+            `confirmó que esa fecha NO está disponible. Luego ocurrió un error ` +
+            `consultando fechas alternativas. NO inventes ninguna fecha ni ` +
+            `horario. Dile únicamente que esa fecha no está disponible y que ` +
+            `el equipo puede ayudarle a revisar otra opción.]`;
+        }
+
       } else {
-        // v12 — getAvailableSlots ahora devuelve { date, dateLabel, slots }
-        // en vez de solo el array de horarios. dateLabel es la fecha REAL
-        // resuelta (ej. "lunes 24 de agosto"), no solo el nombre de día que
-        // escribió el cliente. Esto es lo que faltaba: antes el mensaje de
-        // sistema solo decía "para lunes" — ambiguo entre "hoy" y "el
-        // próximo lunes" — y así fue como Claude terminó respondiendo "hoy
-        // mismo podemos" cuando el cliente preguntó explícitamente por hoy.
-        const resultado  = await getAvailableSlots(dayMentioned);
-        const slots       = resultado.slots;
-        const dateLabel   = resultado.dateLabel;
 
-        // v12 — detectar si el cliente preguntó explícitamente por "hoy"/
-        // "mañana" en este mismo mensaje, para aclarárselo directamente si
-        // corresponde (además de la prohibición general de decir "hoy mismo").
-        const nHoyManana = normalized.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-        const preguntoHoyOManana = /\bhoy\b/.test(nHoyManana) || /\bmanana\b/.test(nHoyManana);
+        // ── La fecha concreta SÍ está disponible ─────────────────────────
+        const slotsText = slots.map(slot => {
+          const [h, m] = slot.split(":");
+          const hNum = parseInt(h, 10);
+          const h12 =
+            hNum > 12
+              ? hNum - 12
+              : hNum === 0
+                ? 12
+                : hNum;
+
+          return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
+        }).join(", ");
+
         const notaHoyOManana = preguntoHoyOManana
-          ? ` El cliente preguntó específicamente si es posible hoy/mañana — aclarale amablemente que las visitas nunca son el mismo día en que se solicitan, y que la fecha más próxima disponible es la indicada arriba.`
+          ? ` El cliente mencionó hoy/mañana. Las visitas NUNCA deben ` +
+            `confirmarse para el mismo día de la solicitud. Usa exclusivamente ` +
+            `la fecha exacta devuelta por Calendar: ${dateLabel}.`
           : "";
 
-        if (slots.length === 0) {
-          const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
-          availabilityContext = `\n\n[SISTEMA: El cliente pidió ${dayMentioned} (${dateLabel || dayMentioned}) pero NO hay slots disponibles ese día. Explícale amablemente y ofrécele estas fechas: ${formatearListaFechas(proximos)}. RECORDATORIO OBLIGATORIO: las visitas NUNCA se agendan para hoy mismo.${notaHoyOManana}]`;
-        } else {
-          const slotsText = slots.map(s => {
-            const [h, m] = s.split(":");
-            const hNum   = parseInt(h);
-            const h12    = hNum > 12 ? hNum - 12 : hNum;
-            return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
-          }).join(", ");
-          availabilityContext = `\n\n[SISTEMA: La fecha disponible real es *${dateLabel || dayMentioned}* — esta fecha jamás es hoy, el sistema ya garantiza que es como mínimo el próximo día hábil. Slots disponibles ese día: ${slotsText}. Ofrece SOLO estos horarios, y siempre mencionale al cliente la fecha completa (${dateLabel}) — NUNCA digas "hoy mismo" ni ninguna variante, aunque el cliente pregunte específicamente si es posible hoy. La disponibilidad ya fue verificada — NO digas que vas a verificarla. Si el cliente ya eligió uno, procede INMEDIATAMENTE a pedirle la ubicación.${notaHoyOManana}]`;
-        }
+        availabilityContext =
+          `\n\n[SISTEMA: Google Calendar acaba de verificar la disponibilidad. ` +
+          `La fecha real disponible es *${dateLabel}*. ` +
+          `Horario disponible: ${slotsText}. ` +
+          `Esta información viene del backend y es la única fuente de verdad. ` +
+          `NO calcules otra fecha, NO cambies el día y NO inventes horarios. ` +
+          `Si el cliente quiere esa fecha, continúa recopilando los datos que ` +
+          `falten para completar la visita. Todavía NO afirmes que la cita quedó ` +
+          `agendada: eso solo puede decirse después de que createVisitEvent() ` +
+          `confirme éxito.${notaHoyOManana}]`;
+
+        console.log(
+          `✅ Disponibilidad específica verificada para ${fromE164}: ${dateLabel} — ${slotsText}`
+        );
       }
+
+    } catch (err) {
+      console.error(
+        `❌ Error verificando "${dayMentioned}" en Calendar:`,
+        err.message
+      );
+
+      availabilityContext =
+        `\n\n[SISTEMA: El cliente preguntó por "${dayMentioned}", pero ocurrió ` +
+        `un error técnico consultando Google Calendar. NO inventes disponibilidad, ` +
+        `fechas ni horarios. Explica brevemente que no pudiste verificar la agenda ` +
+        `en este momento.]`;
     }
+  }
+}
 
     // ── Llamar a Claude ───────────────────────────────────────────────────────
     const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext, imageData);
@@ -1943,47 +2510,96 @@ if (mensajeDarwin) {
       // exactamente igual que siempre (createVisitEvent ya maneja
       // reagendamientos vía cancelClientEvents()).
       // ══════════════════════════════════════════════════════════════════
-      const diaNuevoNorm  = (day  || "").trim().toLowerCase();
-      const horaNuevaNorm = (hour || "09:00").trim();
-      const yaConfirmadaMismoHorario =
-        session.visit_confirmed === true &&
-        (session.visit_day  || "").trim().toLowerCase() === diaNuevoNorm &&
-        (session.visit_hour || "09:00").trim() === horaNuevaNorm;
 
-      if (yaConfirmadaMismoHorario) {
-        console.log(`↪️ VISITA ignorada — ya estaba confirmada para ${from} en "${session.visit_day}" ${session.visit_hour}. No se vuelve a tocar el calendario.`);
+     // ════════════════════════════════════════════════════════════════════
+// v20 — BLINDAJE FINAL DE FECHA/HORA
+//
+// Si el cliente escogió una fecha mediante la agenda interactiva,
+// session.visit_day contiene un ISO YYYY-MM-DD verificado por backend.
+//
+// Claude NO tiene autoridad para sustituir esa fecha por otra al emitir
+// [VISITA:...]. Si existe una selección ISO en sesión, esa fecha manda.
+//
+// Para clientes, la hora oficial de visita es siempre 09:00.
+// ════════════════════════════════════════════════════════════════════
 
-        if (cleanMessage) {
-          await sendText(from, cleanMessage);
-          addMsg(from, "assistant", cleanMessage);
-          if (!esSupervisor) {
-            memoria.guardarMensaje({ phone: fromE164, clientName: session.name || null, direction: "out", type: "text", content: cleanMessage, session }).catch(() => {});
-          }
-        }
+  const fechaAgendaBackend =
+  String(session.agenda_selected_date || "").trim();
 
-        return; // Nunca se llega a createVisitEvent() para este caso.
-      }
+const fechaSeleccionadaBackend =
+  /^\d{4}-\d{2}-\d{2}$/.test(fechaAgendaBackend)
+    ? fechaAgendaBackend
+    : (
+        /^\d{4}-\d{2}-\d{2}$/.test(String(session.visit_day || "").trim())
+          ? String(session.visit_day).trim()
+          : null
+      );          
 
-      const updated = update(from, {
-        name:            name?.trim()      || session.name,
-        project_desc:    project?.trim()   || session.project_desc,
-        zone:            zone?.trim()      || session.zone,
-        visit_day:       day?.trim()       || "a coordinar",
-        visit_hour:      hour?.trim()      || "09:00",
-        waze_link:       ubicacion?.trim() || "",
-        client_email:    email?.trim()     || "",
-        visit_confirmed: true,
-        lead_saved:      true,
-      });
+const diaFinal =
+  fechaSeleccionadaBackend ||
+  day?.trim() ||
+  session.visit_day ||
+  "a coordinar";
 
-      const nombreDetectado = updated.name || name?.trim();
-      if (nombreDetectado) {
-        memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
-          proyecto:       updated.project_desc || "",
-          zona:           updated.zone || "",
-          visitaAgendada: true,
-        }).catch(() => {});
-      }
+const horaFinal = "09:00";
+
+// ── Guarda de idempotencia v17, ahora usando la fecha/hora DEFINITIVAS ──
+const diaNuevoNorm  = String(diaFinal).trim().toLowerCase();
+const horaNuevaNorm = horaFinal;
+
+const yaConfirmadaMismoHorario =
+  session.visit_confirmed === true &&
+  String(session.visit_day || "").trim().toLowerCase() === diaNuevoNorm &&
+  String(session.visit_hour || "09:00").trim() === horaNuevaNorm;
+
+if (yaConfirmadaMismoHorario) {
+  console.log(
+    `↪️ VISITA ignorada — ya estaba confirmada para ${from} en "${session.visit_day}" ${session.visit_hour}. No se vuelve a tocar el calendario.`
+  );
+
+  if (cleanMessage) {
+    await sendText(from, cleanMessage);
+    addMsg(from, "assistant", cleanMessage);
+
+    if (!esSupervisor) {
+      memoria.guardarMensaje({
+        phone: fromE164,
+        clientName: session.name || null,
+        direction: "out",
+        type: "text",
+        content: cleanMessage,
+        session,
+      }).catch(() => {});
+    }
+  }
+
+  return;
+}
+
+if (
+  fechaSeleccionadaBackend &&
+  day?.trim() &&
+  day.trim() !== fechaSeleccionadaBackend
+) {
+  console.warn(
+    `🛡️ VISITA — Claude propuso "${day.trim()}", pero el cliente seleccionó "${fechaSeleccionadaBackend}". Se conserva la fecha verificada por backend.`
+  );
+}
+
+// IMPORTANTE:
+// Todavía NO ponemos visit_confirmed=true.
+// Eso solamente ocurrirá DESPUÉS de que Calendar confirme la creación.
+const updated = update(from, {
+  name:            name?.trim()      || session.name,
+  project_desc:    project?.trim()   || session.project_desc,
+  zone:            zone?.trim()      || session.zone,
+  visit_day:       diaFinal,
+  visit_hour:      horaFinal,
+  waze_link:       ubicacion?.trim() || session.waze_link || "",
+  client_email:    email?.trim()     || session.client_email || "",
+  visit_confirmed: false,
+  lead_saved:      session.lead_saved || false,
+});       
 
       const visitHour = updated.visit_hour || "09:00";
       const [hh, mm]  = visitHour.split(":");
@@ -2007,12 +2623,35 @@ if (mensajeDarwin) {
         });
 
         if (eventData.ok) {
-          eventOk = true;
-          dateStr = eventData.startDate.toLocaleDateString("es-CR", {
-            weekday: "long", day: "numeric", month: "long", timeZone: TZ,
-          });
-          console.log(`📅 Visita agendada: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`);
-        } else {
+  eventOk = true;
+
+  // v20 — SOLO AHORA la visita puede considerarse confirmada.
+  update(from, {
+    visit_confirmed: true,
+    lead_saved: true,
+  });
+
+  updated.visit_confirmed = true;
+  updated.lead_saved = true;
+
+ const nombreDetectado = updated.name || name?.trim();
+
+if (nombreDetectado) {
+  memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
+    proyecto:       updated.project_desc || "",
+    zona:           updated.zone || "",
+    visitaAgendada: true,
+  }).catch(() => {});
+}               
+
+  dateStr = eventData.startDate.toLocaleDateString("es-CR", {
+    weekday: "long", day: "numeric", month: "long", timeZone: TZ,
+  });
+
+  console.log(
+    `📅 Visita agendada: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`
+  );
+} else {
           console.warn(`⛔ Visita NO agendada (flujo cliente): ${eventData.motivo} — ${eventData.conflicto || "—"}`);
         }
       } catch (calErr) {
