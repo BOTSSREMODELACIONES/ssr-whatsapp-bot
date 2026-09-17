@@ -769,13 +769,41 @@ function extraerFechaAgendaInteractiva(texto) {
 // Es una primera defensa contra listas que quedaron viejas mientras el
 // cliente decidía. createVisitEvent() volverá a validar justo antes de
 // insertar el evento.
-async function fechaSigueDisponibleAgenda(fechaISO) {
-  const fechas = await obtenerFechasRealesAgenda({
-    daysAhead: 35,
-    maxDates: 10,
-  });
 
-  return fechas.some(item => item.date === fechaISO);
+async function fechaSigueDisponibleAgenda(fechaISO) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fechaISO || ""))) {
+    return false;
+  }
+
+  try {
+    const [year, month, day] = fechaISO.split("-").map(Number);
+
+    // La visita de clientes siempre es a las 09:00.
+    // Construimos la fecha directamente en hora local de Costa Rica.
+    const startDate = new Date(
+      year,
+      month - 1,
+      day,
+      9,
+      0,
+      0,
+      0
+    );
+
+    const resultado =
+      await verificarDisponibilidadExacta(startDate);
+
+    return resultado?.disponible === true;
+
+  } catch (err) {
+    console.error(
+      `❌ Error revalidando fecha exacta ${fechaISO}:`,
+      err.message
+    );
+
+    // Ante un error de Calendar nunca asumimos disponibilidad.
+    return false;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1227,11 +1255,11 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
     }
     try {
       const result = await rescheduleEventByNameAndDate({
-        nameHint:    intent.nombre,
-        dateHint:    intent.fecha,
-        newDateHint: intent.nuevaFecha,
-        newHour:     intent.nuevaHora,
-      });
+  nameHint: intent.nombre,
+  dateHint: intent.fecha,
+  newDay:   intent.nuevaFecha,
+  newHour:  intent.nuevaHora,
+});
 
       if (result.ambiguous) {
         const lineas = result.events.map(e => `• ${e.summary} — ${e.dateStr}`).join("\n");
