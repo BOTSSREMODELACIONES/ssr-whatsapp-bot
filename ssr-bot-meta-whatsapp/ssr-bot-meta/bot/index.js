@@ -581,6 +581,18 @@ const PALABRAS_DISPONIBILIDAD_GENERICA = [
   "cuando vienen", "pueden llegar", "pueden venir", "cuando hay",
   "que horarios", "qué horarios", "cuando tienen", "cuándo tienen",
   "cuando es la visita", "cuando seria", "cuando sería",
+  // FIX v21: preguntas de seguimiento tipo "¿tienes más opciones?" no
+  // mencionan un día ni una fecha, así que antes NO activaban ninguna
+  // consulta real a Calendar — el mensaje caía directo a Claude sin
+  // datos de respaldo, y Claude terminaba inventando fechas (incluyendo
+  // días que ya no son lunes/martes/viernes, o fechas ya ocupadas, como
+  // el caso reportado 2026-09-17 donde se re-ofreció el 21 de septiembre
+  // estando ya reservado). Estas frases fuerzan la misma consulta real
+  // a Calendar (getAvailableVisitDates) que usa el caso GENERICO.
+  "mas opciones", "más opciones", "otras opciones", "otras fechas",
+  "otra fecha", "otro dia", "otro día", "mas dias", "más días",
+  "mas fechas", "más fechas", "algo mas", "algo más", "otro horario",
+  "otros horarios", "mas alternativas", "más alternativas",
 ];
 
 function calcularFechaYDiaSemana(dayMentioned) {
