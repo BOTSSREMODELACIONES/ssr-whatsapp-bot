@@ -7,7 +7,7 @@
  *   B = Número de Teléfono
  *   C = Nombre de Contacto
  *   D = Entrada / Salida  (in / out)
- *   E = Tipo              (text / image / audio / video)
+ *   E = Tipo              (text / image / audio / document / video)
  *   F = Mensaje
  *
  * COLUMNAS CLIENTES (A:H):
@@ -20,6 +20,39 @@
  *   G = Total Mensajes
  *   H = Visita Agendada
  *
+ * ── CAMBIOS v3 (16 sept 2026) ─────────────────────────────────────────────────
+ * FIX CRÍTICO — "Falta driveUrl: el servidor aún no guardó un enlace visible"
+ * (reportado por Darwin en el CRM):
+ *   CAUSA RAÍZ: las cuentas de servicio de Google NO tienen cuota de
+ *   almacenamiento propia en Drive — cualquier intento de subir un archivo
+ *   (drive.files.create con media) a una carpeta que NO viva dentro de una
+ *   Unidad Compartida falla con un error de cuota, incluso si el resto de
+ *   los permisos están bien. guardarMedia() ya atrapaba ese error y
+ *   devolvía null (por eso no tumbaba el bot), pero index.js no dejaba
+ *   ningún rastro de POR QUÉ — así que la foto quedaba guardada sin
+ *   driveUrl, en silencio. Dos partes del fix:
+ *     a) Acá: se agrega supportsAllDrives:true / includeItemsFromAllDrives:
+ *        true a las llamadas de Drive (files.create, files.list,
+ *        permissions.create), que es requisito para que funcionen sobre una
+ *        Unidad Compartida. Si MEDIA_FOLDER_ID ya apunta a una carpeta
+ *        dentro de una Unidad Compartida, esto debería resolver el problema
+ *        de raíz. Si MEDIA_FOLDER_ID NO está configurado o apunta a una
+ *        carpeta normal (no Unidad Compartida), las subidas van a seguir
+ *        fallando por cuota — en ese caso hay que crear una Unidad
+ *        Compartida en Drive, compartirla con el service account, y poner
+ *        el ID de una carpeta de ahí en MEDIA_FOLDER_ID.
+ *     b) En index.js: el error real ya no se traga en silencio — ahora
+ *        queda un console.warn/error con el teléfono y mediaId afectados
+ *        cada vez que una foto se guarda sin driveUrl.
+ *
+ * NUEVO — AUDIO Y DOCUMENTOS (PDF) DE CLIENTES VISIBLES EN EL CRM:
+ *   guardarAdjuntoCliente({ phone, clientName, mediaId, tipo, session,
+ *   contenido }): descarga el adjunto de WhatsApp (vía messenger.js), lo
+ *   sube a Drive igual que las fotos, y lo registra en MENSAJES con su
+ *   driveUrl — para que el CRM pueda mostrar un reproductor/enlace igual
+ *   que hace con las fotos. `tipo` es "audio" o "document". Se llama desde
+ *   server.js cuando el mensaje es de un cliente (no de Darwin/Melvin).
+ * ─────────────────────────────────────────────────────────────────────────────
  * ── CAMBIOS v2 ────────────────────────────────────────────────────────────────
  * BUGS CORREGIDOS:
  *   - "resumen de la conversación con X" ahora captura "X" (no "con X")
@@ -162,10 +195,21 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
     const nombre    = clientName || session?.name || "";
 
     let mensajeCol = content || "";
+    // v3 — extendido de solo "image" a también "audio" y "document", con el
+    // mismo criterio: si hay driveUrl se muestra el enlace, si no al menos
+    // el mediaId para poder rastrearlo a mano.
     if (type === "image") {
       if (driveUrl)      mensajeCol = `[Foto enviada por el cliente] ${driveUrl}`;
       else if (mediaId)  mensajeCol = `[Foto enviada por el cliente] ID:${mediaId}`;
       else               mensajeCol = "[Foto enviada por el cliente]";
+    } else if (type === "audio") {
+      if (driveUrl)      mensajeCol = `[Audio enviado por el cliente] ${driveUrl}`;
+      else if (mediaId)  mensajeCol = `[Audio enviado por el cliente] ID:${mediaId}`;
+      else               mensajeCol = content || "[Audio enviado por el cliente]";
+    } else if (type === "document") {
+      if (driveUrl)      mensajeCol = `[Documento enviado por el cliente] ${driveUrl}`;
+      else if (mediaId)  mensajeCol = `[Documento enviado por el cliente] ID:${mediaId}`;
+      else               mensajeCol = content || "[Documento enviado por el cliente]";
     }
 
     await sheets.spreadsheets.values.append({
@@ -309,27 +353,38 @@ async function buscarClienteEnCRM(query) {
 }
 
 // ── Guardar media en Drive ────────────────────────────────────────────────────
+// v3 — supportsAllDrives:true agregado en files.create y permissions.create:
+// requisito de la API de Drive para poder escribir dentro de una Unidad
+// Compartida. Sin esto, aunque MEDIA_FOLDER_ID apunte a una carpeta de una
+// Unidad Compartida bien configurada, la subida sigue fallando.
 async function guardarMedia(buffer, mimeType, phone, name) {
   try {
     const drive    = await getDriveClient();
     const folderId = await getOrCreateMediaFolder(drive, phone, name);
-    const ext      = (mimeType.split("/")[1] || "jpg").replace("jpeg", "jpg");
+    const ext      = (mimeType.split("/")[1] || "jpg").replace("jpeg", "jpg").split(";")[0];
     const ts       = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const file     = await drive.files.create({
       requestBody: { name: `${phone}_${ts}.${ext}`, parents: [folderId] },
       media: { mimeType, body: Readable.from(buffer) },
       fields: "id, webViewLink",
+      supportsAllDrives: true,
     });
 
     await drive.permissions.create({
       fileId: file.data.id,
       requestBody: { role: "reader", type: "user", emailAddress: DARWIN_EMAIL },
+      supportsAllDrives: true,
     }).catch(() => {});
 
-    console.log(`✅ Memoria: foto guardada → ${file.data.webViewLink}`);
+    console.log(`✅ Memoria: archivo guardado → ${file.data.webViewLink}`);
     return file.data.webViewLink;
   } catch (err) {
-    console.error("❌ Memoria: error guardando media:", err.message);
+    // v3 — este es el punto donde antes se perdía la causa real del "Falta
+    // driveUrl" en el CRM. El mensaje típico acá, si MEDIA_FOLDER_ID no
+    // apunta a una Unidad Compartida, es algo como "Service Accounts do not
+    // have storage quota" — service accounts de Google NO tienen cuota de
+    // almacenamiento propia fuera de una Unidad Compartida.
+    console.error("❌ Memoria: error guardando media en Drive:", err.message);
     return null;
   }
 }
@@ -339,7 +394,12 @@ async function getOrCreateMediaFolder(drive, phone, clientName) {
   const safeName   = (clientName || "").replace(/[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ\s]/g, "").trim().slice(0, 25);
   const folderName = `Chats_${phone}${safeName ? `_${safeName}` : ""}`;
   const q          = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-  const search     = await drive.files.list({ q, fields: "files(id)", spaces: "drive" });
+  const search     = await drive.files.list({
+    q, fields: "files(id)", spaces: "drive",
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: MEDIA_PARENT_ID ? "allDrives" : "user",
+  });
 
   if (search.data.files.length > 0) {
     _folderCache[phone] = search.data.files[0].id;
@@ -353,15 +413,62 @@ async function getOrCreateMediaFolder(drive, phone, clientName) {
       parents: MEDIA_PARENT_ID ? [MEDIA_PARENT_ID] : [],
     },
     fields: "id",
+    supportsAllDrives: true,
   });
 
   await drive.permissions.create({
     fileId: folder.data.id,
     requestBody: { role: "reader", type: "user", emailAddress: DARWIN_EMAIL },
+    supportsAllDrives: true,
   }).catch(() => {});
 
   _folderCache[phone] = folder.data.id;
   return _folderCache[phone];
+}
+
+// ── v3 (16 sept 2026) — NUEVO: guardar audio/documento (PDF) de un cliente ───
+// Descarga el adjunto de WhatsApp (vía messenger.js), lo sube a Drive igual
+// que una foto, y lo registra en MENSAJES con su driveUrl — para que el CRM
+// pueda mostrarlo como un adjunto real (reproductor de audio / enlace al
+// PDF), no solo como un ID sin forma de abrirlo. `tipo` es "audio" o
+// "document". Se llama desde server.js SOLO para mensajes de clientes (no
+// de Darwin/Melvin) — los audios internos ya se transcriben y procesan
+// aparte, sin pasar por acá.
+//
+// NOTA: require() de messenger.js queda adentro de la función (no al tope
+// del archivo) para evitar cualquier problema de referencia circular si en
+// el futuro messenger.js llegara a necesitar algo de memoria.js — hoy no lo
+// necesita, pero es más seguro dejarlo así.
+async function guardarAdjuntoCliente({ phone, clientName, mediaId, tipo, session = null, contenido = "" }) {
+  const { downloadMedia } = require("./messenger");
+
+  const contenidoDefault = tipo === "document"
+    ? "[Documento enviado por el cliente]"
+    : "[Audio enviado por el cliente]";
+
+  try {
+    const { base64, mimeType } = await downloadMedia(mediaId);
+    const buffer   = Buffer.from(base64, "base64");
+    const driveUrl = await guardarMedia(buffer, mimeType, phone, clientName);
+
+    if (!driveUrl) {
+      console.warn(`⚠️ Memoria: ${tipo} de ${phone} (mediaId ${mediaId}) guardado SIN driveUrl — ver el error de guardarMedia arriba en este mismo log.`);
+    }
+
+    await guardarMensaje({
+      phone, clientName, direction: "in", type: tipo,
+      content: contenido || contenidoDefault,
+      mediaId, driveUrl: driveUrl || "", session,
+    });
+
+  } catch (err) {
+    console.error(`❌ Memoria: error guardando adjunto (${tipo}) de ${phone}:`, err.message);
+    await guardarMensaje({
+      phone, clientName, direction: "in", type: tipo,
+      content: contenido || contenidoDefault,
+      mediaId, driveUrl: "", session,
+    }).catch(() => {});
+  }
 }
 
 // ── Funciones de búsqueda ─────────────────────────────────────────────────────
@@ -1046,6 +1153,7 @@ module.exports = {
   // Persistencia
   guardarMensaje,
   guardarMedia,
+  guardarAdjuntoCliente,
   actualizarNombreInmediato,
 
   // Búsquedas
