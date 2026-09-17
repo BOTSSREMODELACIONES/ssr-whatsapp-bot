@@ -160,6 +160,77 @@ function consumirContextoPendiente(phoneE164) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// v19 (16 sept 2026) — CONTROL MANUAL DE CONVERSACIÓN (Darwin toma el control)
+//
+// PEDIDO POR DARWIN: desde el CRM, poder "tomar el control" de la
+// conversación con un cliente puntual — mientras dure eso, Sasha se calla
+// para ESE cliente (pero sigue respondiendo normal a cualquier otro). Se
+// reactiva sola a los 60 minutos de inactividad de Darwin con ese cliente;
+// cada vez que Darwin le escribe de nuevo (vía /send-message en server.js),
+// la ventana de 60 minutos se reinicia — así que mientras Darwin siga
+// conversando activo, Sasha se mantiene pausada, y en cuanto Darwin deja de
+// escribirle por 60 min seguidos, Sasha retoma sola.
+//
+// DISEÑO: Map en memoria (telefono → timestamp de expiración). server.js
+// corre en el MISMO proceso que este archivo (lo importa con
+// require("./bot/index")), así que no hace falta Sheets ni Redis para esto
+// — un Map alcanza y no le agrega latencia a cada mensaje.
+//
+// LIMITACIÓN HONESTA: al ser en memoria, un redeploy de Railway (que pasa
+// seguido en este proyecto) borra las pausas activas — Sasha volvería a
+// responder antes de los 60 minutos si eso ocurre a mitad de una
+// intervención manual. Si en la práctica esto molesta, se puede mover a una
+// pestaña nueva de Sheets (CONTROL_MANUAL) más adelante; se deja así por
+// ahora porque es mucho más simple y cubre el caso normal de uso.
+// ══════════════════════════════════════════════════════════════════════════
+
+const PAUSA_MANUAL_MS = 60 * 60 * 1000; // 60 minutos
+const pausasManuales  = new Map();       // "+506...": timestamp ms de expiración
+
+function _normE164(phone) {
+  const p = String(phone || "").trim();
+  return p.startsWith("+") ? p : `+${p}`;
+}
+
+// Llamada cuando Darwin toca "Tomar control" en el CRM, o cada vez que le
+// manda un mensaje manual a ese cliente (server.js hace ambas cosas).
+function pausarConversacion(phone) {
+  const fromE164 = _normE164(phone);
+  const expira   = Date.now() + PAUSA_MANUAL_MS;
+  pausasManuales.set(fromE164, expira);
+  console.log(`⏸️ ASISTENCIA MANUAL — pausa activada/renovada para ${fromE164} (expira ${new Date(expira).toLocaleTimeString("es-CR", { timeZone: "America/Costa_Rica" })})`);
+  return expira;
+}
+
+// Llamada cuando Darwin toca "Devolver a Sasha" en el CRM (liberación manual
+// inmediata, sin esperar los 60 minutos).
+function reanudarConversacion(phone) {
+  const fromE164 = _normE164(phone);
+  pausasManuales.delete(fromE164);
+  console.log(`▶️ ASISTENCIA MANUAL — pausa liberada para ${fromE164}, Sasha retoma la conversación.`);
+}
+
+function estaEnPausaManual(phone) {
+  const fromE164 = _normE164(phone);
+  const expira   = pausasManuales.get(fromE164);
+  if (!expira) return false;
+  if (Date.now() >= expira) {
+    pausasManuales.delete(fromE164);
+    console.log(`▶️ ASISTENCIA MANUAL — pausa de ${fromE164} venció sola (60 min sin actividad de Darwin), Sasha retoma.`);
+    return false;
+  }
+  return true;
+}
+
+// Para que el CRM pueda mostrar "activo hasta las X:XX" sin adivinar.
+function msRestantesPausa(phone) {
+  const fromE164 = _normE164(phone);
+  const expira   = pausasManuales.get(fromE164);
+  if (!expira) return 0;
+  return Math.max(0, expira - Date.now());
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // v18 (15 sept 2026) — FUSIÓN FOTO+TEXTO EN UN SOLO REGISTRO FINANCIERO
 //
 // BUG REAL (Darwin): mandó la foto de un comprobante SINPE (₡150.000,
@@ -1705,14 +1776,41 @@ if (mensajeDarwin) {
         imageDataArray.forEach((imgData, i) => {
           const mediaId = ids[i] || "";
           memoria.guardarMedia(Buffer.from(imgData.base64, "base64"), imgData.mimeType, fromE164, clientName)
-            .then(driveUrl =>
-              memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: driveUrl || "", session }).catch(() => {})
-            )
-            .catch(() =>
-              memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: "", session }).catch(() => {})
-            );
+            .then(driveUrl => {
+              // v19 (16 sept 2026) — FIX: antes, si guardarMedia() devolvía
+              // null (falla interna ya logueada allá, pero sin visibilidad
+              // acá), este .then() seguía adelante en silencio con
+              // driveUrl:"" — exactamente el "Falta driveUrl" que se ve en
+              // el CRM. Ahora se deja un warning explícito con el teléfono
+              // y mediaId afectados, para poder rastrear cuál foto quedó
+              // sin enlace y por qué (ver el log de guardarMedia arriba,
+              // que sí imprime la causa real — típicamente falta de cuota
+              // de Drive del service account si MEDIA_FOLDER_ID no apunta
+              // a una Unidad Compartida).
+              if (!driveUrl) {
+                console.warn(`⚠️ Memoria: foto de ${fromE164} (mediaId ${mediaId}) guardada SIN driveUrl — revisar el error de guardarMedia arriba en este mismo log.`);
+              }
+              return memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: driveUrl || "", session }).catch(() => {});
+            })
+            .catch(err => {
+              console.error(`❌ Memoria: guardarMedia rechazó la promesa para ${fromE164} (mediaId ${mediaId}):`, err.message);
+              return memoria.guardarMensaje({ phone: fromE164, clientName, direction: "in", type: "image", content: "[Foto enviada por el cliente]", mediaId, driveUrl: "", session }).catch(() => {});
+            });
         });
       }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v19 (16 sept 2026) — PAUSA MANUAL: Darwin tomó el control de ESTA
+    // conversación desde el CRM. El mensaje del cliente ya quedó guardado en
+    // memoria arriba (así que sigue viéndose en el chat del CRM en tiempo
+    // real) — pero Sasha no genera ninguna respuesta automática mientras
+    // dure la pausa. Cualquier otro cliente sigue recibiendo respuesta
+    // normal — esto es por teléfono, no global.
+    // ══════════════════════════════════════════════════════════════════════
+    if (!esSupervisor && estaEnPausaManual(fromE164)) {
+      console.log(`⏸️ Conversación con ${fromE164} en pausa manual (Darwin tiene el control) — Sasha no responde.`);
+      return;
     }
 
     // ── Detectar día/fecha para disponibilidad ────────────────────────────────
@@ -2270,4 +2368,11 @@ function logLead(from, session, tipo = "lead") {
   }));
 }
 
-module.exports = { handleMessage };
+module.exports = {
+  handleMessage,
+  // v19 — control manual de conversación desde el CRM (usado por server.js)
+  pausarConversacion,
+  reanudarConversacion,
+  estaEnPausaManual,
+  msRestantesPausa,
+};
