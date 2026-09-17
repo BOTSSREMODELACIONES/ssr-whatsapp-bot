@@ -530,8 +530,18 @@ async function getAvailableVisitDates({ daysAhead = 30, maxDates = 10 } = {}) {
         `${String(cursor.getMonth() + 1).padStart(2, "0")}-` +
         `${String(cursor.getDate()).padStart(2, "0")}`;
 
+      // FIX v21: NO especificar timeZone aquí. `cursor` ya representa la
+      // hora CR "disfrazada" de hora local (mismo truco que nowCR()), igual
+      // que isoDate más abajo (getFullYear/getMonth/getDate, sin timeZone).
+      // Si esta línea especifica timeZone: "America/Costa_Rica", en Railway
+      // (que corre en UTC) se aplica una SEGUNDA conversión de -6h, y el
+      // label termina mostrando el día calendario ANTERIOR al que realmente
+      // pasó el filtro esDiaLaborable() (ej.: un viernes real se etiquetaba
+      // "jueves"). El id de la fila (isoDate) seguía siendo el día correcto,
+      // así que el cliente veía una fecha/día distinto del que en realidad
+      // iba a agendar. Ver bug reportado 2026-09-17 (lista "Ver fechas"
+      // mostrando jueves/domingos en vez de lunes/martes/viernes).
       const label = cursor.toLocaleDateString("es-CR", {
-        timeZone: "America/Costa_Rica",
         weekday: "long",
         day: "numeric",
         month: "long",
