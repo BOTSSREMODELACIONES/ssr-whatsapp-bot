@@ -1342,28 +1342,135 @@ if (!ev) {
   ].join("\n");
 }
 
-      // Notificar al cliente del cambio
-      let clienteNotificado = false;
-      if (intent.avisarCliente !== false && ev.clientPhone && !SUPERVISORES.includes(ev.clientPhone)) {
-        const msg = `Hola, le escribimos de *SS Remodelaciones* 🏗️\n\nSu visita técnica fue *reprogramada*:\n\n❌ Antes: ${ev.oldDateStr}\n✅ Ahora: *${ev.newDateStr}*\n\nSi tiene alguna consulta, con gusto le atendemos. ¡Hasta pronto! 😊`;
-        sendText(ev.clientPhone, msg).catch(() => {});
-        clienteNotificado = true;
-      }
+// ── Confirmación segura del reagendamiento ──────────────────────────────
+// calendar.js confirma el cambio mediante updated === 1 y devuelve
+// el evento actualizado en result.events[0].
+//
+// No asumimos campos antiguos como:
+// ev.clientPhone / ev.oldDateStr / ev.newDateStr.
 
-      return [
-        `✅ *Cita reagendada*`,
+const fechaNueva = ev.date instanceof Date
+  ? ev.date
+  : new Date(ev.date);
+
+const nuevaFechaStr =
+  !isNaN(fechaNueva.getTime())
+    ? fechaNueva.toLocaleDateString("es-CR", {
+        timeZone: TZ,
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      })
+    : String(intent.nuevaFecha || "fecha actualizada");
+
+const nuevaHoraStr =
+  !isNaN(fechaNueva.getTime())
+    ? fechaNueva.toLocaleTimeString("es-CR", {
+        timeZone: TZ,
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      })
+    : String(intent.nuevaHora || "");
+
+
+// ── Intentar recuperar teléfono del cliente ─────────────────────────────
+// El contrato actual de rescheduleEventByNameAndDate() no garantiza
+// clientPhone dentro de result.events[0].
+//
+// Buscamos el cliente por nombre en memoria/CRM, pero si no encontramos
+// un teléfono confiable NO enviamos nada automáticamente.
+
+let clienteNotificado = false;
+let telefonoCliente = null;
+
+if (intent.avisarCliente !== false && intent.nombre) {
+  try {
+    const rowsMem = await memoria
+      .buscarPorNombre(intent.nombre, 5)
+      .catch(() => []);
+
+    if (rowsMem.length > 0) {
+      const tel = String(rowsMem[0][1] || "").replace(/\D/g, "");
+
+      if (tel.length >= 8) {
+        telefonoCliente = tel.startsWith("506")
+          ? `+${tel}`
+          : `+506${tel}`;
+      }
+    }
+
+    if (!telefonoCliente) {
+      const crmRows = await memoria
+        .buscarClienteEnCRM(intent.nombre)
+        .catch(() => []);
+
+      if (crmRows.length > 0) {
+        const tel = String(crmRows[0][1] || "").replace(/\D/g, "");
+
+        if (tel.length >= 8) {
+          telefonoCliente = tel.startsWith("506")
+            ? `+${tel}`
+            : `+506${tel}`;
+        }
+      }
+    }
+
+    if (
+      telefonoCliente &&
+      !SUPERVISORES.includes(telefonoCliente)
+    ) {
+      const msgCliente = [
+        `Hola, le escribimos de *SS Remodelaciones* 🏗️`,
         ``,
-        `📋 ${ev.summary}`,
-        `❌ Antes: ${ev.oldDateStr}`,
-        `✅ Ahora: *${ev.newDateStr}*`,
+        `Su visita técnica fue *reprogramada*.`,
         ``,
-        intent.avisarCliente === false
-          ? `🔕 Cliente NO notificado (como pediste).`
-          : clienteNotificado
-            ? `✉️ Cliente notificado automáticamente por WhatsApp.`
-            : `ℹ️ No se pudo notificar al cliente (sin teléfono en el evento).`,
-        `👤 Por: ${quien}`,
-      ].join("\n");
+        `📅 Nueva fecha: *${nuevaFechaStr}*`,
+        nuevaHoraStr
+          ? `🕐 Nueva hora: *${nuevaHoraStr}*`
+          : "",
+        ``,
+        `Si tiene alguna consulta, con gusto le atendemos. ¡Hasta pronto! 😊`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+
+      await sendText(telefonoCliente, msgCliente);
+
+      clienteNotificado = true;
+    }
+
+  } catch (err) {
+    console.warn(
+      "⚠️ La cita se reagendó, pero no se pudo notificar al cliente:",
+      err.message
+    );
+  }
+}
+
+
+// ── Respuesta al supervisor ─────────────────────────────────────────────
+
+return [
+  `✅ *Cita reagendada*`,
+  ``,
+  `📋 ${ev.summary || intent.nombre || "Visita técnica"}`,
+  `📅 Nueva fecha: *${nuevaFechaStr}*`,
+  nuevaHoraStr
+    ? `🕐 Nueva hora: *${nuevaHoraStr}*`
+    : "",
+  ``,
+  intent.avisarCliente === false
+    ? `🔕 Cliente NO notificado (como pediste).`
+    : clienteNotificado
+      ? `✉️ Cliente notificado automáticamente por WhatsApp.`
+      : `ℹ️ La cita se reagendó, pero no encontré un teléfono confiable para notificar automáticamente al cliente.`,
+  `👤 Por: ${quien}`,
+]
+  .filter(Boolean)
+  .join("\n");
+      
     } catch (err) {
       console.error("❌ Error reagendando cita:", err.message);
       return `❌ Error al reagendar la cita: ${err.message}`;
