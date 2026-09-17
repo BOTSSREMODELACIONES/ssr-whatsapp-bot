@@ -138,6 +138,10 @@ async function getOrCreateSheetId() {
                 "Entrada / Salida",
                 "Tipo",
                 "Mensaje",
+                "mediaId",
+                "driveUrl",
+                "Proyecto",
+                "Zona",
               ].map(v => ({
                 userEnteredValue: { stringValue: v },
                 userEnteredFormat: { textFormat: { bold: true } },
@@ -194,30 +198,55 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
     const timestamp = new Date().toISOString();
     const nombre    = clientName || session?.name || "";
 
+    // ══════════════════════════════════════════════════════════════════════
+    // v4 (17 sept 2026) — FIX CRÍTICO: "Falta driveUrl" en el CRM.
+    //
+    // CAUSA RAÍZ REAL (encontrada leyendo el HTML del CRM, no la que se
+    // había asumido antes): el CRM (sasha-crm-ssr.netlify.app) lee el Sheet
+    // publicado como CSV y espera 10 columnas — A:Fecha, B:Teléfono,
+    // C:Nombre, D:Entrada/Salida, E:Tipo, F:Mensaje, G:mediaId, H:driveUrl,
+    // I:Proyecto, J:Zona — y arma el reproductor de audio / la imagen /el
+    // enlace al PDF leyendo la columna H (driveUrl) de cada fila por
+    // separado. Pero esta función SOLO escribía A:F — el driveUrl nunca
+    // tuvo columna propia, quedaba metido como texto DENTRO del mensaje de
+    // la columna F (ej. "[Foto enviada por el cliente] https://drive...").
+    // Como la columna H nunca se escribía, el CRM la encontraba vacía en
+    // TODAS las filas, sin excepción — de ahí "Falta driveUrl: el servidor
+    // aún no guardó un enlace visible" en cada foto/audio/documento, pasara
+    // lo que pasara con la subida a Drive.
+    //
+    // FIX: se escribe A:J en vez de A:F. mediaId va a su propia columna G,
+    // driveUrl a su propia columna H (ya no metido dentro del texto de F),
+    // y proyecto/zona (que ya se calculaban más abajo para la pestaña
+    // CLIENTES) también se escriben en I/J de esta misma fila para que el
+    // CRM los pueda leer directo sin tener que cruzar con otra pestaña.
+    // La columna F (Mensaje) vuelve a ser solo el texto legible, sin el
+    // enlace incrustado — el enlace ahora vive únicamente en H.
+    //
+    // Las filas viejas que ya se guardaron con el driveUrl metido dentro de
+    // F van a seguir mostrando "Falta driveUrl" en el CRM (no se puede
+    // arreglar retroactivamente desde acá) — pero todo mensaje nuevo desde
+    // el despliegue de este fix va a funcionar bien.
+    // ══════════════════════════════════════════════════════════════════════
+
     let mensajeCol = content || "";
-    // v3 — extendido de solo "image" a también "audio" y "document", con el
-    // mismo criterio: si hay driveUrl se muestra el enlace, si no al menos
-    // el mediaId para poder rastrearlo a mano.
-    if (type === "image") {
-      if (driveUrl)      mensajeCol = `[Foto enviada por el cliente] ${driveUrl}`;
-      else if (mediaId)  mensajeCol = `[Foto enviada por el cliente] ID:${mediaId}`;
-      else               mensajeCol = "[Foto enviada por el cliente]";
-    } else if (type === "audio") {
-      if (driveUrl)      mensajeCol = `[Audio enviado por el cliente] ${driveUrl}`;
-      else if (mediaId)  mensajeCol = `[Audio enviado por el cliente] ID:${mediaId}`;
-      else               mensajeCol = content || "[Audio enviado por el cliente]";
-    } else if (type === "document") {
-      if (driveUrl)      mensajeCol = `[Documento enviado por el cliente] ${driveUrl}`;
-      else if (mediaId)  mensajeCol = `[Documento enviado por el cliente] ID:${mediaId}`;
-      else               mensajeCol = content || "[Documento enviado por el cliente]";
+    if (type === "image" && !mensajeCol) {
+      mensajeCol = "[Foto enviada por el cliente]";
+    } else if (type === "audio" && !mensajeCol) {
+      mensajeCol = "[Audio enviado por el cliente]";
+    } else if (type === "document" && !mensajeCol) {
+      mensajeCol = "[Documento enviado por el cliente]";
     }
+
+    const proyecto = session?.project_desc || "";
+    const zona     = session?.zone || "";
 
     await sheets.spreadsheets.values.append({
       spreadsheetId: sheetId,
-      range: "MENSAJES!A:F",
+      range: "MENSAJES!A:J",
       valueInputOption: "RAW",
       requestBody: {
-        values: [[timestamp, phone, nombre, direction, type, mensajeCol]],
+        values: [[timestamp, phone, nombre, direction, type, mensajeCol, mediaId || "", driveUrl || "", proyecto, zona]],
       },
     });
 
@@ -227,8 +256,6 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
         .catch(e => console.warn("⚠️ Memoria: error rellenando nombres anteriores:", e.message));
     }
 
-    const proyecto = session?.project_desc || "";
-    const zona     = session?.zone || "";
     actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona, session?.visit_confirmed || false)
       .catch(e => console.warn("⚠️ Memoria: no se actualizó CLIENTES:", e.message));
 
