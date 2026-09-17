@@ -658,6 +658,67 @@ async function verificarDisponibilidadExacta(startDate, phone = null) {
 }
 
 // ── Buscar y eliminar eventos futuros de un cliente por teléfono ─────────────
+async function cancelClientEvents(calendar, phone) {
+  try {
+    const phoneNorm = normalizarTelefono(phone);
+
+    if (!phoneNorm) {
+      return 0;
+    }
+
+    const now = new Date();
+    const future = new Date(
+      now.getTime() + 180 * 24 * 60 * 60 * 1000
+    );
+
+    const response = await calendar.events.list({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      timeMin: now.toISOString(),
+      timeMax: future.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const events = (response.data.items || []).filter(
+      event => event.status !== "cancelled"
+    );
+
+    const clientEvents = events.filter(event => {
+      const eventPhone =
+        extraerTelefonoDeEvento(event.description || "");
+
+      if (!eventPhone) return false;
+
+      return normalizarTelefono(eventPhone) === phoneNorm;
+    });
+
+    let deleted = 0;
+
+    for (const event of clientEvents) {
+      await calendar.events.delete({
+        calendarId: process.env.GOOGLE_CALENDAR_ID,
+        eventId: event.id,
+        sendUpdates: "none",
+      });
+
+      deleted++;
+
+      console.log(
+        `🗑️ Cita anterior eliminada por idempotencia: "${event.summary}"`
+      );
+    }
+
+    return deleted;
+
+  } catch (err) {
+    console.error(
+      "❌ cancelClientEvents error:",
+      err.message
+    );
+
+    return 0;
+  }
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // CANCELAR CITA DEL CLIENTE QUE ESTÁ ESCRIBIENDO
 //
