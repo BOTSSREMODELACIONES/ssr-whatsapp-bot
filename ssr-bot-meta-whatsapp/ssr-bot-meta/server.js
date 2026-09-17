@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cron    = require("node-cron");
 const path    = require("path");
-const { handleMessage }       = require("./bot/index");
+const { handleMessage, pausarConversacion, reanudarConversacion, estaEnPausaManual, msRestantesPausa } = require("./bot/index");
 const { sendDailyReminders }  = require("./bot/reminders");
 const { enviarConfirmacionesVisitasManana } = require("./bot/confirmaciones");
 const memoria                 = require("./bot/memoria");
@@ -286,6 +286,23 @@ app.post("/webhook", async (req, res) => {
           console.log(`🎙️  Audio de +${from} (interno: ${esInterno}) — transcribiendo...`);
           (async () => {
             const transcripcion = await transcribirAudio(audioId, esInterno);
+
+            // v20 (16 sept 2026) — NUEVO: guardar el audio original (con su
+            // driveUrl) en memoria para clientes, además de la transcripción
+            // que ya se usaba para que Sasha respondiera. Así el CRM puede
+            // mostrar el audio real (reproductor), no solo el texto
+            // transcrito. Fire-and-forget: si falla, no afecta la respuesta
+            // normal del bot al cliente — ver memoria.js:guardarAdjuntoCliente.
+            if (!esInterno) {
+              memoria.guardarAdjuntoCliente({
+                phone: "+" + from,
+                clientName: null,
+                mediaId: audioId,
+                tipo: "audio",
+                contenido: transcripcion || "[Audio enviado por el cliente]",
+              }).catch(e => console.warn("⚠️ No se pudo guardar audio de cliente en memoria:", e.message));
+            }
+
             if (transcripcion) {
               console.log(`✅ Transcripción +${from}: "${transcripcion.slice(0, 100)}"`);
               const textoFinal = esInterno
@@ -313,6 +330,37 @@ app.post("/webhook", async (req, res) => {
         } else {
           addToBuffer(from, messageId, "[El cliente envió un mensaje de voz]", null);
         }
+
+      } else if (msg.type === "document") {
+        // v20 (16 sept 2026) — NUEVO: antes este tipo de mensaje caía
+        // directo en la rama "Tipo ignorado" de abajo — un PDF que mandara
+        // un cliente ni siquiera quedaba registrado en ningún lado. Ahora
+        // se guarda en memoria (con su driveUrl) para que sea visible en el
+        // CRM, igual que las fotos. Por ahora Sasha NO procesa el contenido
+        // del PDF ni responde nada especial sobre él — solo queda visible
+        // en el chat del CRM; el cliente puede seguir escribiendo texto
+        // normal sobre lo que mandó y Sasha responde a eso como siempre.
+        const mediaId  = msg.document?.id;
+        const filename = msg.document?.filename || "documento";
+        const caption  = msg.document?.caption || "";
+        const esInterno = NUMEROS_INTERNOS.has(from);
+
+        console.log(`📄 Documento de +${from}: "${filename}" (mediaId: ${mediaId}, interno: ${esInterno})`);
+
+        if (mediaId && !esInterno) {
+          memoria.guardarAdjuntoCliente({
+            phone: "+" + from,
+            clientName: null,
+            mediaId,
+            tipo: "document",
+            contenido: `[Documento: ${filename}]${caption ? " " + caption : ""}`,
+          }).catch(e => console.warn("⚠️ No se pudo guardar documento de cliente en memoria:", e.message));
+        }
+
+        // Si el cliente mandó el PDF junto con un texto (caption), ese texto
+        // sí se procesa normal — es lo único de este mensaje que Sasha puede
+        // interpretar por ahora.
+        if (caption) addToBuffer(from, messageId, caption, null);
 
       } else {
         console.log(`⚠️  Tipo ignorado: ${msg.type} de +${from}`);
@@ -788,9 +836,90 @@ app.post("/send-message", async (req, res) => {
       session: null,
     }).catch(e => console.warn("⚠️ No se pudo guardar en memoria:", e.message));
 
-    res.json({ ok: true, telefono: "+" + telefonoNorm });
+    // v20 (16 sept 2026) — cada vez que Darwin (o quien sea) le manda un
+    // mensaje manual a un cliente desde el CRM, se pausa/renueva
+    // automáticamente el control manual por 60 minutos más — así Sasha no
+    // le contesta encima mientras Darwin sigue conversando activo. No hace
+    // falta que haya tocado "Tomar control" antes; mandar un mensaje manual
+    // YA implica que quiere el control de esa conversación.
+    const expiraEn = pausarConversacion("+" + telefonoNorm);
+
+    res.json({ ok: true, telefono: "+" + telefonoNorm, pausadoHasta: expiraEn });
   } catch (err) {
     console.error("❌ /send-message error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── Control manual de conversación (Darwin toma/devuelve el control) ─────────
+// v20 (16 sept 2026) — usados por el botón "Tomar control" / "Devolver a
+// Sasha" del CRM. Ver la lógica completa (Map en memoria, 60 min de
+// inactividad) en bot/index.js.
+
+app.post("/api/conversacion/tomar-control", (req, res) => {
+  try {
+    const { telefono } = req.body;
+    if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
+
+    let telefonoNorm = telefono.replace(/\D/g, "");
+    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
+      telefonoNorm = "506" + telefonoNorm;
+    }
+
+    const expiraEn = pausarConversacion("+" + telefonoNorm);
+    console.log(`⏸️ /api/conversacion/tomar-control → +${telefonoNorm}`);
+
+    res.json({ ok: true, telefono: "+" + telefonoNorm, pausadoHasta: expiraEn });
+  } catch (err) {
+    console.error("❌ /api/conversacion/tomar-control error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/conversacion/liberar-control", (req, res) => {
+  try {
+    const { telefono } = req.body;
+    if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
+
+    let telefonoNorm = telefono.replace(/\D/g, "");
+    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
+      telefonoNorm = "506" + telefonoNorm;
+    }
+
+    reanudarConversacion("+" + telefonoNorm);
+    console.log(`▶️ /api/conversacion/liberar-control → +${telefonoNorm}`);
+
+    res.json({ ok: true, telefono: "+" + telefonoNorm });
+  } catch (err) {
+    console.error("❌ /api/conversacion/liberar-control error:", err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// GET para que el CRM pueda pintar el estado ("🔴 Control manual activo
+// hasta las X:XX") sin adivinar — telefono va como query param.
+app.get("/api/conversacion/estado", (req, res) => {
+  try {
+    const telefono = req.query.telefono;
+    if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
+
+    let telefonoNorm = telefono.replace(/\D/g, "");
+    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
+      telefonoNorm = "506" + telefonoNorm;
+    }
+    const tel = "+" + telefonoNorm;
+
+    const pausado    = estaEnPausaManual(tel);
+    const msRestante = msRestantesPausa(tel);
+
+    res.json({
+      ok: true,
+      telefono: tel,
+      pausado,
+      pausadoHasta: pausado ? Date.now() + msRestante : null,
+    });
+  } catch (err) {
+    console.error("❌ /api/conversacion/estado error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
@@ -813,6 +942,7 @@ app.listen(PORT, () => {
 │  🩺  Health check: GET /health                             │
 │  🧪  Test leads: GET /test-meta-lead                       │
 │  🧪  Test confirmaciones: GET /test-confirmaciones-visita  │
+│  🎛️  Control manual: POST /api/conversacion/tomar-control  │
 └────────────────────────────────────────────────────────────┘
   `);
 });
