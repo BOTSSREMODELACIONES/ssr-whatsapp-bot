@@ -414,7 +414,6 @@ function nombreSupervisor(phone) {
   const map = {
     "+50683091817": "Darwin",
     "+50671981370": "Melvin",
-    "+50670068477": "Oficina SSR",
   };
   return map[phone] || phone;
 }
