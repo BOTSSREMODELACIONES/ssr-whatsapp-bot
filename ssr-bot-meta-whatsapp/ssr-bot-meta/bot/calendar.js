@@ -727,6 +727,7 @@ async function cancelClientEvents(calendar, phone) {
 // Devuelve información explícita para que index.js SOLO confirme la
 // cancelación cuando Google Calendar haya eliminado el evento.
 // ─────────────────────────────────────────────────────────────────────────────
+
 async function cancelClientVisitByPhone(phone) {
   try {
     const phoneNorm = normalizarTelefono(phone);
@@ -739,8 +740,8 @@ async function cancelClientVisitByPhone(phone) {
       return {
         success: false,
         deleted: 0,
-        events: [],
         reason: "telefono_invalido",
+        events: [],
       };
     }
 
@@ -763,63 +764,78 @@ async function cancelClientVisitByPhone(phone) {
       event => event.status !== "cancelled"
     );
 
-    // Buscamos SOLO eventos cuyo teléfono guardado en la descripción
-    // coincida con el WhatsApp del cliente que está escribiendo.
-    const clientEvents = events.filter(event => {
+    const matched = events.filter(event => {
       const eventPhone =
         extraerTelefonoDeEvento(event.description || "");
 
-      if (!eventPhone) return false;
-
-      return normalizarTelefono(eventPhone) === phoneNorm;
+      return (
+        eventPhone &&
+        normalizarTelefono(eventPhone) === phoneNorm
+      );
     });
 
-    if (clientEvents.length === 0) {
+    const eventsInfo = matched.map(event => {
+      const startRaw =
+        event.start?.dateTime ||
+        event.start?.date;
+
+      return {
+        id: event.id,
+        summary: event.summary || "Visita SSR",
+        date: startRaw
+          ? formatearFechaEvento(startRaw)
+          : "",
+      };
+    });
+
+    // ── NO HAY CITA ─────────────────────────────────────────────
+    if (matched.length === 0) {
       console.log(
         `ℹ️ cancelClientVisitByPhone: no hay citas futuras para ${phone}`
       );
 
       return {
-        success: true,
+        success: false,
         deleted: 0,
-        events: [],
         reason: "not_found",
+        events: [],
       };
     }
 
-    const deletedEvents = [];
-
-    for (const event of clientEvents) {
-      const startRaw =
-        event.start?.dateTime ||
-        event.start?.date;
-
-      const dateStr = startRaw
-        ? formatearFechaEvento(startRaw)
-        : "";
-
-      await calendar.events.delete({
-        calendarId: process.env.GOOGLE_CALENDAR_ID,
-        eventId: event.id,
-        sendUpdates: "none",
-      });
-
-      deletedEvents.push({
-        id: event.id,
-        summary: event.summary || "Visita SSR",
-        date: dateStr,
-      });
-
-      console.log(
-        `🗑️ Cita del cliente cancelada: "${event.summary}" — ${dateStr}`
+    // ── HAY MÁS DE UNA CITA ─────────────────────────────────────
+    // Por seguridad NO eliminamos ninguna automáticamente.
+    if (matched.length > 1) {
+      console.warn(
+        `⚠️ cancelClientVisitByPhone: ${matched.length} citas futuras encontradas para ${phone}. No se eliminó ninguna.`
       );
+
+      return {
+        success: false,
+        deleted: 0,
+        reason: "multiple",
+        events: eventsInfo,
+      };
     }
+
+    // ── EXACTAMENTE UNA CITA ─────────────────────────────────────
+    const target = matched[0];
+
+    await calendar.events.delete({
+      calendarId: process.env.GOOGLE_CALENDAR_ID,
+      eventId: target.id,
+      sendUpdates: "none",
+    });
+
+    console.log(
+      `🗑️ Cita del cliente cancelada: "${target.summary}" — ${eventsInfo[0].date}`
+    );
 
     return {
       success: true,
-      deleted: deletedEvents.length,
-      events: deletedEvents,
+      deleted: 1,
       reason: null,
+      event: eventsInfo[0],
+      events: [eventsInfo[0]],
     };
 
   } catch (err) {
@@ -831,13 +847,12 @@ async function cancelClientVisitByPhone(phone) {
     return {
       success: false,
       deleted: 0,
-      events: [],
       reason: "error_calendario",
+      events: [],
       error: err.message,
     };
   }
 }
-
 
 // ── Búsqueda común de eventos por nombre y/o fecha ───────────────────────────
 async function buscarEventos({ nameHint, dateHint }) {
