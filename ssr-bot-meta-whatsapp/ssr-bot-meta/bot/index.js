@@ -785,6 +785,16 @@ async function fechaSigueDisponibleAgenda(fechaISO) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function formatearRechazoDisponibilidad(eventData, day) {
+  const reason =
+    eventData?.reason ||
+    eventData?.motivo ||
+    "no_disponible";
+
+  const conflict =
+    eventData?.conflict ||
+    eventData?.conflicto ||
+    null;
+
   const motivoTexto = {
     dia_bloqueado:
       "el día está bloqueado internamente",
@@ -797,17 +807,14 @@ async function formatearRechazoDisponibilidad(eventData, day) {
 
     error_calendario:
       "no se pudo consultar el calendario en este momento",
-  }[eventData?.motivo] || "no está disponible";
+  }[reason] || "no está disponible";
 
   const lineas = [
-    `⚠️ No se pudo agendar: ${motivoTexto}${eventData?.conflicto ? ` (${eventData.conflicto})` : ""}.`,
+    `⚠️ No se pudo agendar: ${motivoTexto}${conflict ? ` (${conflict})` : ""}.`,
   ];
 
-  // ─────────────────────────────────────────────────────────────────────
-  // Si el propio Calendar tuvo un error, NO intentamos afirmar ninguna
-  // disponibilidad. Sin Calendar no existe una fecha "disponible".
-  // ─────────────────────────────────────────────────────────────────────
-  if (eventData?.motivo === "error_calendario") {
+  // Si Calendar falló, no afirmamos disponibilidad.
+  if (reason === "error_calendario") {
     lineas.push(
       "ℹ️ No pude verificar fechas alternativas en este momento. Reintentá en unos minutos o revisá la agenda manualmente en Calendar."
     );
@@ -815,18 +822,12 @@ async function formatearRechazoDisponibilidad(eventData, day) {
     return lineas.join("\n");
   }
 
-  // ─────────────────────────────────────────────────────────────────────
-  // PRIMER INTENTO:
-  // Si el día solicitado sigue siendo un día válido, verificamos si
-  // todavía existe algún slot REAL disponible ese mismo día.
-  //
-  // Esto es útil principalmente para supervisores y mantiene el
-  // comportamiento anterior, pero siempre respaldado por Calendar.
-  // ─────────────────────────────────────────────────────────────────────
+  // Si el día solicitado todavía puede tener disponibilidad,
+  // consultamos Calendar directamente.
   if (
     day &&
-    eventData?.motivo !== "dia_no_laborable" &&
-    eventData?.motivo !== "dia_bloqueado"
+    reason !== "dia_no_laborable" &&
+    reason !== "dia_bloqueado"
   ) {
     try {
       const resultado = await getAvailableSlots(day);
@@ -866,21 +867,10 @@ async function formatearRechazoDisponibilidad(eventData, day) {
         `⚠️ No se pudieron consultar slots alternativos para "${day}":`,
         err.message
       );
-
-      // No retornamos todavía:
-      // intentamos buscar otras fechas reales abajo.
     }
   }
 
-  // ─────────────────────────────────────────────────────────────────────
-  // SEGUNDO INTENTO:
-  // Buscar próximas fechas REALMENTE disponibles.
-  //
-  // IMPORTANTE:
-  // Aquí ya NO usamos proximosDiasHabiles().
-  // getAvailableVisitDates() consulta Google Calendar y devuelve únicamente
-  // fechas cuyo slot de visita está realmente libre.
-  // ─────────────────────────────────────────────────────────────────────
+  // Si ese día no sirve, buscamos próximas fechas realmente libres.
   try {
     const disponibilidad = await getAvailableVisitDates({
       daysAhead: 35,
@@ -971,17 +961,32 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
   email     = email     || "";
 
   try {
-    const eventData = await createVisitEvent({
-      name, phone: telefonoCliente, project, zone, day, hour,
-      wazeLink: ubicacion, clientEmail: email,
+
+        const eventData = await createVisitEvent({
+      name,
+      phone: telefonoCliente,
+      email,
+      project,
+      zone,
+      day,
+      hour,
+      notes: ubicacion
+        ? `Ubicación / Waze: ${ubicacion}`
+        : "",
     });
 
-    // ── v9: si el calendario rechazó la cita (bloqueo o slot ocupado), NO
-    // confirmamos éxito ni avisamos al cliente. Se informa el motivo y se
-    // sugieren horarios alternativos del mismo día.
-    if (!eventData.ok) {
-      console.warn(`⛔ handleVisitaSupervisor: no se creó el evento (${eventData.motivo})`);
-      const rechazo = await formatearRechazoDisponibilidad(eventData, day);
+    // Calendar.js devuelve success/reason/conflict/date.
+    // Nunca confirmamos al supervisor ni al cliente si Calendar no creó el evento.
+    if (eventData.success !== true) {
+      console.warn(
+        `⛔ handleVisitaSupervisor: no se creó el evento (${eventData.reason || "error_desconocido"})`
+      );
+
+      const rechazo = await formatearRechazoDisponibilidad(
+        eventData,
+        day
+      );
+
       return [
         `❌ *No se agendó la visita de ${name}*`,
         ``,
@@ -991,8 +996,11 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
       ].join("\n");
     }
 
-    const dateStr = eventData.startDate.toLocaleDateString("es-CR", {
-      weekday: "long", day: "numeric", month: "long", timeZone: TZ,
+    const dateStr = eventData.date.toLocaleDateString("es-CR", {
+      weekday: "long",
+      day: "numeric",
+      month: "long",
+      timeZone: TZ,
     });
 
     const [hh, mm] = hour.split(":");
@@ -2523,17 +2531,33 @@ if (dayMentioned === "GENERICO") {
 // Para clientes, la hora oficial de visita es siempre 09:00.
 // ════════════════════════════════════════════════════════════════════
 
-  const fechaAgendaBackend =
+      const fechaAgendaBackend =
   String(session.agenda_selected_date || "").trim();
 
+const fechaVisitDayLegacy =
+  String(session.visit_day || "").trim();
+
+// agenda_selected_date representa únicamente una selección interactiva
+// PENDIENTE de confirmación.
+//
+// Una vez que ya existe una visita confirmada, esa fecha anterior NO puede
+// bloquear una solicitud posterior de reagendamiento.
+//
+// El fallback a visit_day se conserva únicamente para sesiones antiguas o
+// conversaciones que estaban a mitad del flujo antes de implementar
+// agenda_selected_date.
 const fechaSeleccionadaBackend =
-  /^\d{4}-\d{2}-\d{2}$/.test(fechaAgendaBackend)
-    ? fechaAgendaBackend
-    : (
-        /^\d{4}-\d{2}-\d{2}$/.test(String(session.visit_day || "").trim())
-          ? String(session.visit_day).trim()
-          : null
-      );          
+  session.visit_confirmed !== true
+    ? (
+        /^\d{4}-\d{2}-\d{2}$/.test(fechaAgendaBackend)
+          ? fechaAgendaBackend
+          : (
+              /^\d{4}-\d{2}-\d{2}$/.test(fechaVisitDayLegacy)
+                ? fechaVisitDayLegacy
+                : null
+            )
+      )
+    : null;
 
 const diaFinal =
   fechaSeleccionadaBackend ||
@@ -2611,49 +2635,65 @@ const updated = update(from, {
       let eventOk = false;
       let eventData = null;
       try {
-        eventData = await createVisitEvent({
-          name:        updated.name,
-          phone:       from,
-          project:     updated.project_desc,
-          zone:        updated.zone,
-          day:         updated.visit_day,
-          hour:        updated.visit_hour,
-          wazeLink:    updated.waze_link,
-          clientEmail: updated.client_email,
-        });
 
-        if (eventData.ok) {
+      eventData = await createVisitEvent({
+  name:    updated.name,
+  phone:   from,
+  email:   updated.client_email,
+  project: updated.project_desc,
+  zone:    updated.zone,
+  day:     updated.visit_day,
+  hour:    updated.visit_hour,
+  notes:   updated.waze_link
+    ? `Ubicación / Waze: ${updated.waze_link}`
+    : "",
+});
+
+if (eventData.success === true) {
   eventOk = true;
 
-  // v20 — SOLO AHORA la visita puede considerarse confirmada.
-  update(from, {
-    visit_confirmed: true,
-    lead_saved: true,
-  });
+  // v21 — SOLO AHORA la visita puede considerarse confirmada.
+  // Calendar ya verificó disponibilidad y creó realmente el evento.
+ update(from, {
+  visit_confirmed: true,
+  lead_saved: true,
+
+  // La selección interactiva ya cumplió su función.
+  // La visita real ya existe en Google Calendar.
+  agenda_selected_date: null,
+});
 
   updated.visit_confirmed = true;
   updated.lead_saved = true;
+  updated.agenda_selected_date = null;
 
- const nombreDetectado = updated.name || name?.trim();
+  const nombreDetectado = updated.name || name?.trim();
 
-if (nombreDetectado) {
-  memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
-    proyecto:       updated.project_desc || "",
-    zona:           updated.zone || "",
-    visitaAgendada: true,
-  }).catch(() => {});
-}               
+  if (nombreDetectado) {
+    memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
+      proyecto:       updated.project_desc || "",
+      zona:           updated.zone || "",
+      visitaAgendada: true,
+    }).catch(() => {});
+  }
 
-  dateStr = eventData.startDate.toLocaleDateString("es-CR", {
-    weekday: "long", day: "numeric", month: "long", timeZone: TZ,
+  dateStr = eventData.date.toLocaleDateString("es-CR", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    timeZone: TZ,
   });
 
   console.log(
-    `📅 Visita agendada: ${eventData.eventLink}${eventData.rescheduled ? " (reagendada)" : ""}`
+    `📅 Visita agendada: ${eventData.htmlLink || eventData.eventId || "evento creado"}`
   );
+
 } else {
-          console.warn(`⛔ Visita NO agendada (flujo cliente): ${eventData.motivo} — ${eventData.conflicto || "—"}`);
-        }
+  console.warn(
+    `⛔ Visita NO agendada (flujo cliente): ${eventData.reason || "error_desconocido"} — ${eventData.conflict || "—"}`
+  );
+}
+        
       } catch (calErr) {
         console.error("❌ Error Calendar:", calErr.message);
       }
@@ -2712,7 +2752,7 @@ if (nombreDetectado) {
         update(from, { visit_confirmed: false, lead_saved: session.lead_saved || false });
         await notifyAllSupervisors(
           from, updated,
-          `⚠️ Intento de agendar chocó con un bloqueo/cita existente (${eventData?.motivo || "error"}). El cliente sigue esperando horario.`,
+          `⚠️ Intento de agendar chocó con un bloqueo/cita existente (${eventData?.reason || "error"}). El cliente sigue esperando horario.`,
           "visita_solicitada"
         );
         logLead(from, updated, "visita_rechazada_conflicto");
