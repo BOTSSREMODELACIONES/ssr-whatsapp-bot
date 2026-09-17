@@ -1261,58 +1261,86 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
   newHour:  intent.nuevaHora,
 });
 
-      if (result.ambiguous) {
-        const lineas = result.events.map(e => `• ${e.summary} — ${e.dateStr}`).join("\n");
-        return `⚠️ Encontré *${result.events.length} citas* que coinciden. Especificá mejor (nombre completo o fecha):\n\n${lineas}`;
-      }
+     // calendar.js devuelve actualmente:
+// { updated, events, reason, conflict }
+//
+// updated === 1  → reagenda realizada.
+// updated === 0  → NO se modificó Calendar.
 
-      if (result.error === "fecha_pasada") {
-        return `⚠️ La nueva fecha ya pasó. Indicá una fecha futura.`;
-      }
+if (result.updated !== 1) {
 
-      // ── v9: destino ocupado/bloqueado — antes caía en el "no encontré la
-      // cita" genérico, lo cual era engañoso (la cita SÍ existe, el problema
-      // es el destino). Ahora se informa el motivo real y se sugieren
-      // horarios alternativos del día de destino.
-      if (result.error === "destino_ocupado") {
-        const motivoTexto = {
-          dia_bloqueado:    "ese día está bloqueado internamente",
-          slot_ocupado:     "ese horario ya está ocupado",
-          dia_no_laborable: "esa fecha no cae en día de visitas (solo lunes, martes o viernes)",
-        }[result.motivo] || "ese horario no está disponible";
+  // No encontramos la cita original.
+  if (result.reason === "not_found") {
+    const q = intent.nombre
+      ? ` de *${intent.nombre}*`
+      : "";
 
-        // v11: si el motivo es día no hábil, ofrecemos fechas reales ya
-        // calculadas en vez de intentar sacar slots de un día imposible.
-        let sugerencia = "";
-        if (result.motivo === "dia_no_laborable") {
-          const proximos = proximosDiasHabiles(new Date(new Date().toLocaleString("en-US", { timeZone: TZ })), 3);
-          sugerencia = `\n\n📅 Próximas fechas disponibles: ${formatearListaFechas(proximos)}`;
-        } else if (intent.nuevaFecha) {
-          try {
-            // v12: getAvailableSlots ahora devuelve { date, dateLabel, slots }.
-            const resultado = await getAvailableSlots(intent.nuevaFecha);
-            const slots = resultado.slots;
-            if (slots.length > 0) {
-              const slotsText = slots.map(s => {
-                const [h, m] = s.split(":");
-                const hNum   = parseInt(h);
-                const h12    = hNum > 12 ? hNum - 12 : hNum;
-                return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
-              }).join(", ");
-              sugerencia = `\n\n🕐 Horarios libres ${resultado.dateLabel ? `el ${resultado.dateLabel}` : "ese día"}: ${slotsText}`;
-            }
-          } catch {}
-        }
+    return [
+      `📭 No encontré la cita${q} para mover.`,
+      ``,
+      `Verificá el nombre o la fecha actual e intentá de nuevo.`,
+    ].join("\n");
+  }
 
-        return `⚠️ No se pudo reagendar: ${motivoTexto}${result.conflicto ? ` (${result.conflicto})` : ""}.${sugerencia}`;
-      }
+  // Error consultando/modificando Google Calendar.
+  if (result.reason === "error_calendario") {
+    return [
+      `❌ No se pudo reagendar la cita porque hubo un error consultando Google Calendar.`,
+      ``,
+      `⚠️ No voy a asumir que otra fecha está disponible.`,
+      `Reintentá en unos minutos o revisá la agenda manualmente.`,
+    ].join("\n");
+  }
 
-      if (result.moved === 0) {
-        const q = intent.nombre ? ` de *${intent.nombre}*` : "";
-        return `📭 No encontré la cita${q} para mover.\n\nVerificá el nombre o la fecha.`;
-      }
+  // Día no permitido o destino realmente ocupado/bloqueado.
+  if (
+    result.reason === "dia_no_laborable" ||
+    result.reason === "slot_ocupado" ||
+    result.reason === "dia_bloqueado"
+  ) {
+    const rechazo = await formatearRechazoDisponibilidad(
+      {
+        reason: result.reason,
+        conflict: result.conflict || null,
+      },
+      intent.nuevaFecha
+    );
 
-      const ev = result.events[0];
+    return [
+      `⚠️ *No se pudo reagendar la cita.*`,
+      ``,
+      rechazo,
+    ].join("\n");
+  }
+
+  // Cualquier respuesta inesperada: nunca afirmar que se reagendó.
+  console.warn(
+    "⚠️ Resultado inesperado al reagendar:",
+    JSON.stringify(result)
+  );
+
+  return [
+    `❌ No se pudo confirmar el reagendamiento.`,
+    ``,
+    `Google Calendar no confirmó que la cita haya sido modificada.`,
+    `Revisá la agenda antes de informar una nueva fecha al cliente.`,
+  ].join("\n");
+}
+
+const ev = result.events?.[0];
+
+if (!ev) {
+  console.warn(
+    "⚠️ Calendar reportó updated=1 pero no devolvió el evento reagendado."
+  );
+
+  return [
+    `⚠️ Calendar indicó que la cita fue modificada,`,
+    `pero no devolvió los datos necesarios para confirmar el cambio.`,
+    ``,
+    `Revisá el evento directamente en Google Calendar.`,
+  ].join("\n");
+}
 
       // Notificar al cliente del cambio
       let clienteNotificado = false;
