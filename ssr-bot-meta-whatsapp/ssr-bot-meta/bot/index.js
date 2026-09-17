@@ -2448,14 +2448,16 @@ if (
     // ── MÁS DE UNA CITA ─────────────────────────────────────────────
     // Nunca borramos varias citas automáticamente si Calendar detectó
     // ambigüedad.
-    if (
-      resultadoCancelacion &&
-      (
-        resultadoCancelacion.reason === "multiple_events" ||
-        resultadoCancelacion.reason === "multiple_matches" ||
-        resultadoCancelacion.ambiguous === true
-      )
-    ) {
+   if (
+  resultadoCancelacion &&
+  (
+    resultadoCancelacion.reason === "multiple" ||
+    resultadoCancelacion.reason === "multiple_events" ||
+    resultadoCancelacion.reason === "multiple_matches" ||
+    resultadoCancelacion.ambiguous === true
+  )
+)
+    {
       await sendText(
         from,
         "Encontré más de una visita futura asociada a su número. Para evitar cancelar una cita incorrecta, necesito que nuestro equipo revise cuál desea eliminar."
@@ -2469,13 +2471,12 @@ if (
     }
 
     // ── NO SE ENCONTRÓ CITA ────────────────────────────────────────
+   
     if (
-      resultadoCancelacion &&
-      (
-        resultadoCancelacion.reason === "not_found" ||
-        resultadoCancelacion.deleted === 0
-      )
-    ) {
+  resultadoCancelacion &&
+  resultadoCancelacion.reason === "not_found"
+)
+    {
       await sendText(
         from,
         "No encontré una visita futura activa asociada a este número de WhatsApp. No eliminé ningún evento de la agenda."
