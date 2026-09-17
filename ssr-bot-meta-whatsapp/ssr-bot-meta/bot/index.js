@@ -131,6 +131,7 @@ const {
   getAvailableVisitDates,
   verificarDisponibilidadExacta,
   cancelEventByNameAndDate,
+  cancelClientVisitByPhone,
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
 } = require("./calendar");
@@ -1557,7 +1558,42 @@ return [
 
   return null;
 }
+// ═══════════════════════════════════════════════════════════════════════════════
+// v21 — CANCELACIÓN AUTOMÁTICA DE VISITA POR EL PROPIO CLIENTE
+//
+// IMPORTANTE:
+// - Claude NO decide si una cita quedó cancelada.
+// - Google Calendar es la única fuente de verdad.
+// - Solo interceptamos frases inequívocas de CANCELACIÓN.
+// - Frases como "ese día no puedo", "quiero cambiarla" o "reagendar"
+//   NO se consideran cancelación.
+// ═══════════════════════════════════════════════════════════════════════════════
 
+function clientePideCancelarVisita(texto) {
+  const n = String(texto || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+
+  if (!n) return false;
+
+  // Debe existir una acción inequívoca de cancelación.
+  const accionCancelar =
+    /\b(cancel|cancela|cancelar|cancele|cancelarla|cancelelo|cancelen|anul|elimin|borr|quit)\w*\b/.test(n);
+
+  if (!accionCancelar) return false;
+
+  // Y además debe quedar claro que habla de la cita/visita/agendamiento,
+  // o utilizar una construcción directa como "cancélela".
+  const hablaDeVisita =
+    /\b(cita|visita|reserv|agenda|agendamiento|evento)\w*\b/.test(n);
+
+  const cancelacionDirecta =
+    /\b(cancela|cancele|cancelarla|cancelalo|cancelela|anulala|anulelo|borrela|eliminala)\b/.test(n);
+
+  return hablaDeVisita || cancelacionDirecta;
+}
 // ═══════════════════════════════════════════════════════════════════════════════
 // HANDLER PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2332,7 +2368,154 @@ if (mensajeDarwin) {
       console.log(`⏸️ Conversación con ${fromE164} en pausa manual (Darwin tiene el control) — Sasha no responde.`);
       return;
     }
+// ══════════════════════════════════════════════════════════════════════
+// v21 — CANCELACIÓN AUTOMÁTICA SOLICITADA POR EL CLIENTE
+//
+// Se ejecuta ANTES de Claude.
+// Sasha solamente confirma "cancelada" después de que Google Calendar
+// confirme que el evento fue eliminado.
+// ══════════════════════════════════════════════════════════════════════
 
+if (
+  !esSupervisor &&
+  normalized &&
+  clientePideCancelarVisita(normalized)
+) {
+  console.log(
+    `🗑️ Cancelación solicitada por cliente ${fromE164}: "${normalized}"`
+  );
+
+  try {
+    const resultadoCancelacion =
+      await cancelClientVisitByPhone(fromE164);
+
+    console.log(
+      "📅 Resultado cancelación cliente:",
+      JSON.stringify(resultadoCancelacion)
+    );
+
+    // ── CANCELACIÓN CONFIRMADA POR GOOGLE CALENDAR ───────────────────
+    if (
+      resultadoCancelacion &&
+      resultadoCancelacion.success === true &&
+      resultadoCancelacion.deleted === 1
+    ) {
+      const eventoCancelado =
+        resultadoCancelacion.event ||
+        (Array.isArray(resultadoCancelacion.events)
+          ? resultadoCancelacion.events[0]
+          : null);
+
+      // SOLO después de que Calendar confirmó el borrado
+      // limpiamos el estado local de la visita.
+      update(from, {
+        visit_confirmed: false,
+        visit_day: null,
+        visit_hour: null,
+        agenda_selected_date: null,
+        slots_shown: null,
+      });
+
+      const mensajeCancelada = [
+        "✅ Su visita quedó cancelada correctamente.",
+        "",
+        "La cita ya fue eliminada de nuestra agenda.",
+        "Cuando desee retomarla, con mucho gusto podemos mostrarle nuevamente las fechas disponibles. 😊",
+      ].join("\n");
+
+      await sendText(from, mensajeCancelada);
+      addMsg(from, "assistant", mensajeCancelada);
+
+      memoria.guardarMensaje({
+        phone: fromE164,
+        clientName: session.name || null,
+        direction: "out",
+        type: "text",
+        content: mensajeCancelada,
+        session: get(from),
+      }).catch(() => {});
+
+      console.log(
+        `✅ Visita cancelada realmente en Calendar para ${fromE164}` +
+        (eventoCancelado?.summary
+          ? ` — ${eventoCancelado.summary}`
+          : "")
+      );
+
+      return;
+    }
+
+    // ── MÁS DE UNA CITA ─────────────────────────────────────────────
+    // Nunca borramos varias citas automáticamente si Calendar detectó
+    // ambigüedad.
+    if (
+      resultadoCancelacion &&
+      (
+        resultadoCancelacion.reason === "multiple_events" ||
+        resultadoCancelacion.reason === "multiple_matches" ||
+        resultadoCancelacion.ambiguous === true
+      )
+    ) {
+      await sendText(
+        from,
+        "Encontré más de una visita futura asociada a su número. Para evitar cancelar una cita incorrecta, necesito que nuestro equipo revise cuál desea eliminar."
+      );
+
+      console.warn(
+        `⚠️ Cancelación ambigua para ${fromE164}; no se eliminó ninguna cita.`
+      );
+
+      return;
+    }
+
+    // ── NO SE ENCONTRÓ CITA ────────────────────────────────────────
+    if (
+      resultadoCancelacion &&
+      (
+        resultadoCancelacion.reason === "not_found" ||
+        resultadoCancelacion.deleted === 0
+      )
+    ) {
+      await sendText(
+        from,
+        "No encontré una visita futura activa asociada a este número de WhatsApp. No eliminé ningún evento de la agenda."
+      );
+
+      console.warn(
+        `📭 Cliente ${fromE164} pidió cancelar, pero Calendar no encontró una cita futura.`
+      );
+
+      return;
+    }
+
+    // ── RESPUESTA INESPERADA DEL BACKEND ───────────────────────────
+    await sendText(
+      from,
+      "No pude completar la cancelación en la agenda en este momento. Su cita no se considera cancelada todavía. Por favor inténtelo nuevamente o permítame escalarlo con nuestro equipo."
+    );
+
+    console.error(
+      `❌ Cancelación NO confirmada para ${fromE164}:`,
+      resultadoCancelacion
+    );
+
+    return;
+
+  } catch (err) {
+    console.error(
+      `❌ Error cancelando visita del cliente ${fromE164}:`,
+      err.message,
+      err.stack
+    );
+
+    await sendText(
+      from,
+      "No pude completar la cancelación en Google Calendar en este momento. Su cita sigue activa hasta que podamos confirmar la eliminación. Por favor inténtelo nuevamente en unos minutos."
+    );
+
+    return;
+  }
+}
 // ══════════════════════════════════════════════════════════════════════
 // v20 — RESPUESTA A LISTA INTERACTIVA DE AGENDA
 //
