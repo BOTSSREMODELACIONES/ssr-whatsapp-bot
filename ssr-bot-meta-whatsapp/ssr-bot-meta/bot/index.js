@@ -2,114 +2,37 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
- * (ver historial completo de versiones v2 a v12 en el archivo original)
+ * ── CAMBIOS v22 (22 sept 2026) — SASHA NO PEDÍA EL NOMBRE DEL CLIENTE ────────
+ * BUG REAL (+50662285575): 24 mensajes de conversación, proyecto ya explicado
+ *   (cielo raso PVC en toda la casa), y Sasha nunca preguntó el nombre. En el
+ *   CRM quedó solo el número, con Proyecto y Zona en "—".
+ * CAUSA RAÍZ: nombre/proyecto/zona SOLO se guardaban si Claude emitía
+ *   [LEAD:...] o [VISITA:...]. No había ningún control en código: si Claude
+ *   no pedía el nombre o no emitía el flag, nada quedaba registrado.
+ * FIX (dos capas, esta es la de código — la otra está en claude.js v22):
+ *   1) extraerNombreDeclarado(): si el cliente dice "me llamo X", "mi nombre
+ *      es X", "Soy X" o llega el formulario de Meta con "Full name: X", el
+ *      nombre se guarda en la sesión y en memoria SIN depender de Claude.
+ *   2) construirContextoDatosCliente(): desde el 2º mensaje del cliente, si
+ *      falta nombre/proyecto/zona, se le inyecta a Claude un [SISTEMA:...]
+ *      con los datos guardados y la orden de emitir [LEAD:...] con lo que ya
+ *      sepa. Si falta el nombre, le ordena pedirlo (máximo 2 veces, con al
+ *      menos 4 mensajes de separación, para no ser insistente).
+ *   3) [LEAD:...] ahora acepta campos vacíos y ACTUALIZA el lead cada vez que
+ *      aparece un dato nuevo (antes solo se registraba la primera vez).
  *
- * ── CAMBIOS v13 — CIERRE DE 3 HUECOS DETECTADOS EN INCIDENTE OMAR QUESADA ──────
- * Auditoría sobre capturas reales de WhatsApp (agosto 2026) donde Sasha dio
- * fechas incorrectas repetidamente y confirmó una visita ANTES de que el
- * backend supiera si el horario estaba realmente libre. v9-v12 ya blindaban
- * el cálculo de fechas específicas y nombres de día — pero quedaban 3 huecos:
- *
- * BUG 1 — Preguntas de disponibilidad SIN mencionar día/fecha ("¿Cuándo se
- *   pueden llegar?", "¿tienen espacio?") no disparaban NINGÚN [SISTEMA:...].
- *   detectDayOrDate() solo reconocía nombres de día, fechas específicas y
- *   "hoy"/"mañana" — una pregunta genérica de disponibilidad caía fuera de
- *   los tres casos y dejaba a Claude respondiendo fechas de memoria, sin
- *   ningún dato verificado. Así se originó el primer error de la
- *   conversación (ofreció "viernes 29 de agosto", que en realidad es
- *   sábado). FIX: nuevo caso "GENERICO" en detectDayOrDate() + manejo
- *   dedicado en handleMessage que inyecta los próximos días hábiles reales
- *   (ya calculados) sin que Claude tenga que inferir nada.
- *
- * BUG 2 — El gate `dayMentioned !== session.slots_shown` bloqueaba la
- *   re-verificación PARA SIEMPRE dentro de una misma conversación: una vez
- *   mostrado "viernes" (o cualquier fecha) una sola vez, ningún mensaje
- *   posterior que volviera a mencionar exactamente ese mismo valor
- *   disparaba una nueva consulta al calendario — ni siquiera si el intento
- *   anterior había fallado. Esto dejó a Sasha respondiendo sin datos reales
- *   en varios puntos de la conversación con Omar, incluyendo una regla de
- *   "un día de anticipación" que NO existe en ningún mensaje de sistema —
- *   Claude la inventó porque no tenía contexto verificado para responder.
- *   FIX: se eliminó el gate de bloqueo; ahora se verifica SIEMPRE que el
- *   cliente mencione un día/fecha/disponibilidad genérica, sin excepción.
- *   slots_shown se sigue guardando, pero solo como referencia/telemetría.
- *
- * BUG 3 (el más grave) — El texto de Claude (cleanMessage) se enviaba al
- *   cliente de inmediato, ANTES de llamar a createVisitEvent(). Cuando
- *   Claude emite el flag [VISITA:...], también escribe una confirmación
- *   ("¡Todo listo!") que salía primero pasara lo que pasara después — y
- *   solo si el backend rechazaba la cita (slot_ocupado, como pasó 3 veces
- *   con Omar porque el horario ya tenía un bloqueo de administrador)
- *   llegaba una segunda corrección. El cliente ya había leído "Todo listo".
- *   FIX (v13): para el flag VISITA, cleanMessage se descarta por completo.
- *   El mensaje real al cliente se construye DESPUÉS de conocer el
- *   resultado real de createVisitEvent(). También se ajustó
- *   notifyAllSupervisors(): en éxito ya no muestra el último mensaje crudo
- *   del cliente (ej. su correo) como "nota" — muestra una nota real
- *   ("Visita confirmada automáticamente").
- *
- * ── CAMBIOS v14 — RECUPERAR LA MINI-GUÍA DE PREPARACIÓN SIN REINTRODUCIR
- *    LA CONFIRMACIÓN FALSA ──────────────────────────────────────────────────
- * v13 descartaba cleanMessage por completo para el flag VISITA — pero ese
- *   texto también trae la mini-guía de preparación (ONBOARDING
- *   POST-AGENDAMIENTO en claude.js: "tenga acceso al área", "traiga fotos",
- *   etc.), que es información legítima y útil que el cliente dejó de
- *   recibir. FIX de dos capas:
- *   1) claude.js: nueva sección de system prompt que le prohíbe
- *      explícitamente a Claude afirmar éxito ("Todo listo", "quedó
- *      agendada") en el mensaje que acompaña al flag [VISITA:...].
- *   2) index.js: cleanMessage ahora SÍ se envía — como mensaje aparte,
- *      ANTES de intentar la reserva — y el resultado real (éxito o
- *      rechazo) llega en un SEGUNDO mensaje independiente, construido
- *      exclusivamente a partir de lo que devuelve createVisitEvent().
- *   El broadcast al monitor de supervisores refleja ambos mensajes, en el
- *   mismo orden en que los recibió el cliente.
- * También se movió la verificación de "¿en qué día cae esta fecha?" para
- *   que sea EXCLUSIVAMENTE responsabilidad del backend: claude.js ya no le
- *   pide a Claude que verifique él mismo si una fecha específica cae en
- *   día hábil — eso ahora está señalado como prohibido en el prompt,
- *   coherente con los [SISTEMA:...] deterministas de index.js/calendar.js.
- *
- * ── CAMBIOS v15 (2 sept 2026) — MÓDULO DE CONSULTAS FINANCIERAS ───────────────
- * BUG REAL: "resumen de los pagos realizados por un cliente? Jose Flores"
- *   fue tratado como un comando de REGISTRO en vez de una consulta. Causa:
- *   esComandoFinanciero() en finanzas.js clasifica por substring, y "pago"
- *   (una de las KEYWORDS_FINANZAS) es substring literal de "pagos". Como el
- *   mensaje no traía ningún dígito, cayó en esComandoFinancieroSinMonto() →
- *   Sasha respondió "Anotado, mandame la foto..." en vez de responder.
- * FIX: nuevo módulo consultas.js, dedicado EXCLUSIVAMENTE a preguntas de
- *   solo lectura (resumen de pagos/gastos por cliente o proyecto). Se
- *   evalúa en un PASO 0.5, ANTES que finanzas.js, para que ninguna consulta
- *   pueda malinterpretarse como un registro. Usa un endpoint de lectura
- *   nuevo en Apps Script (accion=consulta_movimientos) que nunca escribe.
- *
- * ── CAMBIOS v17 (11 sept 2026) — FIX CRÍTICO: "GRACIAS" RE-DISPARABA UNA
- *    SEGUNDA VISITA SOBRE UNA CITA YA CONFIRMADA ────────────────────────────
- * BUG REAL (reportado por Darwin con capturas de WhatsApp): a Shirley
- *   Vargas se le confirmó exitosamente el viernes 18 de septiembre a las
- *   9:00 a.m. ("✅ ¡Listo! Su cita quedó agendada..."). La clienta respondió
- *   simplemente "Gracias" — y ese mensaje, sin mencionar ningún día ni
- *   pedir cambios, disparó una SEGUNDA emisión del flag [VISITA:...] con el
- *   MISMO día y hora ya confirmados, lo que volvió a invocar
- *   createVisitEvent() para una cita que YA EXISTÍA. El evento chocó contra
- *   sí mismo (mitigado aparte en calendar.js v16, que ahora reconoce citas
- *   propias del mismo cliente y no las trata como conflicto), pero la causa
- *   de fondo — intentar crear de nuevo algo que ya existe — vivía acá.
- *
- * CAUSA RAÍZ: nada en el código impedía que el flag VISITA se procesara de
- *   nuevo si Claude lo reemitía — y nada en claude.js le decía
- *   explícitamente a Claude que un simple agradecimiento después de una
- *   cita ya confirmada NO amerita un nuevo flag. Ambas capas fallaron a la
- *   vez: el prompt (ver fix correspondiente en claude.js) y el código, que
- *   confiaba ciegamente en que Claude nunca reemitiría el flag de más.
- *
- * FIX: guarda de idempotencia ANTES de tocar el calendario. Si
- *   session.visit_confirmed ya es true y el nuevo flag [VISITA:...] trae el
- *   MISMO día y la MISMA hora que ya están confirmados para este cliente,
- *   se ignora por completo — nunca se vuelve a llamar createVisitEvent().
- *   Si el cliente de verdad quiere cambiar la cita, el nuevo día u hora
- *   serán distintos a los guardados y el flujo normal de reagendamiento
- *   sigue funcionando exactamente igual que antes.
+ * ── HISTORIAL ANTERIOR (resumen) ─────────────────────────────────────────────
+ * v21: cancelación de visita por el cliente verificada contra Calendar;
+ *      frases "más opciones/otra fecha" disparan consulta real de fechas.
+ * v20: agenda interactiva con lista de fechas reales de Calendar; la fecha
+ *      elegida por el cliente manda sobre la que proponga Claude.
+ * v19: control manual de conversación desde el CRM (pausa por teléfono).
+ * v18: confirmación de visitas (botones Sí/No); fusión foto+texto en un solo
+ *      registro financiero.
+ * v17: guarda de idempotencia — un "Gracias" ya no re-crea una cita confirmada.
+ * v15: consultas financieras de solo lectura antes de finanzas.js.
+ * v13/v14: disponibilidad genérica verificada; el resultado real de la cita
+ *      llega en un mensaje aparte construido desde createVisitEvent().
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -178,26 +101,13 @@ function consumirContextoPendiente(phoneE164) {
 // ══════════════════════════════════════════════════════════════════════════
 // v19 (16 sept 2026) — CONTROL MANUAL DE CONVERSACIÓN (Darwin toma el control)
 //
-// PEDIDO POR DARWIN: desde el CRM, poder "tomar el control" de la
-// conversación con un cliente puntual — mientras dure eso, Sasha se calla
-// para ESE cliente (pero sigue respondiendo normal a cualquier otro). Se
+// Desde el CRM, Darwin puede "tomar el control" de la conversación con un
+// cliente puntual — mientras dure, Sasha se calla para ESE cliente. Se
 // reactiva sola a los 60 minutos de inactividad de Darwin con ese cliente;
-// cada vez que Darwin le escribe de nuevo (vía /send-message en server.js),
-// la ventana de 60 minutos se reinicia — así que mientras Darwin siga
-// conversando activo, Sasha se mantiene pausada, y en cuanto Darwin deja de
-// escribirle por 60 min seguidos, Sasha retoma sola.
+// cada mensaje manual (vía /send-message en server.js) reinicia la ventana.
 //
-// DISEÑO: Map en memoria (telefono → timestamp de expiración). server.js
-// corre en el MISMO proceso que este archivo (lo importa con
-// require("./bot/index")), así que no hace falta Sheets ni Redis para esto
-// — un Map alcanza y no le agrega latencia a cada mensaje.
-//
-// LIMITACIÓN HONESTA: al ser en memoria, un redeploy de Railway (que pasa
-// seguido en este proyecto) borra las pausas activas — Sasha volvería a
-// responder antes de los 60 minutos si eso ocurre a mitad de una
-// intervención manual. Si en la práctica esto molesta, se puede mover a una
-// pestaña nueva de Sheets (CONTROL_MANUAL) más adelante; se deja así por
-// ahora porque es mucho más simple y cubre el caso normal de uso.
+// DISEÑO: Map en memoria (telefono → timestamp de expiración). Un redeploy de
+// Railway borra las pausas activas (limitación conocida y aceptada).
 // ══════════════════════════════════════════════════════════════════════════
 
 const PAUSA_MANUAL_MS = 60 * 60 * 1000; // 60 minutos
@@ -208,8 +118,6 @@ function _normE164(phone) {
   return p.startsWith("+") ? p : `+${p}`;
 }
 
-// Llamada cuando Darwin toca "Tomar control" en el CRM, o cada vez que le
-// manda un mensaje manual a ese cliente (server.js hace ambas cosas).
 function pausarConversacion(phone) {
   const fromE164 = _normE164(phone);
   const expira   = Date.now() + PAUSA_MANUAL_MS;
@@ -218,8 +126,6 @@ function pausarConversacion(phone) {
   return expira;
 }
 
-// Llamada cuando Darwin toca "Devolver a Sasha" en el CRM (liberación manual
-// inmediata, sin esperar los 60 minutos).
 function reanudarConversacion(phone) {
   const fromE164 = _normE164(phone);
   pausasManuales.delete(fromE164);
@@ -238,7 +144,6 @@ function estaEnPausaManual(phone) {
   return true;
 }
 
-// Para que el CRM pueda mostrar "activo hasta las X:XX" sin adivinar.
 function msRestantesPausa(phone) {
   const fromE164 = _normE164(phone);
   const expira   = pausasManuales.get(fromE164);
@@ -249,47 +154,17 @@ function msRestantesPausa(phone) {
 // ══════════════════════════════════════════════════════════════════════════
 // v18 (15 sept 2026) — FUSIÓN FOTO+TEXTO EN UN SOLO REGISTRO FINANCIERO
 //
-// BUG REAL (Darwin): mandó la foto de un comprobante SINPE (₡150.000,
-// "Pago alquiler Taller septiembre") y, aparte, un mensaje de texto
-// explicando "Registra a nombre de SSR el pago de alquiler..., esto es
-// un gasto operativo de SSR, no se asigna a ningún proyecto". Como
-// llegaron como DOS mensajes de WhatsApp separados, el sistema los trató
-// como DOS intentos de registro totalmente independientes:
-//   1) la foto sola (sin el texto, que aún no existía) → Claude solo
-//      tuvo el "Detalle" del banco para trabajar, "Taller" chocó contra
-//      un proyecto no relacionado, y el intento se rechazó.
-//   2) el texto solo, con su propio monto → se procesó de inmediato como
-//      comando financiero completo, sin esperar ni combinarse con la
-//      foto, y ESE fue el que terminó escribiendo en la hoja.
-// Si ambos hubieran tenido éxito, el gasto habría quedado DUPLICADO.
-//
-// El mecanismo pendingReceiptContext de arriba (v8) ya resolvía la mitad
-// de este problema — pero solo cuando el TEXTO llega primero y SIN
-// monto (deja dicho "mandame la foto para completar"). No cubría el
-// caso de Darwin: la FOTO llega primero, sin texto, y el texto que la
-// completa trae su propio monto y por eso se procesaba solo.
-//
-// FIX: mecanismo simétrico para fotos sin texto. Cuando llega una foto
-// de comprobante sin ningún texto que la acompañe (ni caption, ni
-// contexto pendiente), en vez de procesarla de inmediato se guarda unos
-// segundos dándole chance a que llegue el mensaje de texto aclaratorio
-// que Darwin suele mandar aparte. Si ese texto llega mientras la foto
-// espera —tenga o no monto propio—, se fusionan en UN solo registro
-// (la foto se interpreta con el texto como contexto adicional, igual
-// que ya hacía procesarComprobanteImagen). Si no llega nada, la foto se
-// procesa sola exactamente como antes.
+// Cuando llega una foto de comprobante sin texto que la acompañe, se deja
+// en espera unos segundos por si llega el mensaje de texto aclaratorio
+// aparte. Si llega, se fusionan en UN solo registro; si no, la foto se
+// procesa sola. Evita gastos duplicados (foto y texto como dos registros).
 // ══════════════════════════════════════════════════════════════════════════
 
-// Map<supervisorPhoneE164, Array<{ imgData, ts }>> — cola de fotos de
-// comprobante recibidas sin texto que las acompañe todavía, en espera
-// de que llegue un mensaje de texto que las complete.
 const pendingPhotosByPhone = new Map();
 
 const PENDING_PHOTO_WAIT_MS = 5000;          // margen para que llegue el texto aclaratorio
 const PENDING_PHOTO_TTL_MS  = 3 * 60 * 1000; // igual que el contexto de texto (v8)
 
-// Encola una foto pendiente y devuelve la entrada (se usa como "ticket"
-// para saber después, tras la espera, si alguien más ya la reclamó).
 function agregarFotoPendiente(phoneE164, imgData) {
   const lista = pendingPhotosByPhone.get(phoneE164) || [];
   const entry = { imgData, ts: Date.now() };
@@ -298,9 +173,6 @@ function agregarFotoPendiente(phoneE164, imgData) {
   return entry;
 }
 
-// Quita una entrada puntual de la cola (si sigue ahí). Devuelve true si
-// todavía estaba pendiente (nadie la había reclamado), false si ya no
-// está (un mensaje de texto la tomó primero, o expiró).
 function quitarFotoPendiente(phoneE164, entry) {
   const lista = pendingPhotosByPhone.get(phoneE164);
   if (!lista) return false;
@@ -311,9 +183,6 @@ function quitarFotoPendiente(phoneE164, entry) {
   return true;
 }
 
-// Toma (y remueve) la foto pendiente más antigua para este número, si
-// hay alguna vigente — se usa cuando llega un mensaje de texto que
-// podría completarla.
 function tomarFotoPendienteMasAntigua(phoneE164) {
   const lista = pendingPhotosByPhone.get(phoneE164);
   if (!lista || !lista.length) return null;
@@ -332,8 +201,7 @@ function tomarFotoPendienteMasAntigua(phoneE164) {
   return entry;
 }
 
-// ¿El texto es un comando financiero pero SIN monto detectable? (típico:
-// "registra este gasto para el proyecto de X" seguido de una foto).
+// ¿El texto es un comando financiero pero SIN monto detectable?
 function esComandoFinancieroSinMonto(texto) {
   if (!esComandoFinanciero(texto)) return false;
   return !/\d/.test(texto); // ningún dígito en el mensaje → no hay monto
@@ -419,8 +287,7 @@ function nombreSupervisor(phone) {
   return map[phone] || phone;
 }
 
-// Formatea un número a colones con punto como separador de miles (₡10.000),
-// independientemente del locale del servidor (Railway usa espacio con es-CR).
+// Formatea un número a colones con punto como separador de miles (₡10.000).
 function fmtColones(n) {
   if (n === null || n === undefined || isNaN(n)) return String(n ?? "");
   return Math.round(n).toLocaleString("de-DE");
@@ -559,11 +426,7 @@ async function handleMsgCliente(cmd, supervisorPhone) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER v10/v11 — Calcular el día de la semana REAL de una fecha específica
-// usando JavaScript (confiable), en vez de dejar que Claude lo calcule "de
-// memoria" en la conversación (punto ciego conocido de los LLM — así fue
-// como se ofreció "viernes 8 de agosto" siendo en realidad sábado).
-// Solo aplica a fechas específicas tipo "8 de agosto" o "8/8" — los nombres
-// de día (lunes/martes/viernes) ya son inequívocos y no necesitan esto.
+// usando JavaScript, en vez de dejar que Claude lo calcule de memoria.
 // ═══════════════════════════════════════════════════════════════════════════════
 const DIAS_SEMANA_ES = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
 const MESES_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto",
@@ -571,9 +434,8 @@ const MESES_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agos
 const DIAS_HABILES = ["lunes","martes","viernes"];
 const NOMBRES_DIA_NO_HABIL = ["miercoles","jueves","sabado","domingo"];
 
-// v13 — frases que indican que el cliente pregunta por disponibilidad en
-// general, SIN mencionar un día o fecha puntual. Antes esto no disparaba
-// ningún [SISTEMA:...] y Sasha respondía fechas inventadas de memoria.
+// v13/v21 — frases de disponibilidad genérica (sin día ni fecha puntual).
+// Fuerzan una consulta real a Calendar en vez de dejar que Claude invente.
 const PALABRAS_DISPONIBILIDAD_GENERICA = [
   "cuando se puede", "cuando pueden", "cuando podrian", "cuando podrían",
   "que dia", "que día", "que dias", "qué días", "cuales dias", "cuáles días",
@@ -581,14 +443,6 @@ const PALABRAS_DISPONIBILIDAD_GENERICA = [
   "cuando vienen", "pueden llegar", "pueden venir", "cuando hay",
   "que horarios", "qué horarios", "cuando tienen", "cuándo tienen",
   "cuando es la visita", "cuando seria", "cuando sería",
-  // FIX v21: preguntas de seguimiento tipo "¿tienes más opciones?" no
-  // mencionan un día ni una fecha, así que antes NO activaban ninguna
-  // consulta real a Calendar — el mensaje caía directo a Claude sin
-  // datos de respaldo, y Claude terminaba inventando fechas (incluyendo
-  // días que ya no son lunes/martes/viernes, o fechas ya ocupadas, como
-  // el caso reportado 2026-09-17 donde se re-ofreció el 21 de septiembre
-  // estando ya reservado). Estas frases fuerzan la misma consulta real
-  // a Calendar (getAvailableVisitDates) que usa el caso GENERICO.
   "mas opciones", "más opciones", "otras opciones", "otras fechas",
   "otra fecha", "otro dia", "otro día", "mas dias", "más días",
   "mas fechas", "más fechas", "algo mas", "algo más", "otro horario",
@@ -610,8 +464,6 @@ function calcularFechaYDiaSemana(dayMentioned) {
       .normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
     if (mesIdx >= 0) {
       candidate = new Date(now.getFullYear(), mesIdx, dia);
-      // v11: mismo criterio que calendar.js — si ya pasó, es el próximo año,
-      // no una fecha arbitraria cercana.
       if (candidate < now) candidate = new Date(now.getFullYear() + 1, mesIdx, dia);
     }
   } else {
@@ -626,10 +478,7 @@ function calcularFechaYDiaSemana(dayMentioned) {
   return { date: candidate, diaSemana: DIAS_SEMANA_ES[candidate.getDay()] };
 }
 
-// v11 — Formatea una lista de fechas (Date[]) como "viernes 7 de agosto,
-// lunes 10 de agosto, martes 11 de agosto" para inyectar en el contexto de
-// Claude. Siempre fechas YA calculadas — nunca le pedimos a Claude que
-// calcule cuál es "el próximo viernes" o similar.
+// v11 — Formatea una lista de fechas (Date[]) ya calculadas.
 function formatearListaFechas(fechas) {
   return fechas.map(d => {
     const nombreDia    = d.toLocaleDateString("es-CR", { timeZone: TZ, weekday: "long" });
@@ -640,14 +489,8 @@ function formatearListaFechas(fechas) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // v20 — AGENDA INTERACTIVA CON DISPONIBILIDAD REAL DE GOOGLE CALENDAR
-//
-// IMPORTANTE:
-// - Google Calendar es la única fuente de verdad.
-// - Nunca presentamos como "disponible" un simple lunes/martes/viernes.
-// - getAvailableVisitDates() devuelve únicamente fechas cuyo slot real de
-//   visita (09:00–10:00) está libre.
-// - Los IDs agenda_* son determinísticos y server.js ya los entrega a
-//   handleMessage() como texto cuando el cliente toca una opción.
+// Google Calendar es la única fuente de verdad. Los IDs agenda_fecha_* son
+// determinísticos y server.js los entrega a handleMessage() como texto.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function fechaISOaLegibleAgenda(fechaISO) {
@@ -676,8 +519,7 @@ function capitalizarAgenda(texto) {
 }
 
 
-// Consulta SIEMPRE Google Calendar.
-// No reutiliza una lista vieja guardada en la sesión.
+// Consulta SIEMPRE Google Calendar. No reutiliza listas viejas de la sesión.
 async function obtenerFechasRealesAgenda({
   daysAhead = 35,
   maxDates = 10,
@@ -697,12 +539,8 @@ async function obtenerFechasRealesAgenda({
 }
 
 
-// Muestra al cliente hasta 10 fechas REALES mediante una lista interactiva
-// de WhatsApp. Cada fila devuelve un ID tipo:
-//
-// agenda_fecha_2026-09-21
-//
-// server.js ya convierte ese ID en texto y lo manda a handleMessage().
+// Muestra al cliente hasta 10 fechas REALES mediante una lista interactiva.
+// Cada fila devuelve un ID tipo agenda_fecha_2026-09-21.
 async function enviarListaFechasAgenda(from, {
   daysAhead = 35,
   maxDates = 10,
@@ -759,11 +597,6 @@ async function enviarListaFechasAgenda(from, {
 
 
 // Reconoce exclusivamente IDs generados por nuestra propia lista.
-// Ejemplo:
-//
-// agenda_fecha_2026-09-21
-//
-// Devuelve "2026-09-21" o null.
 function extraerFechaAgendaInteractiva(texto) {
   const match = String(texto || "")
     .trim()
@@ -773,24 +606,17 @@ function extraerFechaAgendaInteractiva(texto) {
 }
 
 
-// Verifica que una fecha seleccionada siga apareciendo como disponible
-// AHORA MISMO.
-//
-// Esto NO sustituye la validación final de createVisitEvent().
-// Es una primera defensa contra listas que quedaron viejas mientras el
-// cliente decidía. createVisitEvent() volverá a validar justo antes de
-// insertar el evento.
-
+// Verifica que una fecha seleccionada siga disponible AHORA MISMO.
+// createVisitEvent() vuelve a validar justo antes de insertar el evento.
 async function fechaSigueDisponibleAgenda(fechaISO) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fechaISO || ""))) {
     return false;
   }
 
   try {
-// La visita de clientes siempre es a las 09:00 hora Costa Rica.
-// Usamos offset explícito para no depender de la zona horaria de Railway.
-const startDate = new Date(`${fechaISO}T09:00:00-06:00`);
-    
+    // La visita de clientes siempre es a las 09:00 hora Costa Rica.
+    // Offset explícito para no depender de la zona horaria de Railway.
+    const startDate = new Date(`${fechaISO}T09:00:00-06:00`);
 
     const resultado =
       await verificarDisponibilidadExacta(startDate);
@@ -809,9 +635,7 @@ const startDate = new Date(`${fechaISO}T09:00:00-06:00`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// HELPER v9 — Formatear rechazo de disponibilidad (bloqueo/slot ocupado) y
-// sugerir horarios alternativos del mismo día para no dejar al supervisor
-// (ni al flujo automático) sin salida.
+// HELPER v9 — Formatear rechazo de disponibilidad y sugerir alternativas reales
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function formatearRechazoDisponibilidad(eventData, day) {
@@ -852,8 +676,7 @@ async function formatearRechazoDisponibilidad(eventData, day) {
     return lineas.join("\n");
   }
 
-  // Si el día solicitado todavía puede tener disponibilidad,
-  // consultamos Calendar directamente.
+  // Si el día solicitado todavía puede tener disponibilidad, consultamos Calendar.
   if (
     day &&
     reason !== "dia_no_laborable" &&
@@ -992,7 +815,7 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
 
   try {
 
-        const eventData = await createVisitEvent({
+    const eventData = await createVisitEvent({
       name,
       phone: telefonoCliente,
       email,
@@ -1005,7 +828,6 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
         : "",
     });
 
-    // Calendar.js devuelve success/reason/conflict/date.
     // Nunca confirmamos al supervisor ni al cliente si Calendar no creó el evento.
     if (eventData.success !== true) {
       console.warn(
@@ -1078,12 +900,10 @@ async function handleVisitaSupervisor(cmd, supervisorPhone) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// NUEVO v7 — GESTIÓN DE CALENDARIO PARA SUPERVISORES
+// v7 — GESTIÓN DE CALENDARIO PARA SUPERVISORES
 // Cancelar, reagendar y consultar citas por lenguaje natural (texto o audio).
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Detección rápida por palabras clave: ¿este mensaje habla del calendario?
-// Solo si pasa este filtro se llama a Claude para interpretar (ahorra API).
 function mencionaCalendario(texto) {
   const n = (texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const hablaDeCitas   = /\b(cita|citas|visita|visitas|evento|eventos|reunion|reuniones|agenda|calendario)\b/.test(n);
@@ -1092,8 +912,6 @@ function mencionaCalendario(texto) {
 }
 
 // Interpretar el comando con Claude → JSON estructurado.
-// Devuelve: { accion: "cancelar"|"reagendar"|"consultar"|"ninguna",
-//             nombre, fecha, nuevaFecha, nuevaHora, avisarCliente }
 async function interpretarComandoCalendario(texto) {
   try {
     const Anthropic = require("@anthropic-ai/sdk");
@@ -1139,7 +957,7 @@ REGLAS:
   }
 }
 
-// Fallback sin API: regex simple (el detector viejo, mejorado). Solo cancelar.
+// Fallback sin API: regex simple.
 function interpretarCalendarioFallback(texto) {
   const n = (texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -1172,6 +990,24 @@ function interpretarCalendarioFallback(texto) {
     accion: esReagenda ? "reagendar" : "cancelar",
     nombre, fecha, nuevaFecha: null, nuevaHora: null, avisarCliente: true,
   };
+}
+
+// Busca el teléfono de un cliente por nombre en memoria y luego en el CRM.
+// Devuelve "+506..." o null si no hay un teléfono confiable.
+async function buscarTelefonoClientePorNombre(nombre) {
+  const rowsMem = await memoria.buscarPorNombre(nombre, 5).catch(() => []);
+  if (rowsMem.length > 0) {
+    const tel = String(rowsMem[0][1] || "").replace(/\D/g, "");
+    if (tel.length >= 8) return tel.startsWith("506") ? `+${tel}` : `+506${tel}`;
+  }
+
+  const crmRows = await memoria.buscarClienteEnCRM(nombre).catch(() => []);
+  if (crmRows.length > 0) {
+    const tel = String(crmRows[0][1] || "").replace(/\D/g, "");
+    if (tel.length >= 8) return tel.startsWith("506") ? `+${tel}` : `+506${tel}`;
+  }
+
+  return null;
 }
 
 // Ejecutor principal: interpreta y ejecuta. Devuelve texto para el supervisor
@@ -1215,112 +1051,64 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
         return `📭 No encontré ninguna cita${q}${c}.\n\nVerificá el nombre o la fecha e intentá de nuevo.`;
       }
 
-// ── Cancelación confirmada por Google Calendar ──────────────────────────
-// calendar.js devuelve:
-// result.deleted
-// result.events = [{ id, summary, date }]
-//
-// No asumimos clientPhone ni dateStr dentro del evento cancelado.
+      // Cancelación confirmada por Google Calendar.
+      // calendar.js devuelve result.deleted y result.events = [{ id, summary, date }]
+      let clienteNotificado = false;
 
-let clienteNotificado = false;
-let telefonoCliente = null;
+      if (intent.avisarCliente !== false && intent.nombre) {
+        try {
+          const telefonoCliente = await buscarTelefonoClientePorNombre(intent.nombre);
 
-// Intentar recuperar el teléfono del cliente únicamente cuando
-// tenemos un nombre confiable.
-if (
-  intent.avisarCliente !== false &&
-  intent.nombre
-) {
-  try {
-    const rowsMem = await memoria
-      .buscarPorNombre(intent.nombre, 5)
-      .catch(() => []);
+          if (telefonoCliente && !SUPERVISORES.includes(telefonoCliente)) {
+            const fechasCanceladas = result.events
+              .map(ev => ev.date)
+              .filter(Boolean)
+              .join(", ");
 
-    if (rowsMem.length > 0) {
-      const tel = String(rowsMem[0][1] || "")
-        .replace(/\D/g, "");
+            const msgCliente = [
+              `Hola, le escribimos de *SS Remodelaciones* 🏗️`,
+              ``,
+              `Le informamos que su visita técnica${fechasCanceladas ? ` del *${fechasCanceladas}*` : ""} fue cancelada.`,
+              ``,
+              `Si desea reprogramarla, con gusto le atendemos por este medio.`,
+              `¡Disculpe las molestias! 🙏`,
+            ].join("\n");
 
-      if (tel.length >= 8) {
-        telefonoCliente = tel.startsWith("506")
-          ? `+${tel}`
-          : `+506${tel}`;
-      }
-    }
+            await sendText(telefonoCliente, msgCliente);
+            clienteNotificado = true;
+          }
 
-    if (!telefonoCliente) {
-      const crmRows = await memoria
-        .buscarClienteEnCRM(intent.nombre)
-        .catch(() => []);
-
-      if (crmRows.length > 0) {
-        const tel = String(crmRows[0][1] || "")
-          .replace(/\D/g, "");
-
-        if (tel.length >= 8) {
-          telefonoCliente = tel.startsWith("506")
-            ? `+${tel}`
-            : `+506${tel}`;
+        } catch (err) {
+          console.warn(
+            "⚠️ La cita se canceló, pero no se pudo notificar al cliente:",
+            err.message
+          );
         }
       }
-    }
 
-    if (
-      telefonoCliente &&
-      !SUPERVISORES.includes(telefonoCliente)
-    ) {
-      const fechasCanceladas = result.events
-        .map(ev => ev.date)
+      const lineas = result.events
+        .map(ev =>
+          `• ${ev.summary || intent.nombre || "Visita técnica"} — ${ev.date || "fecha no disponible"}`
+        )
+        .join("\n");
+
+      const plural = result.deleted > 1;
+
+      return [
+        `✅ *${plural ? `${result.deleted} citas canceladas` : "Cita cancelada"}*:`,
+        ``,
+        lineas,
+        ``,
+        intent.avisarCliente === false
+          ? `🔕 Cliente NO notificado (como pediste).`
+          : clienteNotificado
+            ? `✉️ Cliente notificado automáticamente por WhatsApp.`
+            : `ℹ️ La cita fue cancelada, pero no encontré un teléfono confiable para notificar automáticamente al cliente.`,
+        `👤 Por: ${quien}`,
+      ]
         .filter(Boolean)
-        .join(", ");
+        .join("\n");
 
-      const msgCliente = [
-        `Hola, le escribimos de *SS Remodelaciones* 🏗️`,
-        ``,
-        `Le informamos que su visita técnica${fechasCanceladas ? ` del *${fechasCanceladas}*` : ""} fue cancelada.`,
-        ``,
-        `Si desea reprogramarla, con gusto le atendemos por este medio.`,
-        `¡Disculpe las molestias! 🙏`,
-      ].join("\n");
-
-      await sendText(telefonoCliente, msgCliente);
-
-      clienteNotificado = true;
-    }
-
-  } catch (err) {
-    console.warn(
-      "⚠️ La cita se canceló, pero no se pudo notificar al cliente:",
-      err.message
-    );
-  }
-}
-
-
-// ── Respuesta al supervisor ─────────────────────────────────────────────
-
-const lineas = result.events
-  .map(ev =>
-    `• ${ev.summary || intent.nombre || "Visita técnica"} — ${ev.date || "fecha no disponible"}`
-  )
-  .join("\n");
-
-const plural = result.deleted > 1;
-
-return [
-  `✅ *${plural ? `${result.deleted} citas canceladas` : "Cita cancelada"}*:`,
-  ``,
-  lineas,
-  ``,
-  intent.avisarCliente === false
-    ? `🔕 Cliente NO notificado (como pediste).`
-    : clienteNotificado
-      ? `✉️ Cliente notificado automáticamente por WhatsApp.`
-      : `ℹ️ La cita fue cancelada, pero no encontré un teléfono confiable para notificar automáticamente al cliente.`,
-  `👤 Por: ${quien}`,
-]
-  .filter(Boolean)
-  .join("\n");
-      
     } catch (err) {
       console.error("❌ Error cancelando cita:", err.message);
       return `❌ Error al cancelar la cita: ${err.message}`;
@@ -1337,222 +1125,164 @@ return [
     }
     try {
       const result = await rescheduleEventByNameAndDate({
-  nameHint: intent.nombre,
-  dateHint: intent.fecha,
-  newDay:   intent.nuevaFecha,
-  newHour:  intent.nuevaHora,
-});
+        nameHint: intent.nombre,
+        dateHint: intent.fecha,
+        newDay:   intent.nuevaFecha,
+        newHour:  intent.nuevaHora,
+      });
 
-     // calendar.js devuelve actualmente:
-// { updated, events, reason, conflict }
-//
-// updated === 1  → reagenda realizada.
-// updated === 0  → NO se modificó Calendar.
+      // calendar.js devuelve { updated, events, reason, conflict }
+      // updated === 1 → reagenda realizada; updated === 0 → NO se modificó Calendar.
+      if (result.updated !== 1) {
 
-if (result.updated !== 1) {
+        if (result.reason === "not_found") {
+          const q = intent.nombre
+            ? ` de *${intent.nombre}*`
+            : "";
 
-  // No encontramos la cita original.
-  if (result.reason === "not_found") {
-    const q = intent.nombre
-      ? ` de *${intent.nombre}*`
-      : "";
+          return [
+            `📭 No encontré la cita${q} para mover.`,
+            ``,
+            `Verificá el nombre o la fecha actual e intentá de nuevo.`,
+          ].join("\n");
+        }
 
-    return [
-      `📭 No encontré la cita${q} para mover.`,
-      ``,
-      `Verificá el nombre o la fecha actual e intentá de nuevo.`,
-    ].join("\n");
-  }
+        if (result.reason === "error_calendario") {
+          return [
+            `❌ No se pudo reagendar la cita porque hubo un error consultando Google Calendar.`,
+            ``,
+            `⚠️ No voy a asumir que otra fecha está disponible.`,
+            `Reintentá en unos minutos o revisá la agenda manualmente.`,
+          ].join("\n");
+        }
 
-  // Error consultando/modificando Google Calendar.
-  if (result.reason === "error_calendario") {
-    return [
-      `❌ No se pudo reagendar la cita porque hubo un error consultando Google Calendar.`,
-      ``,
-      `⚠️ No voy a asumir que otra fecha está disponible.`,
-      `Reintentá en unos minutos o revisá la agenda manualmente.`,
-    ].join("\n");
-  }
+        if (
+          result.reason === "dia_no_laborable" ||
+          result.reason === "slot_ocupado" ||
+          result.reason === "dia_bloqueado"
+        ) {
+          const rechazo = await formatearRechazoDisponibilidad(
+            {
+              reason: result.reason,
+              conflict: result.conflict || null,
+            },
+            intent.nuevaFecha
+          );
 
-  // Día no permitido o destino realmente ocupado/bloqueado.
-  if (
-    result.reason === "dia_no_laborable" ||
-    result.reason === "slot_ocupado" ||
-    result.reason === "dia_bloqueado"
-  ) {
-    const rechazo = await formatearRechazoDisponibilidad(
-      {
-        reason: result.reason,
-        conflict: result.conflict || null,
-      },
-      intent.nuevaFecha
-    );
+          return [
+            `⚠️ *No se pudo reagendar la cita.*`,
+            ``,
+            rechazo,
+          ].join("\n");
+        }
 
-    return [
-      `⚠️ *No se pudo reagendar la cita.*`,
-      ``,
-      rechazo,
-    ].join("\n");
-  }
+        console.warn(
+          "⚠️ Resultado inesperado al reagendar:",
+          JSON.stringify(result)
+        );
 
-  // Cualquier respuesta inesperada: nunca afirmar que se reagendó.
-  console.warn(
-    "⚠️ Resultado inesperado al reagendar:",
-    JSON.stringify(result)
-  );
-
-  return [
-    `❌ No se pudo confirmar el reagendamiento.`,
-    ``,
-    `Google Calendar no confirmó que la cita haya sido modificada.`,
-    `Revisá la agenda antes de informar una nueva fecha al cliente.`,
-  ].join("\n");
-}
-
-const ev = result.events?.[0];
-
-if (!ev) {
-  console.warn(
-    "⚠️ Calendar reportó updated=1 pero no devolvió el evento reagendado."
-  );
-
-  return [
-    `⚠️ Calendar indicó que la cita fue modificada,`,
-    `pero no devolvió los datos necesarios para confirmar el cambio.`,
-    ``,
-    `Revisá el evento directamente en Google Calendar.`,
-  ].join("\n");
-}
-
-// ── Confirmación segura del reagendamiento ──────────────────────────────
-// calendar.js confirma el cambio mediante updated === 1 y devuelve
-// el evento actualizado en result.events[0].
-//
-// No asumimos campos antiguos como:
-// ev.clientPhone / ev.oldDateStr / ev.newDateStr.
-
-const fechaNueva = ev.date instanceof Date
-  ? ev.date
-  : new Date(ev.date);
-
-const nuevaFechaStr =
-  !isNaN(fechaNueva.getTime())
-    ? fechaNueva.toLocaleDateString("es-CR", {
-        timeZone: TZ,
-        weekday: "long",
-        day: "numeric",
-        month: "long",
-        year: "numeric",
-      })
-    : String(intent.nuevaFecha || "fecha actualizada");
-
-const nuevaHoraStr =
-  !isNaN(fechaNueva.getTime())
-    ? fechaNueva.toLocaleTimeString("es-CR", {
-        timeZone: TZ,
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      })
-    : String(intent.nuevaHora || "");
-
-
-// ── Intentar recuperar teléfono del cliente ─────────────────────────────
-// El contrato actual de rescheduleEventByNameAndDate() no garantiza
-// clientPhone dentro de result.events[0].
-//
-// Buscamos el cliente por nombre en memoria/CRM, pero si no encontramos
-// un teléfono confiable NO enviamos nada automáticamente.
-
-let clienteNotificado = false;
-let telefonoCliente = null;
-
-if (intent.avisarCliente !== false && intent.nombre) {
-  try {
-    const rowsMem = await memoria
-      .buscarPorNombre(intent.nombre, 5)
-      .catch(() => []);
-
-    if (rowsMem.length > 0) {
-      const tel = String(rowsMem[0][1] || "").replace(/\D/g, "");
-
-      if (tel.length >= 8) {
-        telefonoCliente = tel.startsWith("506")
-          ? `+${tel}`
-          : `+506${tel}`;
+        return [
+          `❌ No se pudo confirmar el reagendamiento.`,
+          ``,
+          `Google Calendar no confirmó que la cita haya sido modificada.`,
+          `Revisá la agenda antes de informar una nueva fecha al cliente.`,
+        ].join("\n");
       }
-    }
 
-    if (!telefonoCliente) {
-      const crmRows = await memoria
-        .buscarClienteEnCRM(intent.nombre)
-        .catch(() => []);
+      const ev = result.events?.[0];
 
-      if (crmRows.length > 0) {
-        const tel = String(crmRows[0][1] || "").replace(/\D/g, "");
+      if (!ev) {
+        console.warn(
+          "⚠️ Calendar reportó updated=1 pero no devolvió el evento reagendado."
+        );
 
-        if (tel.length >= 8) {
-          telefonoCliente = tel.startsWith("506")
-            ? `+${tel}`
-            : `+506${tel}`;
+        return [
+          `⚠️ Calendar indicó que la cita fue modificada,`,
+          `pero no devolvió los datos necesarios para confirmar el cambio.`,
+          ``,
+          `Revisá el evento directamente en Google Calendar.`,
+        ].join("\n");
+      }
+
+      const fechaNueva = ev.date instanceof Date
+        ? ev.date
+        : new Date(ev.date);
+
+      const nuevaFechaStr =
+        !isNaN(fechaNueva.getTime())
+          ? fechaNueva.toLocaleDateString("es-CR", {
+              timeZone: TZ,
+              weekday: "long",
+              day: "numeric",
+              month: "long",
+              year: "numeric",
+            })
+          : String(intent.nuevaFecha || "fecha actualizada");
+
+      const nuevaHoraStr =
+        !isNaN(fechaNueva.getTime())
+          ? fechaNueva.toLocaleTimeString("es-CR", {
+              timeZone: TZ,
+              hour: "numeric",
+              minute: "2-digit",
+              hour12: true,
+            })
+          : String(intent.nuevaHora || "");
+
+      // Buscamos el teléfono por nombre; sin teléfono confiable no se envía nada.
+      let clienteNotificado = false;
+
+      if (intent.avisarCliente !== false && intent.nombre) {
+        try {
+          const telefonoCliente = await buscarTelefonoClientePorNombre(intent.nombre);
+
+          if (telefonoCliente && !SUPERVISORES.includes(telefonoCliente)) {
+            const msgCliente = [
+              `Hola, le escribimos de *SS Remodelaciones* 🏗️`,
+              ``,
+              `Su visita técnica fue *reprogramada*.`,
+              ``,
+              `📅 Nueva fecha: *${nuevaFechaStr}*`,
+              nuevaHoraStr
+                ? `🕐 Nueva hora: *${nuevaHoraStr}*`
+                : "",
+              ``,
+              `Si tiene alguna consulta, con gusto le atendemos. ¡Hasta pronto! 😊`,
+            ]
+              .filter(Boolean)
+              .join("\n");
+
+            await sendText(telefonoCliente, msgCliente);
+            clienteNotificado = true;
+          }
+
+        } catch (err) {
+          console.warn(
+            "⚠️ La cita se reagendó, pero no se pudo notificar al cliente:",
+            err.message
+          );
         }
       }
-    }
 
-    if (
-      telefonoCliente &&
-      !SUPERVISORES.includes(telefonoCliente)
-    ) {
-      const msgCliente = [
-        `Hola, le escribimos de *SS Remodelaciones* 🏗️`,
+      return [
+        `✅ *Cita reagendada*`,
         ``,
-        `Su visita técnica fue *reprogramada*.`,
-        ``,
+        `📋 ${ev.summary || intent.nombre || "Visita técnica"}`,
         `📅 Nueva fecha: *${nuevaFechaStr}*`,
         nuevaHoraStr
           ? `🕐 Nueva hora: *${nuevaHoraStr}*`
           : "",
         ``,
-        `Si tiene alguna consulta, con gusto le atendemos. ¡Hasta pronto! 😊`,
+        intent.avisarCliente === false
+          ? `🔕 Cliente NO notificado (como pediste).`
+          : clienteNotificado
+            ? `✉️ Cliente notificado automáticamente por WhatsApp.`
+            : `ℹ️ La cita se reagendó, pero no encontré un teléfono confiable para notificar automáticamente al cliente.`,
+        `👤 Por: ${quien}`,
       ]
         .filter(Boolean)
         .join("\n");
 
-      await sendText(telefonoCliente, msgCliente);
-
-      clienteNotificado = true;
-    }
-
-  } catch (err) {
-    console.warn(
-      "⚠️ La cita se reagendó, pero no se pudo notificar al cliente:",
-      err.message
-    );
-  }
-}
-
-
-// ── Respuesta al supervisor ─────────────────────────────────────────────
-
-return [
-  `✅ *Cita reagendada*`,
-  ``,
-  `📋 ${ev.summary || intent.nombre || "Visita técnica"}`,
-  `📅 Nueva fecha: *${nuevaFechaStr}*`,
-  nuevaHoraStr
-    ? `🕐 Nueva hora: *${nuevaHoraStr}*`
-    : "",
-  ``,
-  intent.avisarCliente === false
-    ? `🔕 Cliente NO notificado (como pediste).`
-    : clienteNotificado
-      ? `✉️ Cliente notificado automáticamente por WhatsApp.`
-      : `ℹ️ La cita se reagendó, pero no encontré un teléfono confiable para notificar automáticamente al cliente.`,
-  `👤 Por: ${quien}`,
-]
-  .filter(Boolean)
-  .join("\n");
-      
     } catch (err) {
       console.error("❌ Error reagendando cita:", err.message);
       return `❌ Error al reagendar la cita: ${err.message}`;
@@ -1561,15 +1291,10 @@ return [
 
   return null;
 }
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // v21 — CANCELACIÓN AUTOMÁTICA DE VISITA POR EL PROPIO CLIENTE
-//
-// IMPORTANTE:
-// - Claude NO decide si una cita quedó cancelada.
-// - Google Calendar es la única fuente de verdad.
-// - Solo interceptamos frases inequívocas de CANCELACIÓN.
-// - Frases como "ese día no puedo", "quiero cambiarla" o "reagendar"
-//   NO se consideran cancelación.
+// Solo frases inequívocas de cancelación. Calendar es la fuente de verdad.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function clientePideCancelarVisita(texto) {
@@ -1581,14 +1306,11 @@ function clientePideCancelarVisita(texto) {
 
   if (!n) return false;
 
-  // Debe existir una acción inequívoca de cancelación.
   const accionCancelar =
     /\b(cancel|cancela|cancelar|cancele|cancelarla|cancelelo|cancelen|anul|elimin|borr|quit)\w*\b/.test(n);
 
   if (!accionCancelar) return false;
 
-  // Y además debe quedar claro que habla de la cita/visita/agendamiento,
-  // o utilizar una construcción directa como "cancélela".
   const hablaDeVisita =
     /\b(cita|visita|reserv|agenda|agendamiento|evento)\w*\b/.test(n);
 
@@ -1597,6 +1319,127 @@ function clientePideCancelarVisita(texto) {
 
   return hablaDeVisita || cancelacionDirecta;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v22 — NOMBRE Y DATOS DEL CLIENTE (respaldo determinístico)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Palabras donde se corta un nombre ("me llamo carlos y quiero..." → "Carlos").
+const CORTE_NOMBRE = new Set([
+  "y", "e", "o", "que", "quiero", "quisiera", "necesito", "tengo", "para", "por",
+  "con", "del", "en", "busco", "estoy", "me", "le", "les", "mi", "su", "es",
+  "soy", "vivo", "desde", "sobre", "a", "al", "gracias", "buenas", "buenos",
+  "hola", "saludos", "pura", "vida",
+]);
+
+// Palabras que nunca son un nombre ("Soy Ingeniero", "Soy Cliente").
+const NO_NOMBRES = new Set([
+  "cliente", "clienta", "ingeniero", "ingeniera", "arquitecto", "arquitecta",
+  "dueño", "dueña", "propietario", "propietaria", "maestro", "contratista",
+  "interesado", "interesada", "nuevo", "nueva", "yo", "de", "la", "el", "un", "una",
+  "sasha", "costarricense", "tico", "tica", "administrador", "administradora",
+]);
+
+function capitalizarPalabra(p) {
+  return p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+}
+
+function limpiarNombreCandidato(bruto) {
+  const palabras = String(bruto || "")
+    .replace(/[^A-Za-zÁÉÍÓÚÑÜáéíóúñü\s'-]/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const nombre = [];
+  for (const p of palabras) {
+    if (CORTE_NOMBRE.has(p.toLowerCase())) break;
+    nombre.push(capitalizarPalabra(p));
+    if (nombre.length === 3) break;
+  }
+
+  if (!nombre.length) return null;
+  if (NO_NOMBRES.has(nombre[0].toLowerCase())) return null;
+  if (nombre.join(" ").length < 2) return null;
+  return nombre.join(" ");
+}
+
+// Detecta un nombre DECLARADO explícitamente por el cliente. No adivina:
+// solo reconoce "me llamo X", "mi nombre es X", "Soy X" (con mayúscula, al
+// inicio o tras un saludo) y el formulario automático de Meta ("Full name:").
+function extraerNombreDeclarado(texto) {
+  const t = String(texto || "").trim();
+  if (!t) return null;
+
+  let m = t.match(/full name:\s*([^\n\r]+)/i);
+  if (m) return limpiarNombreCandidato(m[1]);
+
+  m = t.match(/\b(?:me llamo|mi nombre es|mi nombre:)\s+([A-Za-zÁÉÍÓÚÑÜáéíóúñü][A-Za-zÁÉÍÓÚÑÜáéíóúñü\s'-]{1,60})/i);
+  if (m) return limpiarNombreCandidato(m[1]);
+
+  m = t.match(/(?:^|[.!?¡,]\s*|\b(?:hola|buenas|buenos d[ií]as|buenas tardes|buenas noches)[,!.\s]+)soy\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+){0,2})/i);
+  if (m && /^[A-ZÁÉÍÓÚÑ]/.test(m[1])) return limpiarNombreCandidato(m[1]);
+
+  return null;
+}
+
+// Cuenta los mensajes reales del cliente en el historial de la sesión.
+function contarMensajesCliente(session) {
+  const history = Array.isArray(session?.history) ? session.history : [];
+  return history.filter(m =>
+    m && m.role === "user" &&
+    !(typeof m.content === "string" && m.content.startsWith("[SISTEMA"))
+  ).length;
+}
+
+// Construye el [SISTEMA:...] con los datos guardados del cliente. Desde el 2º
+// mensaje, si falta nombre/proyecto/zona, le recuerda a Claude emitir
+// [LEAD:...] con lo que ya sepa. Si falta el nombre, le ordena pedirlo
+// (máximo 2 veces por conversación, separadas por al menos 4 mensajes).
+function construirContextoDatosCliente(from, session) {
+  const mensajesCliente = contarMensajesCliente(session);
+  if (mensajesCliente < 2) return "";
+
+  const faltaNombre   = !session.name;
+  const faltaProyecto = !session.project_desc;
+  const faltaZona     = !session.zone;
+  if (!faltaNombre && !faltaProyecto && !faltaZona) return "";
+
+  const partes = [
+    `Datos del cliente guardados en el sistema — nombre: ${session.name || "(falta)"}; ` +
+    `proyecto: ${session.project_desc || "(falta)"}; zona: ${session.zone || "(falta)"}.`,
+    `Si en esta conversación el cliente ya dio alguno de los datos que faltan (en este mensaje o en ` +
+    `mensajes anteriores), emití al final [LEAD:nombre|proyecto|zona] con todo lo que sepás, dejando ` +
+    `vacío lo que no sepás — salvo que en este mismo mensaje corresponda [VISITA:...], [ESCALAR], ` +
+    `[SOLICITANTE] o [PROVEEDOR].`,
+  ];
+
+  if (faltaNombre) {
+    const pedidos = Number(session.name_prompts || 0);
+    const ultimo  = Number(session.name_prompt_at || 0);
+
+    if (pedidos < 2 && (pedidos === 0 || mensajesCliente - ultimo >= 4)) {
+      partes.push(
+        `Todavía NO sabés el nombre del cliente. En esta respuesta, además de responder lo que ` +
+        `preguntó, pedíselo de forma natural y breve (ej. "¿Con quién tengo el gusto?"). Si ya lo ` +
+        `dijo antes en la conversación, no lo preguntes: usalo y emití [LEAD:...].`
+      );
+      update(from, { name_prompts: pedidos + 1, name_prompt_at: mensajesCliente });
+      console.log(`👤 v22 — recordatorio de nombre #${pedidos + 1} para ${from} (mensaje ${mensajesCliente} del cliente).`);
+    }
+  }
+
+  return `\n\n[SISTEMA: ${partes.join(" ")} Nunca menciones este mensaje al cliente.]`;
+}
+
+// Limpia un campo de [LEAD:...] (Claude a veces manda "—", "null", etc.).
+function campoLeadValido(v) {
+  const t = String(v || "").trim();
+  if (!t) return "";
+  if (/^(—|-|–|null|undefined|n\/a|na|desconocido|pendiente|sin nombre|sin dato|\(falta\))$/i.test(t)) return "";
+  return t;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // HANDLER PRINCIPAL
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1621,499 +1464,360 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // v18 (16 sept 2026) — CONFIRMACIÓN DE VISITA (botones Sí/No)
-  //
-  // Cuando un cliente toca uno de los botones del recordatorio de las 7pm
-  // (ver confirmaciones.js), WhatsApp devuelve el ID de ese botón como si
-  // fuera el texto del mensaje (ver server.js, msg.interactive.button_reply.id
-  // → addToBuffer). Se revisa ACÁ, antes de cualquier otro procesamiento
-  // (asistencia, financiero, flujo comercial), porque no es ninguna de esas
-  // cosas — es la respuesta a una pregunta puntual que ya sabemos qué
-  // significa por el propio ID. Si manejarRespuestaConfirmacion() reconoce
-  // el patrón, se encarga de todo (mensaje al cliente + aviso a Darwin y
-  // Melvin) y no hay que seguir procesando este mensaje de ninguna otra
-  // forma.
+  // v18 — CONFIRMACIÓN DE VISITA (botones Sí/No del recordatorio de las 7pm)
+  // Se revisa antes de cualquier otro procesamiento.
   // ══════════════════════════════════════════════════════════════════════
   if (normalized) {
     const manejadaConfirmacion = await manejarRespuestaConfirmacion(from, normalized);
     if (manejadaConfirmacion) return;
   }
 
-// ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
-const esSupervisor =
-  SUPERVISORES.includes(fromE164) ||
-  SUPERVISORES.includes(from);
-
-// ═════════════════════════════════════════════════════════════════════════════
-// SASHA ASISTENCIA V1
-// Trabajadores SSR → Entrada / Salida / Selección de proyecto
-// Los supervisores conservan primero su funcionamiento administrativo normal.
-// ═════════════════════════════════════════════════════════════════════════════
-
-if (!esSupervisor) {
-
-  const telefonoAsistencia = String(from || "")
-    .replace(/\D/g, "");
-
-  try {
-
-    // ==========================================================
-    // 1. VERIFICAR SI EL NÚMERO ES DE UN TRABAJADOR SSR
-    // ==========================================================
-
-  // ── NÚMERO TEMPORAL DE PRUEBA COMO CLIENTE ──────────────────────
-// +50670068477 existe como trabajador SSR, pero durante las pruebas
-// debe saltarse Asistencia y continuar por el flujo comercial.
-const ES_CLIENTE_PRUEBA =
-  telefonoAsistencia === "50670068477";
-
-const verificacion = ES_CLIENTE_PRUEBA
-  ? { esTrabajador: false }
-  : await esTrabajadorSSR(telefonoAsistencia);
-
-
-    // ==========================================================
-    // 2. SI HUBO ERROR CONSULTANDO APPS SCRIPT
-    // NO LO TRATAMOS COMO CLIENTE
-    // ==========================================================
-
-    if (
-      verificacion &&
-      verificacion.error === true
-    ) {
-
-      console.error(
-        `❌ SASHA ASISTENCIA — no se pudo verificar trabajador ${telefonoAsistencia}:`,
-        verificacion.motivo || "error desconocido"
-      );
-
-      await sendText(
-        from,
-        "⚠️ No pude verificar tu estado de asistencia en este momento. Intentá nuevamente en unos segundos."
-      );
-
-      // MUY IMPORTANTE:
-      // detenemos aquí para impedir que el trabajador
-      // caiga al flujo comercial de Sasha.
-      return;
-    }
-
-
-    // ==========================================================
-    // 3. SI ES TRABAJADOR
-    // ==========================================================
-
-    if (
-      verificacion &&
-      verificacion.esTrabajador === true
-    ) {
-
-      console.log(
-        `👷 SASHA ASISTENCIA — trabajador reconocido: ${telefonoAsistencia}`
-      );
-
-// ========================================================
-// FOTO DE ASISTENCIA
-// Conservamos el mediaId original para poder reenviar
-// la fotografía a Darwin, pero además descargamos la
-// imagen en Base64 para que Claude pueda analizarla.
-// ========================================================
-
-const fotoAsistencia =
-  Array.isArray(mediaIds)
-    ? (mediaIds[0] || "")
-    : (mediaIds || "");
-
-let imagenAsistencia = null;
-
-if (fotoAsistencia) {
-
-  try {
-
-    console.log(
-      `📥 SASHA ASISTENCIA — descargando fotografía: ${fotoAsistencia}`
-    );
-
-    imagenAsistencia =
-      await downloadMedia(fotoAsistencia);
-
-    if (
-      imagenAsistencia &&
-      imagenAsistencia.base64 &&
-      imagenAsistencia.mimeType
-    ) {
-
-      console.log(
-        `✅ SASHA ASISTENCIA — fotografía descargada correctamente | ${imagenAsistencia.mimeType}`
-      );
-
-    } else {
-
-      console.warn(
-        "⚠️ SASHA ASISTENCIA — downloadMedia no devolvió una imagen válida."
-      );
-
-      imagenAsistencia = null;
-    }
-
-  } catch (err) {
-
-    console.error(
-      "❌ SASHA ASISTENCIA — error descargando fotografía:",
-      err.message
-    );
-
-    imagenAsistencia = null;
-  }
-}
-
-
-      // ========================================================
-      // 4. PROCESAR ASISTENCIA
-      // ========================================================
-
-      const resultadoAsistencia =
-  await procesarAsistencia({
-    telefono: telefonoAsistencia,
-    texto: normalized,
-
-    // ID original de WhatsApp.
-    // Se conserva para registrar/reenviar la foto.
-    foto: fotoAsistencia,
-
-    // Imagen real descargada.
-    // Claude recibe Base64 + MIME para validar el gesto.
-    imagen: imagenAsistencia,
-
-    messageId: messageId || "",
-
-    // v4 — reutilizar el estado que esTrabajadorSSR() ya consultó
-    // hace un instante, para no volver a preguntarle lo mismo a
-    // Apps Script (ver nota extensa en asistencia.js).
-    estadoPrevio: verificacion.estado || null
-  });
-
-
-      console.log(
-        "👷 SASHA ASISTENCIA — resultado:",
-        JSON.stringify(resultadoAsistencia)
-      );
-
-
-      // ========================================================
-      // 5. RESPUESTA AL TRABAJADOR
-      // ========================================================
-
-      if (resultadoAsistencia) {
-
-        const mensajeAsistencia =
-          typeof resultadoAsistencia === "string"
-            ? resultadoAsistencia
-            : (
-                resultadoAsistencia.mensaje ||
-                resultadoAsistencia.respuesta ||
-                ""
-              );
-
-
-        if (mensajeAsistencia) {
-
-          console.log(
-            `📤 SASHA ASISTENCIA — enviando respuesta a ${telefonoAsistencia}: ${mensajeAsistencia}`
-          );
-
-          await sendText(
-            from,
-            mensajeAsistencia
-          );
-
-        } else {
-
-          console.warn(
-            "⚠️ SASHA ASISTENCIA procesó el mensaje pero no devolvió texto:",
-            JSON.stringify(resultadoAsistencia)
-          );
-        }
-
-
-        // ======================================================
-        // 6. NOTIFICACIÓN A DARWIN
-        // SOLO MOVIMIENTOS REALMENTE CONFIRMADOS
-        // ======================================================
-
-        const tipoAsistencia =
-          typeof resultadoAsistencia === "object"
-            ? resultadoAsistencia.tipo
-            : "";
-
-
-        const tiposNotificables = [
-          "entrada_registrada",
-          "salida_registrada",
-          "proyecto_asignado"
-        ];
-
-
-        if (
-          tiposNotificables.includes(tipoAsistencia)
-        ) {
-
-          let mensajeDarwin = "";
-
-
-          const trabajador =
-            resultadoAsistencia.trabajador ||
-            "Trabajador";
-
-
-          const proyecto =
-            resultadoAsistencia.etiquetaProyecto ||
-            resultadoAsistencia.proyectoEtiqueta ||
-            resultadoAsistencia.proyecto ||
-            (
-              resultadoAsistencia.jornada &&
-              resultadoAsistencia.jornada.proyecto
-            ) ||
-            "Sin proyecto";
-
-
-          // ====================================================
-          // ENTRADA
-          // ====================================================
-
-          if (
-            tipoAsistencia === "entrada_registrada"
-          ) {
-
-            const hora =
-              resultadoAsistencia.hora ||
-              resultadoAsistencia.entrada ||
-              "";
-
-
-            mensajeDarwin =
-              `📥 *ASISTENCIA — ENTRADA*\n\n` +
-              `👷 ${trabajador}\n` +
-              `🏗️ ${proyecto}\n` +
-              (hora
-                ? `🕐 Entrada: ${hora}\n`
-                : "") +
-              `📸 Fotografía registrada`;
-          }
-
-
-          // ====================================================
-          // PROYECTO ASIGNADO
-          // ====================================================
-
-          if (
-            tipoAsistencia === "proyecto_asignado"
-          ) {
-
-            const hora =
-              resultadoAsistencia.hora ||
-              resultadoAsistencia.entrada ||
-              "";
-
-
-            mensajeDarwin =
-              `📥 *ASISTENCIA — ENTRADA*\n\n` +
-              `👷 ${trabajador}\n` +
-              `🏗️ ${proyecto}\n` +
-              (hora
-                ? `🕐 Entrada: ${hora}\n`
-                : "") +
-              `📸 Fotografía registrada`;
-          }
-
-          // ====================================================
-          // SALIDA — REPORTE COMPLETO A DARWIN
-          // ====================================================
-
-          if (
-            tipoAsistencia === "salida_registrada"
-          ) {
-
-            const entrada =
-              resultadoAsistencia.entrada ||
-              (
-                resultadoAsistencia.jornada &&
-                resultadoAsistencia.jornada.entrada
-              ) ||
-              "";
-
-
-            const salida =
-              resultadoAsistencia.salida ||
-              resultadoAsistencia.hora ||
-              "";
-
-
-            const horasHoy =
-              resultadoAsistencia.horasHoyTexto ||
-              resultadoAsistencia.resultado?.horasHoyTexto ||
-              (
-                resultadoAsistencia.horas !== undefined &&
-                resultadoAsistencia.horas !== null
-                  ? String(resultadoAsistencia.horas)
-                  : ""
-              );
-
-
-            const horasSemana =
-              resultadoAsistencia.horasSemanaTexto ||
-              resultadoAsistencia.resultado?.horasSemanaTexto ||
-              "";
-
-
-            const pagoSemana =
-              resultadoAsistencia.pagoSemanaTexto ||
-              resultadoAsistencia.resultado?.pagoSemanaTexto ||
-              "";
-
-
-            mensajeDarwin =
-              `📋 *REPORTE DE SALIDA — SUPERVISIÓN*\n\n` +
-
-              `👷 ${trabajador}\n` +
-              `🏗️ ${proyecto}\n\n` +
-
-              (entrada
-                ? `🕐 Entrada: ${entrada}\n`
-                : "") +
-
-              (salida
-                ? `🕔 Salida: ${salida}\n\n`
-                : "\n") +
-
-              (horasHoy
-                ? `⏱️ Horas laboradas hoy: ${horasHoy}\n`
-                : "") +
-
-              (horasSemana
-                ? `📊 Horas acumuladas en la semana: ${horasSemana}\n`
-                : "") +
-
-              (pagoSemana
-                ? `💰 Pago acumulado de la semana: ${pagoSemana}\n`
-                : "") +
-
-              `\n🧾 Monto acumulado antes de vales.\n` +
-              `📸 Fotografía registrada`;
-          }
-          
-
-if (mensajeDarwin) {
-
-  try {
-
-    // 1. Enviar resumen de asistencia
-    await sendText(
-      DARWIN_PHONE,
-      mensajeDarwin
-    );
-
-    // 2. Reenviar a Darwin la fotografía REAL
-    // recibida del trabajador
-    if (fotoAsistencia) {
-
-      console.log(
-        `📸 SASHA ASISTENCIA — reenviando fotografía a Darwin: ${fotoAsistencia}`
-      );
-
-      await sendMediaById(
-        DARWIN_PHONE,
-        fotoAsistencia
-      );
-
-    } else {
-
-      console.warn(
-        "⚠️ SASHA ASISTENCIA — movimiento registrado sin fotografía disponible para reenviar."
-      );
-
-    }
-
-  } catch (err) {
-
-    console.warn(
-      "⚠️ No se pudo enviar notificación/fotografía de asistencia a Darwin:",
-      err.message
-    );
-
-  }
-}
-        
-}
-              
-        // ======================================================
-        // TRABAJADOR: SIEMPRE TERMINA AQUÍ
-        // NUNCA PASA AL FLUJO COMERCIAL
-        // ======================================================
+  // ── MODO SUPERVISOR ──────────────────────────────────────────────────────────
+  const esSupervisor =
+    SUPERVISORES.includes(fromE164) ||
+    SUPERVISORES.includes(from);
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // SASHA ASISTENCIA V1
+  // Trabajadores SSR → Entrada / Salida / Selección de proyecto
+  // Los supervisores conservan primero su funcionamiento administrativo normal.
+  // ═════════════════════════════════════════════════════════════════════════════
+
+  if (!esSupervisor) {
+
+    const telefonoAsistencia = String(from || "")
+      .replace(/\D/g, "");
+
+    try {
+
+      // ── NÚMERO TEMPORAL DE PRUEBA COMO CLIENTE ──────────────────────
+      // +50670068477 existe como trabajador SSR, pero durante las pruebas
+      // debe saltarse Asistencia y continuar por el flujo comercial.
+      const ES_CLIENTE_PRUEBA =
+        telefonoAsistencia === "50670068477";
+
+      const verificacion = ES_CLIENTE_PRUEBA
+        ? { esTrabajador: false }
+        : await esTrabajadorSSR(telefonoAsistencia);
+
+      // Si hubo error consultando Apps Script NO lo tratamos como cliente.
+      if (
+        verificacion &&
+        verificacion.error === true
+      ) {
+
+        console.error(
+          `❌ SASHA ASISTENCIA — no se pudo verificar trabajador ${telefonoAsistencia}:`,
+          verificacion.motivo || "error desconocido"
+        );
+
+        await sendText(
+          from,
+          "⚠️ No pude verificar tu estado de asistencia en este momento. Intentá nuevamente en unos segundos."
+        );
 
         return;
       }
 
+      // ── ES TRABAJADOR ──────────────────────────────────────────────
+      if (
+        verificacion &&
+        verificacion.esTrabajador === true
+      ) {
 
-      console.warn(
-        `⚠️ Trabajador reconocido pero Asistencia no devolvió resultado: ${telefonoAsistencia}`
+        console.log(
+          `👷 SASHA ASISTENCIA — trabajador reconocido: ${telefonoAsistencia}`
+        );
+
+        // Foto de asistencia: se conserva el mediaId para reenviarla a
+        // Darwin y se descarga en Base64 para que Claude valide el gesto.
+        const fotoAsistencia =
+          Array.isArray(mediaIds)
+            ? (mediaIds[0] || "")
+            : (mediaIds || "");
+
+        let imagenAsistencia = null;
+
+        if (fotoAsistencia) {
+
+          try {
+
+            console.log(
+              `📥 SASHA ASISTENCIA — descargando fotografía: ${fotoAsistencia}`
+            );
+
+            imagenAsistencia =
+              await downloadMedia(fotoAsistencia);
+
+            if (
+              imagenAsistencia &&
+              imagenAsistencia.base64 &&
+              imagenAsistencia.mimeType
+            ) {
+
+              console.log(
+                `✅ SASHA ASISTENCIA — fotografía descargada correctamente | ${imagenAsistencia.mimeType}`
+              );
+
+            } else {
+
+              console.warn(
+                "⚠️ SASHA ASISTENCIA — downloadMedia no devolvió una imagen válida."
+              );
+
+              imagenAsistencia = null;
+            }
+
+          } catch (err) {
+
+            console.error(
+              "❌ SASHA ASISTENCIA — error descargando fotografía:",
+              err.message
+            );
+
+            imagenAsistencia = null;
+          }
+        }
+
+        const resultadoAsistencia =
+          await procesarAsistencia({
+            telefono: telefonoAsistencia,
+            texto: normalized,
+            foto: fotoAsistencia,
+            imagen: imagenAsistencia,
+            messageId: messageId || "",
+            // v4 — reutilizar el estado que esTrabajadorSSR() ya consultó.
+            estadoPrevio: verificacion.estado || null
+          });
+
+        console.log(
+          "👷 SASHA ASISTENCIA — resultado:",
+          JSON.stringify(resultadoAsistencia)
+        );
+
+        if (resultadoAsistencia) {
+
+          const mensajeAsistencia =
+            typeof resultadoAsistencia === "string"
+              ? resultadoAsistencia
+              : (
+                  resultadoAsistencia.mensaje ||
+                  resultadoAsistencia.respuesta ||
+                  ""
+                );
+
+          if (mensajeAsistencia) {
+
+            console.log(
+              `📤 SASHA ASISTENCIA — enviando respuesta a ${telefonoAsistencia}: ${mensajeAsistencia}`
+            );
+
+            await sendText(
+              from,
+              mensajeAsistencia
+            );
+
+          } else {
+
+            console.warn(
+              "⚠️ SASHA ASISTENCIA procesó el mensaje pero no devolvió texto:",
+              JSON.stringify(resultadoAsistencia)
+            );
+          }
+
+          // ── Notificación a Darwin: solo movimientos confirmados ──────
+          const tipoAsistencia =
+            typeof resultadoAsistencia === "object"
+              ? resultadoAsistencia.tipo
+              : "";
+
+          const tiposNotificables = [
+            "entrada_registrada",
+            "salida_registrada",
+            "proyecto_asignado"
+          ];
+
+          if (
+            tiposNotificables.includes(tipoAsistencia)
+          ) {
+
+            let mensajeDarwin = "";
+
+            const trabajador =
+              resultadoAsistencia.trabajador ||
+              "Trabajador";
+
+            const proyecto =
+              resultadoAsistencia.etiquetaProyecto ||
+              resultadoAsistencia.proyectoEtiqueta ||
+              resultadoAsistencia.proyecto ||
+              (
+                resultadoAsistencia.jornada &&
+                resultadoAsistencia.jornada.proyecto
+              ) ||
+              "Sin proyecto";
+
+            // ENTRADA / PROYECTO ASIGNADO
+            if (
+              tipoAsistencia === "entrada_registrada" ||
+              tipoAsistencia === "proyecto_asignado"
+            ) {
+
+              const hora =
+                resultadoAsistencia.hora ||
+                resultadoAsistencia.entrada ||
+                "";
+
+              mensajeDarwin =
+                `📥 *ASISTENCIA — ENTRADA*\n\n` +
+                `👷 ${trabajador}\n` +
+                `🏗️ ${proyecto}\n` +
+                (hora
+                  ? `🕐 Entrada: ${hora}\n`
+                  : "") +
+                `📸 Fotografía registrada`;
+            }
+
+            // SALIDA — REPORTE COMPLETO
+            if (
+              tipoAsistencia === "salida_registrada"
+            ) {
+
+              const entrada =
+                resultadoAsistencia.entrada ||
+                (
+                  resultadoAsistencia.jornada &&
+                  resultadoAsistencia.jornada.entrada
+                ) ||
+                "";
+
+              const salida =
+                resultadoAsistencia.salida ||
+                resultadoAsistencia.hora ||
+                "";
+
+              const horasHoy =
+                resultadoAsistencia.horasHoyTexto ||
+                resultadoAsistencia.resultado?.horasHoyTexto ||
+                (
+                  resultadoAsistencia.horas !== undefined &&
+                  resultadoAsistencia.horas !== null
+                    ? String(resultadoAsistencia.horas)
+                    : ""
+                );
+
+              const horasSemana =
+                resultadoAsistencia.horasSemanaTexto ||
+                resultadoAsistencia.resultado?.horasSemanaTexto ||
+                "";
+
+              const pagoSemana =
+                resultadoAsistencia.pagoSemanaTexto ||
+                resultadoAsistencia.resultado?.pagoSemanaTexto ||
+                "";
+
+              mensajeDarwin =
+                `📋 *REPORTE DE SALIDA — SUPERVISIÓN*\n\n` +
+                `👷 ${trabajador}\n` +
+                `🏗️ ${proyecto}\n\n` +
+                (entrada
+                  ? `🕐 Entrada: ${entrada}\n`
+                  : "") +
+                (salida
+                  ? `🕔 Salida: ${salida}\n\n`
+                  : "\n") +
+                (horasHoy
+                  ? `⏱️ Horas laboradas hoy: ${horasHoy}\n`
+                  : "") +
+                (horasSemana
+                  ? `📊 Horas acumuladas en la semana: ${horasSemana}\n`
+                  : "") +
+                (pagoSemana
+                  ? `💰 Pago acumulado de la semana: ${pagoSemana}\n`
+                  : "") +
+                `\n🧾 Monto acumulado antes de vales.\n` +
+                `📸 Fotografía registrada`;
+            }
+
+            if (mensajeDarwin) {
+
+              try {
+
+                await sendText(
+                  DARWIN_PHONE,
+                  mensajeDarwin
+                );
+
+                if (fotoAsistencia) {
+
+                  console.log(
+                    `📸 SASHA ASISTENCIA — reenviando fotografía a Darwin: ${fotoAsistencia}`
+                  );
+
+                  await sendMediaById(
+                    DARWIN_PHONE,
+                    fotoAsistencia
+                  );
+
+                } else {
+
+                  console.warn(
+                    "⚠️ SASHA ASISTENCIA — movimiento registrado sin fotografía disponible para reenviar."
+                  );
+
+                }
+
+              } catch (err) {
+
+                console.warn(
+                  "⚠️ No se pudo enviar notificación/fotografía de asistencia a Darwin:",
+                  err.message
+                );
+
+              }
+            }
+
+          }
+
+          // Trabajador: SIEMPRE termina aquí, nunca pasa al flujo comercial.
+          return;
+        }
+
+        console.warn(
+          `⚠️ Trabajador reconocido pero Asistencia no devolvió resultado: ${telefonoAsistencia}`
+        );
+
+        return;
+      }
+
+      // ── NO ES TRABAJADOR → continúa al flujo comercial ─────────────
+      console.log(
+        `👤 SASHA — ${telefonoAsistencia} no es trabajador SSR; continúa flujo comercial.`
       );
+
+    } catch (err) {
+
+      // FAIL CLOSED: si Asistencia falla, no mandamos a la persona al
+      // flujo comercial.
+      console.error(
+        "❌ Error en SASHA ASISTENCIA:",
+        err?.message || err
+      );
+
+      await sendText(
+        from,
+        "⚠️ No pude verificar la asistencia en este momento. Intentá nuevamente en unos segundos."
+      ).catch(() => {});
 
       return;
     }
-
-
-    // ==========================================================
-    // 7. NO ES TRABAJADOR
-    // ==========================================================
-
-    console.log(
-      `👤 SASHA — ${telefonoAsistencia} no es trabajador SSR; continúa flujo comercial.`
-    );
-
-    // NO hacemos return.
-    // Continúa normalmente al resto de index.js.
-
-
-  } catch (err) {
-
-    // ==========================================================
-    // 8. FAIL CLOSED
-    //
-    // Si el módulo de asistencia falla inesperadamente,
-    // NO mandamos a esa persona al flujo comercial.
-    // ==========================================================
-
-    console.error(
-      "❌ Error en SASHA ASISTENCIA:",
-      err?.message || err
-    );
-
-
-    await sendText(
-      from,
-      "⚠️ No pude verificar la asistencia en este momento. Intentá nuevamente en unos segundos."
-    ).catch(() => {});
-
-
-    return;
   }
-}
 
   // ═════════════════════════════════════════════════════════════════════════════
   // FIN SASHA ASISTENCIA V1
   // ═════════════════════════════════════════════════════════════════════════════
-        
-  // ── v4/v8/v18: lectura de comprobantes bancarios por imagen ──────────────────
-  // v8: se fusiona con cualquier contexto de texto pendiente de ESTE supervisor
-  // (ej. "regístrame esto a nombre del proyecto de Christian" mandado como
-  // mensaje aparte, segundos antes de la foto).
-  // v18: si la foto llega SIN texto que la acompañe (ni caption, ni contexto
-  // previo), no se procesa de inmediato — se deja pendiente unos segundos por
-  // si llega un mensaje de texto aclaratorio aparte (ver nota extensa junto a
-  // pendingPhotosByPhone, arriba). Si ese texto llega, PASO 1 más abajo la
-  // reclama y la fusiona en un solo registro; si no llega nada, se procesa
-  // sola exactamente como antes.
+
+  // ── v4/v8/v18: lectura de comprobantes bancarios por imagen (supervisores) ──
   if (esSupervisor && mediaIds) {
     const idsComprobante = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
     for (const id of idsComprobante) {
@@ -2131,14 +1835,10 @@ if (mensajeDarwin) {
 
           const seguiaPendiente = quitarFotoPendiente(fromE164, entry);
           if (!seguiaPendiente) {
-            // Un mensaje de texto ya la reclamó y la procesó combinada
-            // mientras esperábamos — no hacer nada más con esta foto.
+            // Un mensaje de texto ya la reclamó y la procesó combinada.
             continue;
           }
 
-          // Nadie la reclamó en la ventana de espera. Revisamos una vez
-          // más por si quedó contexto de texto pendiente mientras
-          // esperábamos, y seguimos con la foto sola.
           textoParaImagen = consumirContextoPendiente(fromE164);
         }
 
@@ -2158,19 +1858,10 @@ if (mensajeDarwin) {
 
   if (esSupervisor && normalized) {
 
-    // ── FIX v3: desenvolver instrucción de voz ANTES de evaluar comandos.
-    // v7: ahora se usa TAMBIÉN para calendario (antes solo finanzas), porque
-    // el envoltorio [Instrucción de voz...] rompía la detección de citas
-    // cuando el comando llegaba por audio.
+    // FIX v3/v7: desenvolver instrucción de voz ANTES de evaluar comandos.
     const textoLimpio = desenvolverInstruccionVoz(normalized);
 
     // ── PASO 0.5 (v15): Consultas financieras de solo lectura ─────────────────
-    // Va ANTES de finanzas.js a propósito. esComandoFinanciero() clasifica por
-    // substring y "pago" matchea dentro de "pagos" — sin este paso, una
-    // pregunta como "resumen de los pagos de Jose Flores" caía en el flujo de
-    // REGISTRO (finanzas.js) en vez de responderse. esConsultaFinanciera()
-    // detecta frases de consulta (resumen, cuánto, listado, etc.) y responde
-    // desde consultas.js, que solo LEE — nunca llega a finanzas.js.
     if (esConsultaFinanciera(textoLimpio)) {
       const respuestaConsulta = await procesarConsultaFinanciera(textoLimpio);
       await sendText(from, respuestaConsulta);
@@ -2182,12 +1873,7 @@ if (mensajeDarwin) {
 
     if (!/^\[(GASTO|INGRESO):/i.test(cmd) && esComandoFinanciero(textoLimpio)) {
 
-      // v18 — si hay una foto de comprobante esperando (mandada segundos
-      // antes, sin texto todavía), la fusionamos con ESTE texto en un solo
-      // registro, tenga o no monto propio el texto. Esto es lo que evita
-      // el bug real: una foto y un texto mandados por separado para el
-      // MISMO gasto ya no se procesan como dos intentos independientes
-      // (con riesgo de registrar el mismo gasto dos veces).
+      // v18 — fusionar con una foto de comprobante pendiente.
       const fotoPendiente = tomarFotoPendienteMasAntigua(fromE164);
       if (fotoPendiente) {
         const respuestaComprobante = await procesarComprobanteImagen(
@@ -2203,10 +1889,7 @@ if (mensajeDarwin) {
         return;
       }
 
-      // v8 — si el comando NO trae ningún monto, lo más probable es que el
-      // supervisor va a mandar la foto del comprobante a continuación. En
-      // vez de generar un "Monto inválido" falso, lo guardamos como
-      // contexto pendiente y esperamos la imagen.
+      // v8 — comando sin monto: esperar la foto del comprobante.
       if (esComandoFinancieroSinMonto(textoLimpio)) {
         guardarContextoPendiente(fromE164, textoLimpio);
         await sendText(from, "📌 Anotado. Mandame la foto del comprobante para completar el registro.");
@@ -2223,7 +1906,6 @@ if (mensajeDarwin) {
     }
 
     // ── PASO 2 (v7): Gestión de calendario — cancelar/reagendar/consultar ─────
-    // Usa el texto DESENVUELTO → funciona igual por texto o por audio.
     const respCalendario = await gestionarCalendarioSupervisor(textoLimpio, fromE164);
     if (respCalendario !== null) {
       await sendText(from, respCalendario);
@@ -2232,7 +1914,6 @@ if (mensajeDarwin) {
 
     // ── PASO 3: Comandos estructurados de supervisor ──────────────────────────
 
-    // [GASTO: monto | descripcion]
     if (/^\[GASTO:/i.test(cmd)) {
       const respuesta = await handleGasto(cmd, fromE164);
       await sendText(from, respuesta);
@@ -2240,7 +1921,6 @@ if (mensajeDarwin) {
       return;
     }
 
-    // [INGRESO: monto | descripcion]
     if (/^\[INGRESO:/i.test(cmd)) {
       const respuesta = await handleIngreso(cmd, fromE164);
       await sendText(from, respuesta);
@@ -2248,21 +1928,18 @@ if (mensajeDarwin) {
       return;
     }
 
-    // [MSG_CLIENTE: nombre_o_telefono | mensaje]
     if (/^\[MSG_CLIENTE:/i.test(cmd)) {
       const respuesta = await handleMsgCliente(cmd, fromE164);
       await sendText(from, respuesta);
       return;
     }
 
-    // [VISITA: tel_cliente | nombre | proyecto | zona | dia | hora | ubicacion | email]
     if (/^\[VISITA:/i.test(cmd)) {
       const respuesta = await handleVisitaSupervisor(cmd, fromE164);
       await sendText(from, respuesta);
       return;
     }
 
-    // [RESUMEN_CLIENTE: nombre] — acceso directo al resumen IA
     if (/^\[RESUMEN_CLIENTE:/i.test(cmd)) {
       const nombre   = cmd.replace(/^\[RESUMEN_CLIENTE:\s*/i, "").replace(/\]$/, "").trim();
       const busqueda = `resumen de ${nombre}`;
@@ -2311,7 +1988,8 @@ if (mensajeDarwin) {
           console.error(`❌ Error img ${i + 1}:`, r.reason?.message);
           return null;
         })
-        .filter(Boolean);    }
+        .filter(Boolean);
+    }
 
     const imageData = imageDataArray.length === 0 ? null
       : imageDataArray.length === 1 ? imageDataArray[0]
@@ -2323,6 +2001,24 @@ if (mensajeDarwin) {
       (imageDataArray.length === 1 ? "[Cliente envió una foto]" : `[Cliente envió ${imageDataArray.length} fotos]`);
 
     addMsg(from, "user", historyText);
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v22 — NOMBRE DECLARADO POR EL CLIENTE (sin depender de Claude)
+    // "me llamo X" / "mi nombre es X" / "Soy X" / formulario de Meta. Se
+    // guarda ANTES de registrar el mensaje en memoria, para que esta misma
+    // fila ya salga con el nombre en el CRM.
+    // ══════════════════════════════════════════════════════════════════════
+    if (!esSupervisor && normalized && !session.name) {
+      const nombreDeclarado = extraerNombreDeclarado(normalized);
+      if (nombreDeclarado) {
+        Object.assign(session, update(from, { name: nombreDeclarado }) || { name: nombreDeclarado });
+        console.log(`👤 v22 — nombre declarado por ${fromE164}: "${nombreDeclarado}"`);
+        memoria.actualizarNombreInmediato(fromE164, nombreDeclarado, {
+          proyecto: session.project_desc || "",
+          zona:     session.zone || "",
+        }).catch(() => {});
+      }
+    }
 
     // ── Guardar en memoria ────────────────────────────────────────────────────
     if (!esSupervisor) {
@@ -2336,16 +2032,6 @@ if (mensajeDarwin) {
           const mediaId = ids[i] || "";
           memoria.guardarMedia(Buffer.from(imgData.base64, "base64"), imgData.mimeType, fromE164, clientName)
             .then(driveUrl => {
-              // v19 (16 sept 2026) — FIX: antes, si guardarMedia() devolvía
-              // null (falla interna ya logueada allá, pero sin visibilidad
-              // acá), este .then() seguía adelante en silencio con
-              // driveUrl:"" — exactamente el "Falta driveUrl" que se ve en
-              // el CRM. Ahora se deja un warning explícito con el teléfono
-              // y mediaId afectados, para poder rastrear cuál foto quedó
-              // sin enlace y por qué (ver el log de guardarMedia arriba,
-              // que sí imprime la causa real — típicamente falta de cuota
-              // de Drive del service account si MEDIA_FOLDER_ID no apunta
-              // a una Unidad Compartida).
               if (!driveUrl) {
                 console.warn(`⚠️ Memoria: foto de ${fromE164} (mediaId ${mediaId}) guardada SIN driveUrl — revisar el error de guardarMedia arriba en este mismo log.`);
               }
@@ -2360,705 +2046,588 @@ if (mensajeDarwin) {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // v19 (16 sept 2026) — PAUSA MANUAL: Darwin tomó el control de ESTA
-    // conversación desde el CRM. El mensaje del cliente ya quedó guardado en
-    // memoria arriba (así que sigue viéndose en el chat del CRM en tiempo
-    // real) — pero Sasha no genera ninguna respuesta automática mientras
-    // dure la pausa. Cualquier otro cliente sigue recibiendo respuesta
-    // normal — esto es por teléfono, no global.
+    // v19 — PAUSA MANUAL: Darwin tomó el control de ESTA conversación desde
+    // el CRM. El mensaje ya quedó guardado en memoria arriba, pero Sasha no
+    // responde mientras dure la pausa (solo para este teléfono).
     // ══════════════════════════════════════════════════════════════════════
     if (!esSupervisor && estaEnPausaManual(fromE164)) {
       console.log(`⏸️ Conversación con ${fromE164} en pausa manual (Darwin tiene el control) — Sasha no responde.`);
       return;
     }
-// ══════════════════════════════════════════════════════════════════════
-// v21 — CANCELACIÓN AUTOMÁTICA SOLICITADA POR EL CLIENTE
-//
-// Se ejecuta ANTES de Claude.
-// Sasha solamente confirma "cancelada" después de que Google Calendar
-// confirme que el evento fue eliminado.
-// ══════════════════════════════════════════════════════════════════════
 
-if (
-  !esSupervisor &&
-  normalized &&
-  clientePideCancelarVisita(normalized)
-) {
-  console.log(
-    `🗑️ Cancelación solicitada por cliente ${fromE164}: "${normalized}"`
-  );
-
-  try {
-    const resultadoCancelacion =
-      await cancelClientVisitByPhone(fromE164);
-
-    console.log(
-      "📅 Resultado cancelación cliente:",
-      JSON.stringify(resultadoCancelacion)
-    );
-
-    // ── CANCELACIÓN CONFIRMADA POR GOOGLE CALENDAR ───────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // v21 — CANCELACIÓN AUTOMÁTICA SOLICITADA POR EL CLIENTE
+    // Sasha solo confirma "cancelada" después de que Calendar lo confirme.
+    // ══════════════════════════════════════════════════════════════════════
     if (
-      resultadoCancelacion &&
-      resultadoCancelacion.success === true &&
-      resultadoCancelacion.deleted === 1
+      !esSupervisor &&
+      normalized &&
+      clientePideCancelarVisita(normalized)
     ) {
-      const eventoCancelado =
-        resultadoCancelacion.event ||
-        (Array.isArray(resultadoCancelacion.events)
-          ? resultadoCancelacion.events[0]
-          : null);
-
-      // SOLO después de que Calendar confirmó el borrado
-      // limpiamos el estado local de la visita.
-      update(from, {
-        visit_confirmed: false,
-        visit_day: null,
-        visit_hour: null,
-        agenda_selected_date: null,
-        slots_shown: null,
-      });
-
-      const mensajeCancelada = [
-        "✅ Su visita quedó cancelada correctamente.",
-        "",
-        "La cita ya fue eliminada de nuestra agenda.",
-        "Cuando desee retomarla, con mucho gusto podemos mostrarle nuevamente las fechas disponibles. 😊",
-      ].join("\n");
-
-      await sendText(from, mensajeCancelada);
-      addMsg(from, "assistant", mensajeCancelada);
-
-      memoria.guardarMensaje({
-        phone: fromE164,
-        clientName: session.name || null,
-        direction: "out",
-        type: "text",
-        content: mensajeCancelada,
-        session: get(from),
-      }).catch(() => {});
-
       console.log(
-        `✅ Visita cancelada realmente en Calendar para ${fromE164}` +
-        (eventoCancelado?.summary
-          ? ` — ${eventoCancelado.summary}`
-          : "")
+        `🗑️ Cancelación solicitada por cliente ${fromE164}: "${normalized}"`
       );
 
-      return;
-    }
+      try {
+        const resultadoCancelacion =
+          await cancelClientVisitByPhone(fromE164);
 
-    // ── MÁS DE UNA CITA ─────────────────────────────────────────────
-    // Nunca borramos varias citas automáticamente si Calendar detectó
-    // ambigüedad.
-   if (
-  resultadoCancelacion &&
-  (
-    resultadoCancelacion.reason === "multiple" ||
-    resultadoCancelacion.reason === "multiple_events" ||
-    resultadoCancelacion.reason === "multiple_matches" ||
-    resultadoCancelacion.ambiguous === true
-  )
-)
-    {
-      await sendText(
-        from,
-        "Encontré más de una visita futura asociada a su número. Para evitar cancelar una cita incorrecta, necesito que nuestro equipo revise cuál desea eliminar."
-      );
-
-      console.warn(
-        `⚠️ Cancelación ambigua para ${fromE164}; no se eliminó ninguna cita.`
-      );
-
-      return;
-    }
-
-    // ── NO SE ENCONTRÓ CITA ────────────────────────────────────────
-   
-    if (
-  resultadoCancelacion &&
-  resultadoCancelacion.reason === "not_found"
-)
-    {
-      await sendText(
-        from,
-        "No encontré una visita futura activa asociada a este número de WhatsApp. No eliminé ningún evento de la agenda."
-      );
-
-      console.warn(
-        `📭 Cliente ${fromE164} pidió cancelar, pero Calendar no encontró una cita futura.`
-      );
-
-      return;
-    }
-
-    // ── RESPUESTA INESPERADA DEL BACKEND ───────────────────────────
-    await sendText(
-      from,
-      "No pude completar la cancelación en la agenda en este momento. Su cita no se considera cancelada todavía. Por favor inténtelo nuevamente o permítame escalarlo con nuestro equipo."
-    );
-
-    console.error(
-      `❌ Cancelación NO confirmada para ${fromE164}:`,
-      resultadoCancelacion
-    );
-
-    return;
-
-  } catch (err) {
-    console.error(
-      `❌ Error cancelando visita del cliente ${fromE164}:`,
-      err.message,
-      err.stack
-    );
-
-    await sendText(
-      from,
-      "No pude completar la cancelación en Google Calendar en este momento. Su cita sigue activa hasta que podamos confirmar la eliminación. Por favor inténtelo nuevamente en unos minutos."
-    );
-
-    return;
-  }
-}
-// ══════════════════════════════════════════════════════════════════════
-// v20 — RESPUESTA A LISTA INTERACTIVA DE AGENDA
-//
-// Si el cliente tocó una fecha de la lista enviada por Sasha, server.js
-// entrega acá un ID como:
-//
-//   agenda_fecha_2026-09-21
-//
-// Ese ID NO se manda a Claude para que adivine qué significa.
-// El backend extrae la fecha, vuelve a consultar Google Calendar y solo
-// acepta la selección si el slot continúa realmente disponible.
-//
-// IMPORTANTE:
-// Esta verificación NO crea todavía la cita.
-// createVisitEvent() hará la validación definitiva inmediatamente antes
-// de insertar el evento.
-// ══════════════════════════════════════════════════════════════════════
-const fechaAgendaSeleccionada = extraerFechaAgendaInteractiva(normalized);
-
-if (fechaAgendaSeleccionada) {
-  try {
-    console.log(
-      `📅 Agenda interactiva — ${fromE164} seleccionó ${fechaAgendaSeleccionada}. Revalidando Calendar...`
-    );
-
-    const sigueDisponible = await fechaSigueDisponibleAgenda(
-      fechaAgendaSeleccionada
-    );
-
-    // ── La fecha se ocupó mientras el cliente decidía ─────────────────
-    if (!sigueDisponible) {
-      console.warn(
-        `⛔ Agenda interactiva — ${fechaAgendaSeleccionada} ya no está disponible para ${fromE164}.`
-      );
-
-      await sendText(
-        from,
-        "Disculpe 🙏 Esa fecha acaba de dejar de estar disponible. Le muestro las opciones que siguen libres:"
-      );
-
-      await enviarListaFechasAgenda(from, {
-        daysAhead: 35,
-        maxDates: 10,
-        texto: "Estas son las fechas disponibles actualmente:",
-      });
-
-      return;
-    }
-
-    // ── La fecha sigue libre ──────────────────────────────────────────
-    // Guardamos la elección en la sesión. La hora es fija: 09:00.
-    const fechaLegible = capitalizarAgenda(
-      fechaISOaLegibleAgenda(fechaAgendaSeleccionada)
-    );
-
-  update(from, {
-  agenda_selected_date: fechaAgendaSeleccionada,
-  visit_day:            fechaAgendaSeleccionada,
-  visit_hour:           "09:00",
-  visit_confirmed:      false,
-  slots_shown:          fechaAgendaSeleccionada,
-});
-
-    // El ID técnico ya quedó registrado como mensaje entrante antes de
-    // llegar a este punto. Agregamos además una representación humana a
-    // la conversación para que el siguiente turno tenga contexto claro.
-    const seleccionHumana =
-      `El cliente seleccionó la fecha ${fechaLegible} a las 9:00 a.m. de las opciones verificadas por el sistema.`;
-
-    addMsg(from, "user", `[SISTEMA AGENDA: ${seleccionHumana}]`);
-
-   const sesionActual = get(from);
-
-const datosFaltantes = [];
-
-if (!sesionActual.name) {
-  datosFaltantes.push("su nombre");
-}
-
-if (!sesionActual.project_desc) {
-  datosFaltantes.push("qué trabajo o remodelación necesita");
-}
-
-if (!sesionActual.zone) {
-  datosFaltantes.push("la zona donde se realizará el trabajo");
-}
-
-if (!sesionActual.waze_link) {
-  datosFaltantes.push("la ubicación o enlace de Waze");
-}
-
-if (!sesionActual.client_email) {
-  datosFaltantes.push("su correo electrónico");
-}
-
-let siguientePregunta = "";
-
-if (datosFaltantes.length > 0) {
-  siguientePregunta =
-    `Para completar la visita todavía necesito ${datosFaltantes.join(", ")}.`;
-} else {
-  siguientePregunta =
-    "Ya tengo los datos necesarios para completar la solicitud de visita.";
-}
-
-const mensajeSeleccion = [
-  `📅 Perfecto. Seleccionó *${fechaLegible} a las 9:00 a.m.*`,
-  ``,
-  `La fecha está disponible en este momento.`,
-  siguientePregunta,
-].join("\n");
-
-    await sendText(from, mensajeSeleccion);
-    addMsg(from, "assistant", mensajeSeleccion);
-
-    if (!esSupervisor) {
-      memoria.guardarMensaje({
-        phone:      fromE164,
-        clientName: session.name || null,
-        direction:  "out",
-        type:       "text",
-        content:    mensajeSeleccion,
-        session:    get(from),
-      }).catch(() => {});
-    }
-
-    console.log(
-      `✅ Agenda interactiva — ${fechaAgendaSeleccionada} sigue disponible. Selección guardada para ${fromE164}.`
-    );
-
-    return;
-
-  } catch (err) {
-    console.error(
-      "❌ Error procesando selección de agenda interactiva:",
-      err.message,
-      err.stack
-    );
-
-    await sendText(
-      from,
-      "Disculpe, tuve un problema al verificar esa fecha en la agenda 🙏. Por favor inténtelo nuevamente."
-    );
-
-    return;
-  }
-}
-          
-   // ═══════════════════════════════════════════════════════════════════════════════
-// v20 — DISPONIBILIDAD REAL DE VISITAS
-//
-// Google Calendar es la única fuente de verdad.
-// proximosDiasHabiles() NO se utiliza para decirle al cliente que una fecha
-// está disponible.
-//
-// Hay tres escenarios:
-// 1. Pregunta genérica de disponibilidad → consultamos Calendar y mostramos
-//    lista interactiva con fechas realmente libres.
-// 2. Pregunta por día/fecha no hábil → explicamos la regla y mostramos fechas
-//    realmente libres.
-// 3. Pregunta por fecha/día hábil concreto → getAvailableSlots() comprueba
-//    específicamente ese día.
-//
-// La selección agenda_fecha_YYYY-MM-DD ya fue interceptada ARRIBA y nunca
-// llega a este bloque.
-// ═══════════════════════════════════════════════════════════════════════════════
-const dayMentioned = detectDayOrDate(normalized);
-let availabilityContext = "";
-
-if (dayMentioned === "GENERICO") {
-
-  update(from, { slots_shown: "GENERICO" });
-
-  try {
-    const disponibilidad = await enviarListaFechasAgenda(from, {
-      daysAhead: 35,
-      maxDates: 10,
-      texto: "Estas son las próximas fechas disponibles para una visita técnica:",
-    });
-
-    if (disponibilidad.ok) {
-      console.log(
-        `📅 Disponibilidad general enviada a ${fromE164}: ${disponibilidad.fechas.length} fecha(s) reales.`
-      );
-
-      // Ya respondimos directamente mediante la lista interactiva.
-      // No necesitamos que Claude invente/redacte opciones adicionales.
-      return;
-    }
-
-    // Si Calendar respondió correctamente pero no encontró fechas, el helper
-    // ya informó al cliente. No continuar hacia Claude.
-    console.warn(
-      `📭 Sin fechas disponibles para ${fromE164} en los próximos 35 días.`
-    );
-    return;
-
-  } catch (err) {
-    console.error(
-      "❌ Error consultando disponibilidad general:",
-      err.message
-    );
-
-    availabilityContext =
-      `\n\n[SISTEMA: El cliente preguntó por disponibilidad para una visita, ` +
-      `pero ocurrió un error técnico al consultar Google Calendar. ` +
-      `NO inventes fechas ni horarios y NO afirmes que existe disponibilidad. ` +
-      `Explícale brevemente que en este momento no pudiste consultar la agenda ` +
-      `y que el equipo puede ayudarle a coordinar.]`;
-  }
-
-} else if (dayMentioned) {
-
-  update(from, { slots_shown: dayMentioned });
-
-  const esNombreDiaNoHabil =
-    NOMBRES_DIA_NO_HABIL.includes(dayMentioned);
-
-  const infoFecha = esNombreDiaNoHabil
-    ? null
-    : calcularFechaYDiaSemana(dayMentioned);
-
-  // ───────────────────────────────────────────────────────────────────────
-  // CASO A — Día no hábil
-  // ───────────────────────────────────────────────────────────────────────
-  if (
-    esNombreDiaNoHabil ||
-    (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana))
-  ) {
-
-    const detalleFecha = infoFecha
-      ? `La fecha solicitada cae en ${infoFecha.diaSemana}.`
-      : `${capitalizarAgenda(dayMentioned)} no es un día de visita.`;
-
-    try {
-      const disponibilidad = await enviarListaFechasAgenda(from, {
-        daysAhead: 35,
-        maxDates: 10,
-        texto:
-          `${detalleFecha} Las visitas se realizan lunes, martes y viernes. ` +
-          `Estas son las próximas fechas realmente disponibles:`,
-      });
-
-      if (disponibilidad.ok) {
         console.log(
-          `📅 Día no hábil solicitado por ${fromE164}; se enviaron alternativas reales.`
+          "📅 Resultado cancelación cliente:",
+          JSON.stringify(resultadoCancelacion)
         );
+
+        // ── CANCELACIÓN CONFIRMADA POR GOOGLE CALENDAR ───────────────────
+        if (
+          resultadoCancelacion &&
+          resultadoCancelacion.success === true &&
+          resultadoCancelacion.deleted === 1
+        ) {
+          const eventoCancelado =
+            resultadoCancelacion.event ||
+            (Array.isArray(resultadoCancelacion.events)
+              ? resultadoCancelacion.events[0]
+              : null);
+
+          update(from, {
+            visit_confirmed: false,
+            visit_day: null,
+            visit_hour: null,
+            agenda_selected_date: null,
+            slots_shown: null,
+          });
+
+          const mensajeCancelada = [
+            "✅ Su visita quedó cancelada correctamente.",
+            "",
+            "La cita ya fue eliminada de nuestra agenda.",
+            "Cuando desee retomarla, con mucho gusto podemos mostrarle nuevamente las fechas disponibles. 😊",
+          ].join("\n");
+
+          await sendText(from, mensajeCancelada);
+          addMsg(from, "assistant", mensajeCancelada);
+
+          memoria.guardarMensaje({
+            phone: fromE164,
+            clientName: session.name || null,
+            direction: "out",
+            type: "text",
+            content: mensajeCancelada,
+            session: get(from),
+          }).catch(() => {});
+
+          console.log(
+            `✅ Visita cancelada realmente en Calendar para ${fromE164}` +
+            (eventoCancelado?.summary
+              ? ` — ${eventoCancelado.summary}`
+              : "")
+          );
+
+          return;
+        }
+
+        // ── MÁS DE UNA CITA: nunca borrar varias automáticamente ────────
+        if (
+          resultadoCancelacion &&
+          (
+            resultadoCancelacion.reason === "multiple" ||
+            resultadoCancelacion.reason === "multiple_events" ||
+            resultadoCancelacion.reason === "multiple_matches" ||
+            resultadoCancelacion.ambiguous === true
+          )
+        ) {
+          await sendText(
+            from,
+            "Encontré más de una visita futura asociada a su número. Para evitar cancelar una cita incorrecta, necesito que nuestro equipo revise cuál desea eliminar."
+          );
+
+          console.warn(
+            `⚠️ Cancelación ambigua para ${fromE164}; no se eliminó ninguna cita.`
+          );
+
+          return;
+        }
+
+        // ── NO SE ENCONTRÓ CITA ────────────────────────────────────────
+        if (
+          resultadoCancelacion &&
+          resultadoCancelacion.reason === "not_found"
+        ) {
+          await sendText(
+            from,
+            "No encontré una visita futura activa asociada a este número de WhatsApp. No eliminé ningún evento de la agenda."
+          );
+
+          console.warn(
+            `📭 Cliente ${fromE164} pidió cancelar, pero Calendar no encontró una cita futura.`
+          );
+
+          return;
+        }
+
+        // ── RESPUESTA INESPERADA DEL BACKEND ───────────────────────────
+        await sendText(
+          from,
+          "No pude completar la cancelación en la agenda en este momento. Su cita no se considera cancelada todavía. Por favor inténtelo nuevamente o permítame escalarlo con nuestro equipo."
+        );
+
+        console.error(
+          `❌ Cancelación NO confirmada para ${fromE164}:`,
+          resultadoCancelacion
+        );
+
+        return;
+
+      } catch (err) {
+        console.error(
+          `❌ Error cancelando visita del cliente ${fromE164}:`,
+          err.message,
+          err.stack
+        );
+
+        await sendText(
+          from,
+          "No pude completar la cancelación en Google Calendar en este momento. Su cita sigue activa hasta que podamos confirmar la eliminación. Por favor inténtelo nuevamente en unos minutos."
+        );
+
+        return;
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v20 — RESPUESTA A LISTA INTERACTIVA DE AGENDA (agenda_fecha_YYYY-MM-DD)
+    // El backend extrae la fecha y revalida Calendar; Claude no interviene.
+    // ══════════════════════════════════════════════════════════════════════
+    const fechaAgendaSeleccionada = extraerFechaAgendaInteractiva(normalized);
+
+    if (fechaAgendaSeleccionada) {
+      try {
+        console.log(
+          `📅 Agenda interactiva — ${fromE164} seleccionó ${fechaAgendaSeleccionada}. Revalidando Calendar...`
+        );
+
+        const sigueDisponible = await fechaSigueDisponibleAgenda(
+          fechaAgendaSeleccionada
+        );
+
+        if (!sigueDisponible) {
+          console.warn(
+            `⛔ Agenda interactiva — ${fechaAgendaSeleccionada} ya no está disponible para ${fromE164}.`
+          );
+
+          await sendText(
+            from,
+            "Disculpe 🙏 Esa fecha acaba de dejar de estar disponible. Le muestro las opciones que siguen libres:"
+          );
+
+          await enviarListaFechasAgenda(from, {
+            daysAhead: 35,
+            maxDates: 10,
+            texto: "Estas son las fechas disponibles actualmente:",
+          });
+
+          return;
+        }
+
+        const fechaLegible = capitalizarAgenda(
+          fechaISOaLegibleAgenda(fechaAgendaSeleccionada)
+        );
+
+        update(from, {
+          agenda_selected_date: fechaAgendaSeleccionada,
+          visit_day:            fechaAgendaSeleccionada,
+          visit_hour:           "09:00",
+          visit_confirmed:      false,
+          slots_shown:          fechaAgendaSeleccionada,
+        });
+
+        const seleccionHumana =
+          `El cliente seleccionó la fecha ${fechaLegible} a las 9:00 a.m. de las opciones verificadas por el sistema.`;
+
+        addMsg(from, "user", `[SISTEMA AGENDA: ${seleccionHumana}]`);
+
+        const sesionActual = get(from);
+
+        const datosFaltantes = [];
+
+        if (!sesionActual.name) {
+          datosFaltantes.push("su nombre");
+        }
+
+        if (!sesionActual.project_desc) {
+          datosFaltantes.push("qué trabajo o remodelación necesita");
+        }
+
+        if (!sesionActual.zone) {
+          datosFaltantes.push("la zona donde se realizará el trabajo");
+        }
+
+        if (!sesionActual.waze_link) {
+          datosFaltantes.push("la ubicación o enlace de Waze");
+        }
+
+        if (!sesionActual.client_email) {
+          datosFaltantes.push("su correo electrónico");
+        }
+
+        const siguientePregunta = datosFaltantes.length > 0
+          ? `Para completar la visita todavía necesito ${datosFaltantes.join(", ")}.`
+          : "Ya tengo los datos necesarios para completar la solicitud de visita.";
+
+        const mensajeSeleccion = [
+          `📅 Perfecto. Seleccionó *${fechaLegible} a las 9:00 a.m.*`,
+          ``,
+          `La fecha está disponible en este momento.`,
+          siguientePregunta,
+        ].join("\n");
+
+        await sendText(from, mensajeSeleccion);
+        addMsg(from, "assistant", mensajeSeleccion);
+
+        if (!esSupervisor) {
+          memoria.guardarMensaje({
+            phone:      fromE164,
+            clientName: session.name || null,
+            direction:  "out",
+            type:       "text",
+            content:    mensajeSeleccion,
+            session:    get(from),
+          }).catch(() => {});
+        }
+
+        console.log(
+          `✅ Agenda interactiva — ${fechaAgendaSeleccionada} sigue disponible. Selección guardada para ${fromE164}.`
+        );
+
+        return;
+
+      } catch (err) {
+        console.error(
+          "❌ Error procesando selección de agenda interactiva:",
+          err.message,
+          err.stack
+        );
+
+        await sendText(
+          from,
+          "Disculpe, tuve un problema al verificar esa fecha en la agenda 🙏. Por favor inténtelo nuevamente."
+        );
+
+        return;
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // v20 — DISPONIBILIDAD REAL DE VISITAS (Google Calendar = fuente de verdad)
+    // 1. Pregunta genérica → lista interactiva con fechas reales.
+    // 2. Día/fecha no hábil → regla + fechas reales.
+    // 3. Día/fecha hábil concreto → getAvailableSlots() verifica ese día.
+    // ══════════════════════════════════════════════════════════════════════
+    const dayMentioned = detectDayOrDate(normalized);
+    let availabilityContext = "";
+
+    if (dayMentioned === "GENERICO") {
+
+      update(from, { slots_shown: "GENERICO" });
+
+      try {
+        const disponibilidad = await enviarListaFechasAgenda(from, {
+          daysAhead: 35,
+          maxDates: 10,
+          texto: "Estas son las próximas fechas disponibles para una visita técnica:",
+        });
+
+        if (disponibilidad.ok) {
+          console.log(
+            `📅 Disponibilidad general enviada a ${fromE164}: ${disponibilidad.fechas.length} fecha(s) reales.`
+          );
+          return;
+        }
+
+        console.warn(
+          `📭 Sin fechas disponibles para ${fromE164} en los próximos 35 días.`
+        );
+        return;
+
+      } catch (err) {
+        console.error(
+          "❌ Error consultando disponibilidad general:",
+          err.message
+        );
+
+        availabilityContext =
+          `\n\n[SISTEMA: El cliente preguntó por disponibilidad para una visita, ` +
+          `pero ocurrió un error técnico al consultar Google Calendar. ` +
+          `NO inventes fechas ni horarios y NO afirmes que existe disponibilidad. ` +
+          `Explícale brevemente que en este momento no pudiste consultar la agenda ` +
+          `y que el equipo puede ayudarle a coordinar.]`;
       }
 
-      // Tanto si encontró fechas como si no, enviarListaFechasAgenda()
-      // ya respondió al cliente.
-      return;
+    } else if (dayMentioned) {
 
-    } catch (err) {
-      console.error(
-        "❌ Error buscando alternativas para día no hábil:",
-        err.message
-      );
+      update(from, { slots_shown: dayMentioned });
 
-      availabilityContext =
-        `\n\n[SISTEMA: El cliente pidió "${dayMentioned}", pero esa fecha/día ` +
-        `no corresponde a los días de visita (lunes, martes y viernes). ` +
-        `Además ocurrió un error al consultar las alternativas reales en ` +
-        `Google Calendar. NO inventes ninguna fecha. Explica únicamente la ` +
-        `regla de días de visita e indica que la agenda no pudo consultarse ` +
-        `en este momento.]`;
-    }
+      const esNombreDiaNoHabil =
+        NOMBRES_DIA_NO_HABIL.includes(dayMentioned);
 
-  } else {
+      const infoFecha = esNombreDiaNoHabil
+        ? null
+        : calcularFechaYDiaSemana(dayMentioned);
 
-    // ─────────────────────────────────────────────────────────────────────
-    // CASO B — Día/fecha potencialmente hábil.
-    // Consultamos específicamente Calendar.
-    // ─────────────────────────────────────────────────────────────────────
-    try {
-      const resultado = await getAvailableSlots(dayMentioned);
+      // ── CASO A — Día no hábil ──────────────────────────────────────────
+      if (
+        esNombreDiaNoHabil ||
+        (infoFecha && !DIAS_HABILES.includes(infoFecha.diaSemana))
+      ) {
 
-      const slots = Array.isArray(resultado?.slots)
-        ? resultado.slots
-        : [];
-
-      const dateLabel =
-        resultado?.dateLabel ||
-        dayMentioned;
-
-      const nHoyManana = normalized
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "");
-
-      const preguntoHoyOManana =
-        /\bhoy\b/.test(nHoyManana) ||
-        /\bmanana\b/.test(nHoyManana);
-
-      // ── La fecha concreta NO está disponible ──────────────────────────
-      if (slots.length === 0) {
-
-        console.log(
-          `⛔ Fecha solicitada sin disponibilidad: ${dateLabel} — ${fromE164}`
-        );
+        const detalleFecha = infoFecha
+          ? `La fecha solicitada cae en ${infoFecha.diaSemana}.`
+          : `${capitalizarAgenda(dayMentioned)} no es un día de visita.`;
 
         try {
           const disponibilidad = await enviarListaFechasAgenda(from, {
             daysAhead: 35,
             maxDates: 10,
             texto:
-              `${capitalizarAgenda(dateLabel)} no está disponible. ` +
-              `Estas son las próximas fechas que sí están libres:`,
+              `${detalleFecha} Las visitas se realizan lunes, martes y viernes. ` +
+              `Estas son las próximas fechas realmente disponibles:`,
           });
 
           if (disponibilidad.ok) {
             console.log(
-              `📅 Se enviaron alternativas reales a ${fromE164}.`
+              `📅 Día no hábil solicitado por ${fromE164}; se enviaron alternativas reales.`
             );
           }
 
           return;
 
-        } catch (errAlternativas) {
+        } catch (err) {
           console.error(
-            "❌ Error buscando alternativas reales:",
-            errAlternativas.message
+            "❌ Error buscando alternativas para día no hábil:",
+            err.message
           );
 
           availabilityContext =
-            `\n\n[SISTEMA: El cliente pidió ${dateLabel}, pero Google Calendar ` +
-            `confirmó que esa fecha NO está disponible. Luego ocurrió un error ` +
-            `consultando fechas alternativas. NO inventes ninguna fecha ni ` +
-            `horario. Dile únicamente que esa fecha no está disponible y que ` +
-            `el equipo puede ayudarle a revisar otra opción.]`;
+            `\n\n[SISTEMA: El cliente pidió "${dayMentioned}", pero esa fecha/día ` +
+            `no corresponde a los días de visita (lunes, martes y viernes). ` +
+            `Además ocurrió un error al consultar las alternativas reales en ` +
+            `Google Calendar. NO inventes ninguna fecha. Explica únicamente la ` +
+            `regla de días de visita e indica que la agenda no pudo consultarse ` +
+            `en este momento.]`;
         }
 
       } else {
 
-        // ── La fecha concreta SÍ está disponible ─────────────────────────
-        const slotsText = slots.map(slot => {
-          const [h, m] = slot.split(":");
-          const hNum = parseInt(h, 10);
-          const h12 =
-            hNum > 12
-              ? hNum - 12
-              : hNum === 0
-                ? 12
-                : hNum;
+        // ── CASO B — Día/fecha potencialmente hábil ──────────────────────
+        try {
+          const resultado = await getAvailableSlots(dayMentioned);
 
-          return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
-        }).join(", ");
+          const slots = Array.isArray(resultado?.slots)
+            ? resultado.slots
+            : [];
 
-        const notaHoyOManana = preguntoHoyOManana
-          ? ` El cliente mencionó hoy/mañana. Las visitas NUNCA deben ` +
-            `confirmarse para el mismo día de la solicitud. Usa exclusivamente ` +
-            `la fecha exacta devuelta por Calendar: ${dateLabel}.`
-          : "";
+          const dateLabel =
+            resultado?.dateLabel ||
+            dayMentioned;
 
-        availabilityContext =
-          `\n\n[SISTEMA: Google Calendar acaba de verificar la disponibilidad. ` +
-          `La fecha real disponible es *${dateLabel}*. ` +
-          `Horario disponible: ${slotsText}. ` +
-          `Esta información viene del backend y es la única fuente de verdad. ` +
-          `NO calcules otra fecha, NO cambies el día y NO inventes horarios. ` +
-          `Si el cliente quiere esa fecha, continúa recopilando los datos que ` +
-          `falten para completar la visita. Todavía NO afirmes que la cita quedó ` +
-          `agendada: eso solo puede decirse después de que createVisitEvent() ` +
-          `confirme éxito.${notaHoyOManana}]`;
+          const nHoyManana = normalized
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "");
 
-        console.log(
-          `✅ Disponibilidad específica verificada para ${fromE164}: ${dateLabel} — ${slotsText}`
-        );
+          const preguntoHoyOManana =
+            /\bhoy\b/.test(nHoyManana) ||
+            /\bmanana\b/.test(nHoyManana);
+
+          if (slots.length === 0) {
+
+            console.log(
+              `⛔ Fecha solicitada sin disponibilidad: ${dateLabel} — ${fromE164}`
+            );
+
+            try {
+              const disponibilidad = await enviarListaFechasAgenda(from, {
+                daysAhead: 35,
+                maxDates: 10,
+                texto:
+                  `${capitalizarAgenda(dateLabel)} no está disponible. ` +
+                  `Estas son las próximas fechas que sí están libres:`,
+              });
+
+              if (disponibilidad.ok) {
+                console.log(
+                  `📅 Se enviaron alternativas reales a ${fromE164}.`
+                );
+              }
+
+              return;
+
+            } catch (errAlternativas) {
+              console.error(
+                "❌ Error buscando alternativas reales:",
+                errAlternativas.message
+              );
+
+              availabilityContext =
+                `\n\n[SISTEMA: El cliente pidió ${dateLabel}, pero Google Calendar ` +
+                `confirmó que esa fecha NO está disponible. Luego ocurrió un error ` +
+                `consultando fechas alternativas. NO inventes ninguna fecha ni ` +
+                `horario. Dile únicamente que esa fecha no está disponible y que ` +
+                `el equipo puede ayudarle a revisar otra opción.]`;
+            }
+
+          } else {
+
+            const slotsText = slots.map(slot => {
+              const [h, m] = slot.split(":");
+              const hNum = parseInt(h, 10);
+              const h12 =
+                hNum > 12
+                  ? hNum - 12
+                  : hNum === 0
+                    ? 12
+                    : hNum;
+
+              return `${h12}:${m} ${hNum >= 12 ? "p.m." : "a.m."}`;
+            }).join(", ");
+
+            const notaHoyOManana = preguntoHoyOManana
+              ? ` El cliente mencionó hoy/mañana. Las visitas NUNCA deben ` +
+                `confirmarse para el mismo día de la solicitud. Usa exclusivamente ` +
+                `la fecha exacta devuelta por Calendar: ${dateLabel}.`
+              : "";
+
+            availabilityContext =
+              `\n\n[SISTEMA: Google Calendar acaba de verificar la disponibilidad. ` +
+              `La fecha real disponible es *${dateLabel}*. ` +
+              `Horario disponible: ${slotsText}. ` +
+              `Esta información viene del backend y es la única fuente de verdad. ` +
+              `NO calcules otra fecha, NO cambies el día y NO inventes horarios. ` +
+              `Si el cliente quiere esa fecha, continúa recopilando los datos que ` +
+              `falten para completar la visita. Todavía NO afirmes que la cita quedó ` +
+              `agendada: eso solo puede decirse después de que createVisitEvent() ` +
+              `confirme éxito.${notaHoyOManana}]`;
+
+            console.log(
+              `✅ Disponibilidad específica verificada para ${fromE164}: ${dateLabel} — ${slotsText}`
+            );
+          }
+
+        } catch (err) {
+          console.error(
+            `❌ Error verificando "${dayMentioned}" en Calendar:`,
+            err.message
+          );
+
+          availabilityContext =
+            `\n\n[SISTEMA: El cliente preguntó por "${dayMentioned}", pero ocurrió ` +
+            `un error técnico consultando Google Calendar. NO inventes disponibilidad, ` +
+            `fechas ni horarios. Explica brevemente que no pudiste verificar la agenda ` +
+            `en este momento.]`;
+        }
       }
-
-    } catch (err) {
-      console.error(
-        `❌ Error verificando "${dayMentioned}" en Calendar:`,
-        err.message
-      );
-
-      availabilityContext =
-        `\n\n[SISTEMA: El cliente preguntó por "${dayMentioned}", pero ocurrió ` +
-        `un error técnico consultando Google Calendar. NO inventes disponibilidad, ` +
-        `fechas ni horarios. Explica brevemente que no pudiste verificar la agenda ` +
-        `en este momento.]`;
     }
-  }
-}
+
+    // ── v22: datos del cliente + recordatorio de nombre (solo clientes) ──────
+    const contextoDatos = esSupervisor ? "" : construirContextoDatosCliente(from, session);
 
     // ── Llamar a Claude ───────────────────────────────────────────────────────
-    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext, imageData);
+    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext + contextoDatos, imageData);
     const { cleanMessage, flag, flagData } = parseFlags(rawResponse);
 
     // ══════════════════════════════════════════════════════════════════════
-    // v13/v14 — FIX CRÍTICO: para el flag VISITA, el texto de Claude
-    // (cleanMessage) podía incluir una confirmación ("¡Todo listo!")
-    // escrita ANTES de intentar crear el evento real en Calendar. Enviarlo
-    // de inmediato significa confirmarle al cliente una cita que todavía
-    // no sabemos si existe — exactamente lo que pasó con Omar Quesada
-    // (se le dijo "Todo listo" y el evento chocó con slot_ocupado).
-    // v13 descartaba cleanMessage por completo, pero ese texto también trae
-    // la mini-guía de preparación (ONBOARDING POST-AGENDAMIENTO en
-    // claude.js), que sí es información útil y legítima. v14: el system
-    // prompt (claude.js) ahora le prohíbe explícitamente a Claude afirmar
-    // éxito en ese mensaje, así que cleanMessage SÍ se envía — pero como un
-    // mensaje aparte, ANTES de intentar la reserva. El resultado real
-    // (éxito o rechazo) llega DESPUÉS, en un segundo mensaje construido
-    // exclusivamente a partir de lo que devuelve createVisitEvent() — nunca
-    // de lo que Claude haya escrito de antemano. Para el resto de los
-    // flags, el comportamiento es idéntico al original.
+    // v13/v14 — Flag VISITA: el texto de Claude (mini-guía) se envía primero;
+    // el resultado real (éxito o rechazo) llega en un segundo mensaje
+    // construido SOLO a partir de createVisitEvent().
     // ══════════════════════════════════════════════════════════════════════
     if (flag === "VISITA") {
       const [name, project, zone, day, hour, ubicacion, email] = (flagData || "").split("|");
 
-      // ══════════════════════════════════════════════════════════════════
-      // v17 (11 sept 2026) — GUARDA DE IDEMPOTENCIA: FIX CRÍTICO
-      //
-      // BUG REAL: después de confirmar exitosamente la visita de Shirley
-      // Vargas (viernes 18 de septiembre, 9:00 a.m.), la clienta respondió
-      // simplemente "Gracias". Ese mensaje —sin mencionar ningún día, sin
-      // pedir ningún cambio— disparó una SEGUNDA emisión del flag
-      // [VISITA:...] con el MISMO día y hora ya confirmados, lo que volvió
-      // a invocar createVisitEvent() para una cita que YA EXISTÍA. El
-      // evento chocó contra sí mismo (mitigado aparte en calendar.js v16),
-      // y Sasha terminó diciéndole a la clienta que su propia cita recién
-      // confirmada "ya no estaba disponible" — con el agravante de que
-      // luego ofreció fechas inválidas, arruinando la experiencia.
-      //
-      // FIX: si la visita de este cliente YA está confirmada
-      // (session.visit_confirmed === true) y el nuevo flag trae el MISMO
-      // día y la MISMA hora que ya están guardados en la sesión, se ignora
-      // por completo — nunca se vuelve a llamar createVisitEvent(). Si el
-      // cliente de verdad pide otro día/hora, day/hour serán distintos a
-      // los guardados y el flujo de reagendamiento sigue funcionando
-      // exactamente igual que siempre (createVisitEvent ya maneja
-      // reagendamientos vía cancelClientEvents()).
-      // ══════════════════════════════════════════════════════════════════
-
-     // ════════════════════════════════════════════════════════════════════
-// v20 — BLINDAJE FINAL DE FECHA/HORA
-//
-// Si el cliente escogió una fecha mediante la agenda interactiva,
-// session.visit_day contiene un ISO YYYY-MM-DD verificado por backend.
-//
-// Claude NO tiene autoridad para sustituir esa fecha por otra al emitir
-// [VISITA:...]. Si existe una selección ISO en sesión, esa fecha manda.
-//
-// Para clientes, la hora oficial de visita es siempre 09:00.
-// ════════════════════════════════════════════════════════════════════
-
+      // v20 — si el cliente eligió una fecha en la agenda interactiva (ISO
+      // verificado por backend) y la visita aún no está confirmada, esa
+      // fecha manda sobre la que proponga Claude. Hora siempre 09:00.
       const fechaAgendaBackend =
-  String(session.agenda_selected_date || "").trim();
+        String(session.agenda_selected_date || "").trim();
 
-const fechaVisitDayLegacy =
-  String(session.visit_day || "").trim();
+      const fechaVisitDayLegacy =
+        String(session.visit_day || "").trim();
 
-// agenda_selected_date representa únicamente una selección interactiva
-// PENDIENTE de confirmación.
-//
-// Una vez que ya existe una visita confirmada, esa fecha anterior NO puede
-// bloquear una solicitud posterior de reagendamiento.
-//
-// El fallback a visit_day se conserva únicamente para sesiones antiguas o
-// conversaciones que estaban a mitad del flujo antes de implementar
-// agenda_selected_date.
-const fechaSeleccionadaBackend =
-  session.visit_confirmed !== true
-    ? (
-        /^\d{4}-\d{2}-\d{2}$/.test(fechaAgendaBackend)
-          ? fechaAgendaBackend
-          : (
-              /^\d{4}-\d{2}-\d{2}$/.test(fechaVisitDayLegacy)
-                ? fechaVisitDayLegacy
-                : null
+      const fechaSeleccionadaBackend =
+        session.visit_confirmed !== true
+          ? (
+              /^\d{4}-\d{2}-\d{2}$/.test(fechaAgendaBackend)
+                ? fechaAgendaBackend
+                : (
+                    /^\d{4}-\d{2}-\d{2}$/.test(fechaVisitDayLegacy)
+                      ? fechaVisitDayLegacy
+                      : null
+                  )
             )
-      )
-    : null;
+          : null;
 
-const diaFinal =
-  fechaSeleccionadaBackend ||
-  day?.trim() ||
-  session.visit_day ||
-  "a coordinar";
+      const diaFinal =
+        fechaSeleccionadaBackend ||
+        day?.trim() ||
+        session.visit_day ||
+        "a coordinar";
 
-const horaFinal = "09:00";
+      const horaFinal = "09:00";
 
-// ── Guarda de idempotencia v17, ahora usando la fecha/hora DEFINITIVAS ──
-const diaNuevoNorm  = String(diaFinal).trim().toLowerCase();
-const horaNuevaNorm = horaFinal;
+      // ── v17 — Guarda de idempotencia con fecha/hora definitivas ─────────
+      const diaNuevoNorm  = String(diaFinal).trim().toLowerCase();
+      const horaNuevaNorm = horaFinal;
 
-const yaConfirmadaMismoHorario =
-  session.visit_confirmed === true &&
-  String(session.visit_day || "").trim().toLowerCase() === diaNuevoNorm &&
-  String(session.visit_hour || "09:00").trim() === horaNuevaNorm;
+      const yaConfirmadaMismoHorario =
+        session.visit_confirmed === true &&
+        String(session.visit_day || "").trim().toLowerCase() === diaNuevoNorm &&
+        String(session.visit_hour || "09:00").trim() === horaNuevaNorm;
 
-if (yaConfirmadaMismoHorario) {
-  console.log(
-    `↪️ VISITA ignorada — ya estaba confirmada para ${from} en "${session.visit_day}" ${session.visit_hour}. No se vuelve a tocar el calendario.`
-  );
+      if (yaConfirmadaMismoHorario) {
+        console.log(
+          `↪️ VISITA ignorada — ya estaba confirmada para ${from} en "${session.visit_day}" ${session.visit_hour}. No se vuelve a tocar el calendario.`
+        );
 
-  if (cleanMessage) {
-    await sendText(from, cleanMessage);
-    addMsg(from, "assistant", cleanMessage);
+        if (cleanMessage) {
+          await sendText(from, cleanMessage);
+          addMsg(from, "assistant", cleanMessage);
 
-    if (!esSupervisor) {
-      memoria.guardarMensaje({
-        phone: fromE164,
-        clientName: session.name || null,
-        direction: "out",
-        type: "text",
-        content: cleanMessage,
-        session,
-      }).catch(() => {});
-    }
-  }
+          if (!esSupervisor) {
+            memoria.guardarMensaje({
+              phone: fromE164,
+              clientName: session.name || null,
+              direction: "out",
+              type: "text",
+              content: cleanMessage,
+              session,
+            }).catch(() => {});
+          }
+        }
 
-  return;
-}
+        return;
+      }
 
-if (
-  fechaSeleccionadaBackend &&
-  day?.trim() &&
-  day.trim() !== fechaSeleccionadaBackend
-) {
-  console.warn(
-    `🛡️ VISITA — Claude propuso "${day.trim()}", pero el cliente seleccionó "${fechaSeleccionadaBackend}". Se conserva la fecha verificada por backend.`
-  );
-}
+      if (
+        fechaSeleccionadaBackend &&
+        day?.trim() &&
+        day.trim() !== fechaSeleccionadaBackend
+      ) {
+        console.warn(
+          `🛡️ VISITA — Claude propuso "${day.trim()}", pero el cliente seleccionó "${fechaSeleccionadaBackend}". Se conserva la fecha verificada por backend.`
+        );
+      }
 
-// IMPORTANTE:
-// Todavía NO ponemos visit_confirmed=true.
-// Eso solamente ocurrirá DESPUÉS de que Calendar confirme la creación.
-const updated = update(from, {
-  name:            name?.trim()      || session.name,
-  project_desc:    project?.trim()   || session.project_desc,
-  zone:            zone?.trim()      || session.zone,
-  visit_day:       diaFinal,
-  visit_hour:      horaFinal,
-  waze_link:       ubicacion?.trim() || session.waze_link || "",
-  client_email:    email?.trim()     || session.client_email || "",
-  visit_confirmed: false,
-  lead_saved:      session.lead_saved || false,
-});       
+      // Todavía NO se marca visit_confirmed=true: solo después de Calendar.
+      const updated = update(from, {
+        name:            campoLeadValido(name)    || session.name,
+        project_desc:    campoLeadValido(project) || session.project_desc,
+        zone:            campoLeadValido(zone)    || session.zone,
+        visit_day:       diaFinal,
+        visit_hour:      horaFinal,
+        waze_link:       ubicacion?.trim() || session.waze_link || "",
+        client_email:    email?.trim()     || session.client_email || "",
+        visit_confirmed: false,
+        lead_saved:      session.lead_saved || false,
+      });
 
       const visitHour = updated.visit_hour || "09:00";
       const [hh, mm]  = visitHour.split(":");
@@ -3071,74 +2640,65 @@ const updated = update(from, {
       let eventData = null;
       try {
 
-      eventData = await createVisitEvent({
-  name:    updated.name,
-  phone:   from,
-  email:   updated.client_email,
-  project: updated.project_desc,
-  zone:    updated.zone,
-  day:     updated.visit_day,
-  hour:    updated.visit_hour,
-  notes:   updated.waze_link
-    ? `Ubicación / Waze: ${updated.waze_link}`
-    : "",
-});
+        eventData = await createVisitEvent({
+          name:    updated.name,
+          phone:   from,
+          email:   updated.client_email,
+          project: updated.project_desc,
+          zone:    updated.zone,
+          day:     updated.visit_day,
+          hour:    updated.visit_hour,
+          notes:   updated.waze_link
+            ? `Ubicación / Waze: ${updated.waze_link}`
+            : "",
+        });
 
-if (eventData.success === true) {
-  eventOk = true;
+        if (eventData.success === true) {
+          eventOk = true;
 
-  // v21 — SOLO AHORA la visita puede considerarse confirmada.
-  // Calendar ya verificó disponibilidad y creó realmente el evento.
- update(from, {
-  visit_confirmed: true,
-  lead_saved: true,
+          // SOLO ahora la visita se considera confirmada.
+          update(from, {
+            visit_confirmed: true,
+            lead_saved: true,
+            agenda_selected_date: null,
+          });
 
-  // La selección interactiva ya cumplió su función.
-  // La visita real ya existe en Google Calendar.
-  agenda_selected_date: null,
-});
+          updated.visit_confirmed = true;
+          updated.lead_saved = true;
+          updated.agenda_selected_date = null;
 
-  updated.visit_confirmed = true;
-  updated.lead_saved = true;
-  updated.agenda_selected_date = null;
+          const nombreDetectado = updated.name || campoLeadValido(name);
 
-  const nombreDetectado = updated.name || name?.trim();
+          if (nombreDetectado) {
+            memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
+              proyecto:       updated.project_desc || "",
+              zona:           updated.zone || "",
+              visitaAgendada: true,
+            }).catch(() => {});
+          }
 
-  if (nombreDetectado) {
-    memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
-      proyecto:       updated.project_desc || "",
-      zona:           updated.zone || "",
-      visitaAgendada: true,
-    }).catch(() => {});
-  }
+          dateStr = eventData.date.toLocaleDateString("es-CR", {
+            weekday: "long",
+            day: "numeric",
+            month: "long",
+            timeZone: TZ,
+          });
 
-  dateStr = eventData.date.toLocaleDateString("es-CR", {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    timeZone: TZ,
-  });
+          console.log(
+            `📅 Visita agendada: ${eventData.htmlLink || eventData.eventId || "evento creado"}`
+          );
 
-  console.log(
-    `📅 Visita agendada: ${eventData.htmlLink || eventData.eventId || "evento creado"}`
-  );
+        } else {
+          console.warn(
+            `⛔ Visita NO agendada (flujo cliente): ${eventData.reason || "error_desconocido"} — ${eventData.conflict || "—"}`
+          );
+        }
 
-} else {
-  console.warn(
-    `⛔ Visita NO agendada (flujo cliente): ${eventData.reason || "error_desconocido"} — ${eventData.conflict || "—"}`
-  );
-}
-        
       } catch (calErr) {
         console.error("❌ Error Calendar:", calErr.message);
       }
 
-      // ── v14: cleanMessage YA NO se descarta — trae la mini-guía de
-      // preparación (ONBOARDING POST-AGENDAMIENTO en claude.js) y ahora el
-      // system prompt le prohíbe explícitamente afirmar que la cita ya
-      // quedó agendada. Se envía primero, tal cual, como un mensaje
-      // separado; el resultado real del backend llega DESPUÉS en un
-      // segundo mensaje aparte, nunca reemplazando ni mezclándose con este.
+      // v14 — la mini-guía de Claude se envía primero, como mensaje aparte.
       if (cleanMessage) {
         await sendText(from, cleanMessage);
         addMsg(from, "assistant", cleanMessage);
@@ -3147,8 +2707,7 @@ if (eventData.success === true) {
         }
       }
 
-      // ── El mensaje de RESULTADO se arma SOLO a partir del resultado real
-      // del backend — nunca del texto que Claude haya escrito de antemano.
+      // El mensaje de RESULTADO se arma SOLO a partir del resultado real.
       let finalClientMessage;
 
       if (eventOk) {
@@ -3167,8 +2726,6 @@ if (eventData.success === true) {
         logLead(from, updated, "visita_solicitada");
         finalClientMessage = `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`;
 
-        // v13 — nota real para supervisores en vez del último mensaje crudo
-        // del cliente (antes podía mostrar, por ejemplo, su correo).
         await notifyAllSupervisors(from, updated, "Visita confirmada automáticamente por Sasha.", "visita_solicitada");
 
       } else {
@@ -3200,9 +2757,7 @@ if (eventData.success === true) {
         memoria.guardarMensaje({ phone: fromE164, clientName: updated.name || null, direction: "out", type: "text", content: finalClientMessage, session }).catch(() => {});
       }
 
-      // Monitor supervisores — v14: refleja los DOS mensajes reales que
-      // recibió el cliente (la mini-guía de Claude, si la hubo, y el
-      // resultado real del backend), en el mismo orden en que se enviaron.
+      // Monitor supervisores — refleja los DOS mensajes reales del cliente.
       const clientLabel    = updated.name ? `${updated.name} (${from})` : from;
       const clientMsgLabel = imageDataArray.length > 0
         ? `📷 [${imageDataArray.length} foto(s)]${normalized ? ` "${normalized}"` : ""}`
@@ -3225,10 +2780,10 @@ if (eventData.success === true) {
         }
       }
 
-      return; // VISITA ya se manejó por completo — no seguir al flujo genérico.
+      return; // VISITA ya se manejó por completo.
     }
 
-    // ── Flujo genérico (todo lo que NO es VISITA) — sin cambios ───────────────
+    // ── Flujo genérico (todo lo que NO es VISITA) ─────────────────────────────
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
 
@@ -3256,29 +2811,48 @@ if (eventData.success === true) {
       }
     }
 
-    // ── Procesar flags (VISITA ya se manejó arriba y salió con `return`) ──────
+    // ── Procesar flags (VISITA ya se manejó arriba) ───────────────────────────
     if (flag === "ESCALAR") {
       update(from, { escalated: true });
       await sendText(from, `📞 Le conecto ahora con *${KNOWLEDGE.empresa.encargado}* de nuestro equipo.`);
       await notifyAllSupervisors(from, session, normalized, "escalacion");
 
     } else if (flag === "LEAD") {
+      // ══════════════════════════════════════════════════════════════════
+      // v22 — [LEAD:...] acepta campos vacíos y se ACTUALIZA cada vez que
+      // aparece un dato nuevo (antes solo se registraba la primera vez).
+      // ══════════════════════════════════════════════════════════════════
       const [name, project, zone] = (flagData || "").split("|");
+
+      const previo = {
+        name:         session.name || "",
+        project_desc: session.project_desc || "",
+        zone:         session.zone || "",
+      };
+
       const updated = update(from, {
-        name:         name?.trim()    || session.name,
-        project_desc: project?.trim() || session.project_desc,
-        zone:         zone?.trim()    || session.zone,
+        name:         campoLeadValido(name)    || session.name,
+        project_desc: campoLeadValido(project) || session.project_desc,
+        zone:         campoLeadValido(zone)    || session.zone,
       });
 
-      const nombreDetectado = updated.name || name?.trim();
-      if (nombreDetectado) {
-        memoria.actualizarNombreInmediato(fromE164, nombreDetectado, {
-          proyecto: updated.project_desc || "",
-          zona:     updated.zone || "",
-        }).catch(() => {});
+      const huboCambio =
+        (updated.name || "")         !== previo.name ||
+        (updated.project_desc || "") !== previo.project_desc ||
+        (updated.zone || "")         !== previo.zone;
+
+      if (huboCambio) {
+        console.log(`📋 v22 — LEAD actualizado para ${fromE164}: nombre="${updated.name || "—"}" | proyecto="${updated.project_desc || "—"}" | zona="${updated.zone || "—"}"`);
+
+        if (updated.name) {
+          memoria.actualizarNombreInmediato(fromE164, updated.name, {
+            proyecto: updated.project_desc || "",
+            zona:     updated.zone || "",
+          }).catch(() => {});
+        }
       }
 
-      if (!session.lead_saved) {
+      if (!session.lead_saved || huboCambio) {
         update(from, { lead_saved: true });
         logLead(from, updated);
         upsertLead({ ...updated, phone: from }).catch(() => {});
@@ -3329,8 +2903,6 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
     update(from, { rrhh_data: data });
   }
 
-  const fromE164 = from.startsWith("+") ? from : `+${from}`;
-
   if (tipo === "solicitante") {
     await guardarSolicitante({
       phone: from, nombre: data.nombre, cedula: data.cedula,
@@ -3356,21 +2928,8 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
-// v11 — REORDEN CRÍTICO: antes se revisaba PRIMERO si el texto contenía
-// "lunes"/"martes"/"viernes" como substring, y solo si no había match se
-// buscaba una fecha específica. Eso significaba que "el lunes 24 de agosto"
-// se detectaba como "lunes" (ignorando la fecha exacta), y el sistema
-// calculaba disponibilidad para el PRÓXIMO lunes desde hoy — que puede NO
-// ser el 24. Ahora se busca PRIMERO una fecha específica (más precisa); el
-// nombre de día es el fallback. También se agregan miércoles/jueves/sábado/
-// domingo para que ningún día no hábil quede "invisible" para el detector.
-// v12 — también se reconoce "hoy"/"mañana" explícitos, para que un cliente
-// que pregunta SOLO "¿tienen espacio hoy?" (sin mencionar un día de la
-// semana) sí dispare la verificación de disponibilidad — antes quedaba sin
-// ningún [SISTEMA:...] y Sasha no tenía ningún dato verificado para responder.
-// v13 — se agrega detección de preguntas de disponibilidad GENÉRICAS (sin
-// día, fecha, ni hoy/mañana) → devuelve el sentinel "GENERICO", manejado en
-// handleMessage con los próximos días hábiles reales.
+// v11/v12/v13 — Detección de día/fecha: primero fecha específica, luego nombre
+// de día, luego hoy/mañana, y por último disponibilidad genérica ("GENERICO").
 function detectDayOrDate(text) {
   const n = (text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 
@@ -3393,14 +2952,11 @@ function detectDayOrDate(text) {
   if (n.includes("sabado"))    return "sabado";
   if (n.includes("domingo"))   return "domingo";
 
-  // 3) v12 — "hoy"/"mañana" explícitos, mapeados al día hábil más cercano
-  // (getNextAvailableDate ya garantiza, con el fix de calendar.js v12, que
-  // nunca va a devolver hoy mismo — así que no hay riesgo de terminar
-  // agendando same-day por este camino).
+  // 3) "hoy"/"mañana" explícitos → día hábil más cercano.
   if (n.includes("hoy")) return nearestBusinessDayName();
   if (n.includes("manana") || n.includes("mañana")) return nearestBusinessDayName();
 
-  // 4) v13 — pregunta de disponibilidad genérica, sin día/fecha puntual.
+  // 4) Pregunta de disponibilidad genérica, sin día/fecha puntual.
   if (PALABRAS_DISPONIBILIDAD_GENERICA.some(p => n.includes(p.normalize("NFD").replace(/[\u0300-\u036f]/g, "")))) {
     return "GENERICO";
   }
@@ -3408,9 +2964,7 @@ function detectDayOrDate(text) {
   return null;
 }
 
-// v12 — traduce "hoy"/"mañana" al día hábil de visitas (lunes/martes/
-// viernes) más cercano, para poder consultar disponibilidad real en vez de
-// dejar la pregunta sin ninguna respuesta determinística.
+// v12 — traduce "hoy"/"mañana" al día hábil de visitas más cercano.
 function nearestBusinessDayName() {
   const DIAS = { 1: "lunes", 2: "martes", 5: "viernes" };
   const now  = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
