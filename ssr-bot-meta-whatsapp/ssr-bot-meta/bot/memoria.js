@@ -2,13 +2,17 @@
  * memoria.js — Sistema de Memoria Persistente para Sasha
  * SSR Remodelaciones
  *
- * COLUMNAS MENSAJES (A:F):
+ * COLUMNAS MENSAJES (A:J):
  *   A = Fecha y Hora
  *   B = Número de Teléfono
  *   C = Nombre de Contacto
  *   D = Entrada / Salida  (in / out)
  *   E = Tipo              (text / image / audio / document / video)
  *   F = Mensaje
+ *   G = mediaId
+ *   H = driveUrl
+ *   I = Proyecto
+ *   J = Zona
  *
  * COLUMNAS CLIENTES (A:H):
  *   A = Teléfono
@@ -20,51 +24,42 @@
  *   G = Total Mensajes
  *   H = Visita Agendada
  *
- * ── CAMBIOS v3 (16 sept 2026) ─────────────────────────────────────────────────
- * FIX CRÍTICO — "Falta driveUrl: el servidor aún no guardó un enlace visible"
- * (reportado por Darwin en el CRM):
- *   CAUSA RAÍZ: las cuentas de servicio de Google NO tienen cuota de
- *   almacenamiento propia en Drive — cualquier intento de subir un archivo
- *   (drive.files.create con media) a una carpeta que NO viva dentro de una
- *   Unidad Compartida falla con un error de cuota, incluso si el resto de
- *   los permisos están bien. guardarMedia() ya atrapaba ese error y
- *   devolvía null (por eso no tumbaba el bot), pero index.js no dejaba
- *   ningún rastro de POR QUÉ — así que la foto quedaba guardada sin
- *   driveUrl, en silencio. Dos partes del fix:
- *     a) Acá: se agrega supportsAllDrives:true / includeItemsFromAllDrives:
- *        true a las llamadas de Drive (files.create, files.list,
- *        permissions.create), que es requisito para que funcionen sobre una
- *        Unidad Compartida. Si MEDIA_FOLDER_ID ya apunta a una carpeta
- *        dentro de una Unidad Compartida, esto debería resolver el problema
- *        de raíz. Si MEDIA_FOLDER_ID NO está configurado o apunta a una
- *        carpeta normal (no Unidad Compartida), las subidas van a seguir
- *        fallando por cuota — en ese caso hay que crear una Unidad
- *        Compartida en Drive, compartirla con el service account, y poner
- *        el ID de una carpeta de ahí en MEDIA_FOLDER_ID.
- *     b) En index.js: el error real ya no se traga en silencio — ahora
- *        queda un console.warn/error con el teléfono y mediaId afectados
- *        cada vez que una foto se guarda sin driveUrl.
+ * ── CAMBIOS v5 (22 sept 2026) — CRM CONGELADO DESDE EL 17 SEPT ────────────────
+ * SÍNTOMA: Sasha responde normal a los clientes, pero el CRM
+ *   (sasha-crm-ssr.netlify.app) no muestra ningún mensaje nuevo desde el
+ *   17 de septiembre. El CRM solo lee el CSV publicado de MENSAJES, así que
+ *   las filas nuevas o no se están escribiendo, o se están escribiendo en
+ *   OTRO spreadsheet que no es el publicado.
  *
- * NUEVO — AUDIO Y DOCUMENTOS (PDF) DE CLIENTES VISIBLES EN EL CRM:
- *   guardarAdjuntoCliente({ phone, clientName, mediaId, tipo, session,
- *   contenido }): descarga el adjunto de WhatsApp (vía messenger.js), lo
- *   sube a Drive igual que las fotos, y lo registra en MENSAJES con su
- *   driveUrl — para que el CRM pueda mostrar un reproductor/enlace igual
- *   que hace con las fotos. `tipo` es "audio" o "document". Se llama desde
- *   server.js cuando el mensaje es de un cliente (no de Darwin/Melvin).
+ * CAUSAS EN EL CÓDIGO (las tres existían en v4):
+ *   1) getOrCreateSheetId() buscaba el sheet por NOMBRE ("SSR_Memoria_Chats")
+ *      sin supportsAllDrives / includeItemsFromAllDrives. Si el archivo se
+ *      movió a una Unidad Compartida (la solución de v3 para el driveUrl),
+ *      la búsqueda deja de verlo. Si hay dos archivos con ese nombre, toma
+ *      cualquiera de los dos sin avisar.
+ *   2) Si la búsqueda no encontraba nada, CREABA un spreadsheet nuevo: o
+ *      falla por la cuota del service account (y entonces TODA escritura
+ *      falla) o escribe en un archivo nuevo que el CRM no lee. En ambos
+ *      casos Sasha sigue respondiendo y el CRM se congela.
+ *   3) guardarMensaje() se tragaba el error en una sola línea de log sin
+ *      el detalle de Google, y todos los llamadores usan .catch(() => {}).
+ *
+ * FIX:
+ *   a) MEMORY_SHEET_ID (Railway) es la fuente de verdad. Si no está, la
+ *      búsqueda por nombre incluye Unidades Compartidas, ordena por fecha de
+ *      creación, usa el ORIGINAL (el más antiguo) y avisa en rojo si hay
+ *      duplicados.
+ *   b) Ya NO se crea un spreadsheet nuevo en silencio: si no se encuentra,
+ *      el error dice exactamente qué configurar.
+ *   c) Errores de Google se loguean completos (código + motivo).
+ *   d) Si MENSAJES tiene menos de 10 columnas, se amplía y se reintenta.
+ *   e) AUTODIAGNÓSTICO al arrancar: loguea en Railway en qué spreadsheet
+ *      escribe el bot, el gid de MENSAJES (el CRM lee gid=0), cuántas filas
+ *      tiene y la fecha de la última fila. Buscá "🩺 MEMORIA" en los logs.
  * ─────────────────────────────────────────────────────────────────────────────
- * ── CAMBIOS v2 ────────────────────────────────────────────────────────────────
- * BUGS CORREGIDOS:
- *   - "resumen de la conversación con X" ahora captura "X" (no "con X")
- *   - Patrón conversacion ahora maneja preposición "con" además de "de"
- *   - MEMORY_TRIGGERS simplificado: /resumen/i cubre todos los casos
- *
- * NUEVO — SOPORTE AUDIO/VOZ:
- *   - detectarComandoVoz(text): parsea lenguaje natural transcrito de audios
- *     para GASTO, INGRESO, MSG_CLIENTE y RESUMEN desde Darwin
- *   - parsearMontoEspanol(texto): convierte "cincuenta mil", "15 mil",
- *     "cien mil quinientos" → número entero
- *   - MEMORY_TRIGGERS y patrones de nombre ampliados para voz natural
+ * v4 (17 sept 2026): MENSAJES se escribe A:J (mediaId y driveUrl en G/H).
+ * v3 (16 sept 2026): supportsAllDrives en subidas a Drive; guardarAdjuntoCliente.
+ * v2: fixes de resumen, soporte de audio/voz, parseo de montos en español.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -77,10 +72,21 @@ const SHEET_TITLE     = "SSR_Memoria_Chats";
 const TZ              = "America/Costa_Rica";
 const CRM_SHEET_ID    = "1LOUDwOe8W5pAF0QV0lTqC9uCcQ0fc_JaIMcGu2f5aZ4";
 const MEDIA_PARENT_ID = process.env.MEDIA_FOLDER_ID || null;
+const MENSAJES_COLS   = 10; // A:J
 
-let _sheetId = process.env.MEMORY_SHEET_ID || null;
+let _sheetId = (process.env.MEMORY_SHEET_ID || "").trim() || null;
 const _folderCache = {};
 const _nombreCache = {};
+
+// ── v5 — Descripción completa de errores de Google ────────────────────────────
+function describirErrorGoogle(err) {
+  if (!err) return "error desconocido";
+  const code    = err.code || err.status || err.response?.status || "";
+  const detalle = err.response?.data?.error?.message || err.message || String(err);
+  const motivos = (err.errors || err.response?.data?.error?.errors || [])
+    .map(e => e.reason).filter(Boolean).join(",");
+  return `${code ? `[${code}] ` : ""}${detalle}${motivos ? ` (${motivos})` : ""}`;
+}
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function getAuth() {
@@ -103,90 +109,93 @@ async function getDriveClient() {
   return google.drive({ version: "v3", auth: await getAuth() });
 }
 
-// ── Obtener o crear el Google Sheet de memoria ────────────────────────────────
+// ── v5 — Localizar el Google Sheet de memoria (sin crear duplicados) ──────────
 async function getOrCreateSheetId() {
   if (_sheetId) return _sheetId;
 
   const drive  = await getDriveClient();
-  const sheets = await getSheetsClient();
-
   const search = await drive.files.list({
     q: `name='${SHEET_TITLE}' and mimeType='application/vnd.google-apps.spreadsheet' and trashed=false`,
-    fields: "files(id,name)",
-    spaces: "drive",
+    fields: "files(id,name,createdTime,modifiedTime,driveId)",
+    orderBy: "createdTime",
+    pageSize: 10,
+    supportsAllDrives: true,
+    includeItemsFromAllDrives: true,
+    corpora: "allDrives",
   });
 
-  if (search.data.files.length > 0) {
-    _sheetId = search.data.files[0].id;
-    console.log(`✅ Memoria: sheet encontrado (${_sheetId})`);
-    return _sheetId;
+  const files = search.data.files || [];
+
+  if (files.length === 0) {
+    // v5: antes acá se creaba un spreadsheet nuevo. Eso deja al CRM leyendo
+    // un archivo que el bot ya no usa (o falla por cuota del service
+    // account). Ahora se exige configurar el ID explícito.
+    throw new Error(
+      `No encontré ningún spreadsheet llamado "${SHEET_TITLE}" visible para el service account. ` +
+      `Configurá MEMORY_SHEET_ID en Railway con el ID del sheet que publica el CRM ` +
+      `(y verificá que esté compartido como Editor con el service account).`
+    );
   }
 
-  const created = await sheets.spreadsheets.create({
+  if (files.length > 1) {
+    console.error(
+      `🚨 MEMORIA: hay ${files.length} spreadsheets llamados "${SHEET_TITLE}". ` +
+      `Uso el MÁS ANTIGUO (${files[0].id}). Definí MEMORY_SHEET_ID en Railway para no depender del nombre:\n` +
+      files.map(f => `   • ${f.id} | creado ${f.createdTime} | modificado ${f.modifiedTime}${f.driveId ? " | Unidad Compartida" : ""}`).join("\n")
+    );
+  }
+
+  _sheetId = files[0].id;
+  console.log(`✅ Memoria: sheet encontrado por nombre (${_sheetId}). Recomendado: fijarlo en MEMORY_SHEET_ID.`);
+  return _sheetId;
+}
+
+// ── v5 — Garantizar que MENSAJES tenga al menos A:J ───────────────────────────
+async function asegurarColumnasMensajes(sheets, sheetId) {
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: sheetId,
+    fields: "sheets.properties(sheetId,title,gridProperties)",
+  });
+  const tab = (meta.data.sheets || []).find(s => s.properties.title === "MENSAJES");
+  if (!tab) throw new Error(`El spreadsheet ${sheetId} no tiene una pestaña llamada MENSAJES`);
+
+  const cols = tab.properties.gridProperties?.columnCount || 0;
+  if (cols >= MENSAJES_COLS) return false;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: sheetId,
     requestBody: {
-      properties: { title: SHEET_TITLE },
-      sheets: [
-        {
-          properties: { title: "MENSAJES", index: 0 },
-          data: [{
-            startRow: 0, startColumn: 0,
-            rowData: [{
-              values: [
-                "Fecha y Hora",
-                "Número de Teléfono",
-                "Nombre de Contacto",
-                "Entrada / Salida",
-                "Tipo",
-                "Mensaje",
-                "mediaId",
-                "driveUrl",
-                "Proyecto",
-                "Zona",
-              ].map(v => ({
-                userEnteredValue: { stringValue: v },
-                userEnteredFormat: { textFormat: { bold: true } },
-              })),
-            }],
-          }],
+      requests: [{
+        appendDimension: {
+          sheetId: tab.properties.sheetId,
+          dimension: "COLUMNS",
+          length: MENSAJES_COLS - cols,
         },
-        {
-          properties: { title: "CLIENTES", index: 1 },
-          data: [{
-            startRow: 0, startColumn: 0,
-            rowData: [{
-              values: [
-                "Teléfono",
-                "Nombre",
-                "Proyecto",
-                "Zona",
-                "Primera Actividad",
-                "Última Actividad",
-                "Total Mensajes",
-                "Visita Agendada",
-              ].map(v => ({
-                userEnteredValue: { stringValue: v },
-                userEnteredFormat: { textFormat: { bold: true } },
-              })),
-            }],
-          }],
-        },
-      ],
+      }],
     },
   });
+  console.warn(`⚠️ Memoria: MENSAJES tenía ${cols} columnas — ampliado a ${MENSAJES_COLS}.`);
+  return true;
+}
 
-  _sheetId = created.data.spreadsheetId;
-  console.log(`✅ Memoria: sheet creado (${_sheetId})`);
-
+async function appendFilaMensajes(sheets, sheetId, fila) {
+  const req = {
+    spreadsheetId: sheetId,
+    range: "MENSAJES!A:J",
+    valueInputOption: "RAW",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: { values: [fila] },
+  };
   try {
-    await drive.permissions.create({
-      fileId: _sheetId,
-      requestBody: { role: "writer", type: "user", emailAddress: DARWIN_EMAIL },
-    });
-  } catch (e) {
-    console.warn("⚠️ Memoria: no se pudo compartir el sheet:", e.message);
+    return await sheets.spreadsheets.values.append(req);
+  } catch (err) {
+    const msg = describirErrorGoogle(err);
+    if (/grid limits|max columns|exceeds/i.test(msg)) {
+      const ampliado = await asegurarColumnasMensajes(sheets, sheetId);
+      if (ampliado) return await sheets.spreadsheets.values.append(req);
+    }
+    throw err;
   }
-
-  return _sheetId;
 }
 
 // ── Guardar mensaje en Google Sheets ─────────────────────────────────────────
@@ -198,37 +207,8 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
     const timestamp = new Date().toISOString();
     const nombre    = clientName || session?.name || "";
 
-    // ══════════════════════════════════════════════════════════════════════
-    // v4 (17 sept 2026) — FIX CRÍTICO: "Falta driveUrl" en el CRM.
-    //
-    // CAUSA RAÍZ REAL (encontrada leyendo el HTML del CRM, no la que se
-    // había asumido antes): el CRM (sasha-crm-ssr.netlify.app) lee el Sheet
-    // publicado como CSV y espera 10 columnas — A:Fecha, B:Teléfono,
-    // C:Nombre, D:Entrada/Salida, E:Tipo, F:Mensaje, G:mediaId, H:driveUrl,
-    // I:Proyecto, J:Zona — y arma el reproductor de audio / la imagen /el
-    // enlace al PDF leyendo la columna H (driveUrl) de cada fila por
-    // separado. Pero esta función SOLO escribía A:F — el driveUrl nunca
-    // tuvo columna propia, quedaba metido como texto DENTRO del mensaje de
-    // la columna F (ej. "[Foto enviada por el cliente] https://drive...").
-    // Como la columna H nunca se escribía, el CRM la encontraba vacía en
-    // TODAS las filas, sin excepción — de ahí "Falta driveUrl: el servidor
-    // aún no guardó un enlace visible" en cada foto/audio/documento, pasara
-    // lo que pasara con la subida a Drive.
-    //
-    // FIX: se escribe A:J en vez de A:F. mediaId va a su propia columna G,
-    // driveUrl a su propia columna H (ya no metido dentro del texto de F),
-    // y proyecto/zona (que ya se calculaban más abajo para la pestaña
-    // CLIENTES) también se escriben en I/J de esta misma fila para que el
-    // CRM los pueda leer directo sin tener que cruzar con otra pestaña.
-    // La columna F (Mensaje) vuelve a ser solo el texto legible, sin el
-    // enlace incrustado — el enlace ahora vive únicamente en H.
-    //
-    // Las filas viejas que ya se guardaron con el driveUrl metido dentro de
-    // F van a seguir mostrando "Falta driveUrl" en el CRM (no se puede
-    // arreglar retroactivamente desde acá) — pero todo mensaje nuevo desde
-    // el despliegue de este fix va a funcionar bien.
-    // ══════════════════════════════════════════════════════════════════════
-
+    // v4: A:J — mediaId en G, driveUrl en H, proyecto en I, zona en J.
+    // La columna F es solo texto legible (sin el enlace incrustado).
     let mensajeCol = content || "";
     if (type === "image" && !mensajeCol) {
       mensajeCol = "[Foto enviada por el cliente]";
@@ -241,26 +221,27 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
     const proyecto = session?.project_desc || "";
     const zona     = session?.zone || "";
 
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: sheetId,
-      range: "MENSAJES!A:J",
-      valueInputOption: "RAW",
-      requestBody: {
-        values: [[timestamp, phone, nombre, direction, type, mensajeCol, mediaId || "", driveUrl || "", proyecto, zona]],
-      },
-    });
+    await appendFilaMensajes(sheets, sheetId, [
+      timestamp, phone, nombre, direction, type, mensajeCol,
+      mediaId || "", driveUrl || "", proyecto, zona,
+    ]);
 
     if (nombre && nombre.trim() && nombre !== _nombreCache[phone]) {
       _nombreCache[phone] = nombre;
       rellenarNombresAnteriores(sheetId, sheets, phone, nombre)
-        .catch(e => console.warn("⚠️ Memoria: error rellenando nombres anteriores:", e.message));
+        .catch(e => console.warn("⚠️ Memoria: error rellenando nombres anteriores:", describirErrorGoogle(e)));
     }
 
     actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona, session?.visit_confirmed || false)
-      .catch(e => console.warn("⚠️ Memoria: no se actualizó CLIENTES:", e.message));
+      .catch(e => console.warn("⚠️ Memoria: no se actualizó CLIENTES:", describirErrorGoogle(e)));
 
   } catch (err) {
-    console.error("❌ Memoria: error guardando mensaje:", err.message);
+    // v5: detalle completo — esta línea es la que hay que buscar en Railway
+    // si el CRM deja de recibir mensajes.
+    console.error(
+      `❌ Memoria: NO se guardó mensaje (${direction}/${type}) de ${phone} en sheet ${_sheetId || "(sin resolver)"}:`,
+      describirErrorGoogle(err)
+    );
   }
 }
 
@@ -295,7 +276,7 @@ async function rellenarNombresAnteriores(sheetId, sheets, phone, nombre) {
 
     console.log(`✅ Memoria: nombre "${nombre}" aplicado a ${data.length} filas anteriores de ${phone}`);
   } catch (err) {
-    console.error("❌ Memoria: error en rellenarNombresAnteriores:", err.message);
+    console.error("❌ Memoria: error en rellenarNombresAnteriores:", describirErrorGoogle(err));
   }
 }
 
@@ -341,6 +322,58 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
   }
 }
 
+// ── v5 — AUTODIAGNÓSTICO (se ejecuta solo al arrancar el bot) ─────────────────
+// Deja en los logs de Railway, en líneas que empiezan con "🩺 MEMORIA":
+//   • el ID y título del spreadsheet donde escribe el bot
+//   • las pestañas con su gid (el CRM lee gid=0)
+//   • cantidad de filas de MENSAJES y fecha de la última fila
+async function diagnosticoMemoria() {
+  const origen = process.env.MEMORY_SHEET_ID ? "MEMORY_SHEET_ID" : "búsqueda por nombre";
+  try {
+    const sheetId = await getOrCreateSheetId();
+    const sheets  = await getSheetsClient();
+
+    const meta = await sheets.spreadsheets.get({
+      spreadsheetId: sheetId,
+      fields: "properties.title,sheets.properties(sheetId,title,gridProperties)",
+    });
+
+    const tabs = (meta.data.sheets || []).map(s => s.properties);
+    const tabMensajes = tabs.find(t => t.title === "MENSAJES");
+
+    console.log(`🩺 MEMORIA — spreadsheet: "${meta.data.properties.title}" (${sheetId}) [origen: ${origen}]`);
+    console.log(`🩺 MEMORIA — URL: https://docs.google.com/spreadsheets/d/${sheetId}/edit`);
+    console.log(`🩺 MEMORIA — pestañas: ${tabs.map(t => `${t.title} (gid=${t.sheetId}, ${t.gridProperties?.rowCount}x${t.gridProperties?.columnCount})`).join(" | ")}`);
+
+    if (!tabMensajes) {
+      console.error("🩺 MEMORIA — ❌ No existe la pestaña MENSAJES en este spreadsheet.");
+      return;
+    }
+    if (tabMensajes.sheetId !== 0) {
+      console.warn(`🩺 MEMORIA — ⚠️ MENSAJES tiene gid=${tabMensajes.sheetId}, pero el CRM lee gid=0. Revisá el link publicado del CRM.`);
+    }
+
+    const colA  = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:A" });
+    const filas = colA.data.values || [];
+    const ultimaFecha = filas.length > 1 ? filas[filas.length - 1][0] : null;
+
+    console.log(`🩺 MEMORIA — MENSAJES: ${Math.max(0, filas.length - 1)} filas | última: ${ultimaFecha || "—"}`);
+
+    if (ultimaFecha) {
+      const horas = (Date.now() - new Date(ultimaFecha).getTime()) / 36e5;
+      if (!isNaN(horas) && horas > 24) {
+        console.warn(`🩺 MEMORIA — ⚠️ La última fila tiene ${Math.round(horas)} h. Si hubo mensajes desde entonces, este NO es el sheet donde se estaba escribiendo o las escrituras fallaban.`);
+      }
+    }
+
+    console.log("🩺 MEMORIA — OK: el bot puede leer este spreadsheet. Compará el ID de arriba con el del link publicado del CRM.");
+  } catch (err) {
+    console.error(`🩺 MEMORIA — ❌ FALLÓ el diagnóstico [origen: ${origen}]:`, describirErrorGoogle(err));
+  }
+}
+
+setTimeout(() => { diagnosticoMemoria().catch(() => {}); }, 8000);
+
 // ── Leer clientes del CRM principal ──────────────────────────────────────────
 async function listarClientesCRM(limit = 30) {
   try {
@@ -352,7 +385,7 @@ async function listarClientesCRM(limit = 30) {
     const rows = (res.data.values || []).slice(2);
     return rows.filter(r => r[1] && r[1].toString().trim() !== "").slice(-limit);
   } catch (err) {
-    console.error("❌ Memoria: error leyendo CRM:", err.message);
+    console.error("❌ Memoria: error leyendo CRM:", describirErrorGoogle(err));
     return [];
   }
 }
@@ -374,16 +407,14 @@ async function buscarClienteEnCRM(query) {
       return nombre.includes(kw) || (soloDigitos.length >= 6 && telefono.endsWith(soloDigitos));
     });
   } catch (err) {
-    console.error("❌ Memoria: error buscando en CRM:", err.message);
+    console.error("❌ Memoria: error buscando en CRM:", describirErrorGoogle(err));
     return [];
   }
 }
 
 // ── Guardar media en Drive ────────────────────────────────────────────────────
-// v3 — supportsAllDrives:true agregado en files.create y permissions.create:
-// requisito de la API de Drive para poder escribir dentro de una Unidad
-// Compartida. Sin esto, aunque MEDIA_FOLDER_ID apunte a una carpeta de una
-// Unidad Compartida bien configurada, la subida sigue fallando.
+// v3 — supportsAllDrives:true: requisito para escribir en una Unidad
+// Compartida (los service accounts no tienen cuota propia fuera de ellas).
 async function guardarMedia(buffer, mimeType, phone, name) {
   try {
     const drive    = await getDriveClient();
@@ -406,12 +437,9 @@ async function guardarMedia(buffer, mimeType, phone, name) {
     console.log(`✅ Memoria: archivo guardado → ${file.data.webViewLink}`);
     return file.data.webViewLink;
   } catch (err) {
-    // v3 — este es el punto donde antes se perdía la causa real del "Falta
-    // driveUrl" en el CRM. El mensaje típico acá, si MEDIA_FOLDER_ID no
-    // apunta a una Unidad Compartida, es algo como "Service Accounts do not
-    // have storage quota" — service accounts de Google NO tienen cuota de
-    // almacenamiento propia fuera de una Unidad Compartida.
-    console.error("❌ Memoria: error guardando media en Drive:", err.message);
+    // Típico si MEDIA_FOLDER_ID no apunta a una Unidad Compartida:
+    // "Service Accounts do not have storage quota".
+    console.error("❌ Memoria: error guardando media en Drive:", describirErrorGoogle(err));
     return null;
   }
 }
@@ -453,19 +481,9 @@ async function getOrCreateMediaFolder(drive, phone, clientName) {
   return _folderCache[phone];
 }
 
-// ── v3 (16 sept 2026) — NUEVO: guardar audio/documento (PDF) de un cliente ───
-// Descarga el adjunto de WhatsApp (vía messenger.js), lo sube a Drive igual
-// que una foto, y lo registra en MENSAJES con su driveUrl — para que el CRM
-// pueda mostrarlo como un adjunto real (reproductor de audio / enlace al
-// PDF), no solo como un ID sin forma de abrirlo. `tipo` es "audio" o
-// "document". Se llama desde server.js SOLO para mensajes de clientes (no
-// de Darwin/Melvin) — los audios internos ya se transcriben y procesan
-// aparte, sin pasar por acá.
-//
-// NOTA: require() de messenger.js queda adentro de la función (no al tope
-// del archivo) para evitar cualquier problema de referencia circular si en
-// el futuro messenger.js llegara a necesitar algo de memoria.js — hoy no lo
-// necesita, pero es más seguro dejarlo así.
+// ── v3 — Guardar audio/documento (PDF) de un cliente ─────────────────────────
+// Descarga el adjunto de WhatsApp, lo sube a Drive y lo registra en MENSAJES
+// con su driveUrl. `tipo` es "audio" o "document". Solo para clientes.
 async function guardarAdjuntoCliente({ phone, clientName, mediaId, tipo, session = null, contenido = "" }) {
   const { downloadMedia } = require("./messenger");
 
@@ -489,7 +507,7 @@ async function guardarAdjuntoCliente({ phone, clientName, mediaId, tipo, session
     });
 
   } catch (err) {
-    console.error(`❌ Memoria: error guardando adjunto (${tipo}) de ${phone}:`, err.message);
+    console.error(`❌ Memoria: error guardando adjunto (${tipo}) de ${phone}:`, describirErrorGoogle(err));
     await guardarMensaje({
       phone, clientName, direction: "in", type: tipo,
       content: contenido || contenidoDefault,
@@ -643,15 +661,8 @@ const NUMEROS_ES = {
 
 /**
  * Convierte texto numérico en español a número entero.
- * Ejemplos:
- *   "cincuenta mil"        → 50000
- *   "15 mil"               → 15000
- *   "ciento veinte mil"    → 120000
- *   "un millon"            → 1000000
- *   "medio millon"         → 500000
- *   "15,000"               → 15000
- *   "₡50.000"              → 50000
- *   "15000"                → 15000
+ *   "cincuenta mil" → 50000 | "15 mil" → 15000 | "ciento veinte mil" → 120000
+ *   "un millon" → 1000000 | "medio millon" → 500000 | "₡50.000" → 50000
  */
 function parsearMontoEspanol(texto) {
   // SSR_FIX_20MIL: soporta "20mil", "20 mil", "200mil", "20k", "1.5 millones".
@@ -666,31 +677,25 @@ function parsearMontoEspanol(texto) {
   }
   if (!texto) return null;
 
-  // Limpiar símbolo de colón y espacios
   let t = texto.toLowerCase()
     .replace(/[₡$]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 
-  // Número directo con puntos o comas como separadores de miles: "50.000", "50,000"
   const numPuntos = t.match(/^(\d{1,3}(?:[.,]\d{3})+)$/);
   if (numPuntos) return parseInt(t.replace(/[.,]/g, ""));
 
-  // Número directo simple: "50000"
   const numSimple = t.match(/^(\d+)$/);
   if (numSimple) return parseInt(t);
 
-  // "X.Y mil" o "X,Y mil" → fraccional: "1.5 mil" → 1500
   const fracMil = t.match(/^(\d+)[.,](\d+)\s*mil(?:es)?$/);
   if (fracMil) return Math.round(parseFloat(`${fracMil[1]}.${fracMil[2]}`) * 1000);
 
-  // Normalizar para palabras
   const norm = t
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/\bde\s+(mil|millon)/g, "$1")
     .replace(/\s+y\s+/g, " ");
 
-  // Detectar millones
   const millonesMatch = norm.match(/^(.+?)\s+millon(?:es)?(.*)$/);
   if (millonesMatch) {
     const baseMillon   = calcularValorPalabras(millonesMatch[1].trim());
@@ -699,7 +704,6 @@ function parsearMontoEspanol(texto) {
     if (baseMillon !== null) return (baseMillon === 500 ? 500000 : baseMillon * 1000000) + (restoValor || 0);
   }
 
-  // Detectar miles
   const milesMatch = norm.match(/^(.+?)\s+mil(?:es)?(.*)$/);
   if (milesMatch) {
     const baseMil  = calcularValorPalabras(milesMatch[1].trim());
@@ -708,7 +712,6 @@ function parsearMontoEspanol(texto) {
     if (baseMil !== null) return baseMil * 1000 + (restoVal || 0);
   }
 
-  // Solo palabras sin "mil"
   const soloWords = calcularValorPalabras(norm);
   return soloWords;
 }
@@ -732,47 +735,14 @@ function calcularValorPalabras(texto) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DETECCIÓN DE COMANDOS POR VOZ (AUDIOS TRANSCRITOS)
+// Devuelve { tipo, payload } con tipo GASTO | INGRESO | MSG_CLIENTE |
+// RESUMEN_CLIENTE, o null si no detecta ningún comando.
 // ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Detecta si un texto transcrito de audio de Darwin contiene un comando
- * de supervisor: GASTO, INGRESO, MSG_CLIENTE o RESUMEN_CLIENTE.
- *
- * Retorna { tipo, payload } o null si no detecta ningún comando.
- *
- * tipo puede ser: "GASTO" | "INGRESO" | "MSG_CLIENTE" | "RESUMEN_CLIENTE"
- *
- * Ejemplos de entrada → salida:
- *   "anota un gasto de cincuenta mil en materiales"
- *     → { tipo: "GASTO", payload: "50000 | materiales" }
- *
- *   "registra un ingreso de 80 mil por la visita de Juan"
- *     → { tipo: "INGRESO", payload: "80000 | visita de Juan" }
- *
- *   "mándale a teresita que su presupuesto ya está listo"
- *     → { tipo: "MSG_CLIENTE", payload: "teresita | su presupuesto ya está listo" }
- *
- *   "dame el resumen de teresita"
- *     → { tipo: "RESUMEN_CLIENTE", payload: "teresita" }
- *
- * En index.js, después de transcribir el audio del supervisor:
- *   const cmdVoz = memoria.detectarComandoVoz(textoTranscrito);
- *   if (cmdVoz) {
- *     // Construir comando estructurado y procesar igual que si Darwin lo hubiera escrito
- *     const estructurado = `[${cmdVoz.tipo}: ${cmdVoz.payload}]`;
- *     // ... llama al handler de ese comando
- *   }
- */
 function detectarComandoVoz(text) {
   if (!text || !text.trim()) return null;
   const t = text.trim();
 
   // ── GASTO ──────────────────────────────────────────────────────────────────
-  // Reconoce frases naturales:
-  // "descuenta 200mil de gas y aceite para Pick Up, proyecto Marriot"
-  // "apunta 19500 al Marriot por comida"
-  // "rebaja 80 mil de materiales Karim"
-  // "pagué 25 mil de gasolina proyecto Laura"
   const gastoRe = /^(?:(?:anota?r?|registra?r?|agrega?r?|escrib(?:e|ir)|apunta?r?|carga?r?|carg[aá]me|descuenta?r?|descont[aá]r?|rebaja?r?|saca?r?|pag(?:u[eé]|ar|ue)|compr(?:e|é|ar)|gast(?:e|é|ar)|met(?:e|er))\s+)?(?:un\s+)?(?:gasto\s+(?:de\s+)?|pago\s+(?:de\s+)?|compra\s+(?:de\s+)?|)(.+)$/i;
   const gm = t.match(gastoRe);
   if (gm && /(gasto|pago|compra|compr[eé]|gast[eé]|descuenta|descont|rebaja|saca|apunta|carga|pag[ué]|material|gas|aceite|gasolina|diesel|di[eé]sel|ferreter|epa|construplaza|marriot|marriott|karim|laura|miriam|nathalie|jeannette)/i.test(t)) {
@@ -827,11 +797,6 @@ function detectarComandoVoz(text) {
 
 /**
  * Separa "50 mil en materiales" → { monto: "50000", descripcion: "materiales" }
- * Maneja correctamente:
- *   - Números con separador de miles: "16,000 colones por comida" → monto 16000
- *   - Números con punto de miles: "16.000 por comida" → monto 16000
- *   - Palabras: "cincuenta mil en materiales" → monto 50000
- * Separadores de descripción reconocidos: "en", "para", "por", "de", "a nombre de"
  */
 function _separarMontoDesc(texto) {
   let t = texto
@@ -839,7 +804,6 @@ function _separarMontoDesc(texto) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // Extraer proyecto explícito: "proyecto Marriot", "obra Karim", "cliente Laura"
   let proyecto = "";
   const proyectoMatch = t.match(/\b(?:proyecto|obra|cliente)\s+([a-záéíóúñ0-9\s/.-]+)$/i);
   if (proyectoMatch) {
@@ -916,7 +880,7 @@ const MEMORY_TRIGGERS = [
   /historial/i,
   /qu[eé]\s+(hab[ló]|dij[oi]|mand[oó]|escrib|hablaste|conversaste)/i,
   /conversaci[oó]n/i,
-  /resumen/i,                    // FIX: simplificado — cubre "resumen de la conversación", "dame el resumen", etc.
+  /resumen/i,
   /fotos?\s+de/i,
   /videos?\s+de/i,
   /listar?\s+clientes?/i,
@@ -933,7 +897,6 @@ const MEMORY_TRIGGERS = [
   /qu[eé]\s+pas[oó]\s+(con|de)/i,
   /medios?\s+de/i,
   /archivos?\s+de/i,
-  // Patrones para voz natural (audios transcritos)
   /c[oó]mo\s+va\s+/i,
   /c[oó]mo\s+est[aá]\s+/i,
   /qu[eé]\s+anda\s+(con|haciendo|pasando)/i,
@@ -1015,24 +978,14 @@ async function procesarConsultaMemoria(text) {
     }
 
     // ── PATRONES DE RESUMEN (IA) ─────────────────────────────────────────────
-    // FIX: agrega "de" antes de "la" en el patrón de conversación
-    // NUEVO: patrones de voz natural incluidos
     const resumenPatterns = [
-      // Texto escrito: "resúmeme la conversación con X" / "resumen de la conversación con X"
       /res[uú]me(?:n|me|nos?)?\s+(?:de\s+)?(?:la\s+)?conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,
-      // Voz: "dame el resumen de X" / "deme el resumen con X"
       /(?:dame|deme)\s+(?:el\s+)?resumen\s+(?:de\s+(?:la\s+)?(?:conversaci[oó]n\s+)?(?:de\s+|con\s+)?)?(.+)/i,
-      // Voz: "muéstrame el resumen de X"
       /mu[eé]strame\s+(?:el\s+)?(?:resumen|historial|conversaci[oó]n)\s+(?:de\s+|con\s+)?(.+)/i,
-      // Texto: "dime qué habló X" / "cuéntame cómo va X"
       /(?:d[ií]me|cu[eé]ntame)\s+(?:qu[eé]|c[oó]mo)\s+(?:hab[ló]|fue|anda|est[aá]|va)\s+(?:con\s+)?(.+)/i,
-      // Texto: "qué pasó con X"
       /qu[eé]\s+pas[oó]\s+(?:con|de)\s+(.+)/i,
-      // Voz: "cómo va / cómo está [el cliente] X"
       /c[oó]mo\s+(?:va|est[aá]|anda)\s+(?:el\s+|la\s+)?(?:cliente\s+|caso\s+)?(.+)/i,
-      // Voz: "qué anda pasando con X"
       /qu[eé]\s+anda\s+(?:pasando\s+)?(?:con\s+)?(.+)/i,
-      // Voz: "qué dijo / qué habló / qué mandó X"
       /qu[eé]\s+(?:dijo|hab[ló]|mand[oó])\s+(.+)/i,
     ];
 
@@ -1054,11 +1007,10 @@ async function procesarConsultaMemoria(text) {
     }
 
     // ── PATRONES DE HISTORIAL (raw) ──────────────────────────────────────────
-    // FIX: conversacion ahora acepta "con" además de "de"
     const nombrePatterns = [
       /historial\s+(?:de\s+)?(.+)/i,
       /qu[eé]\s+(?:hab[ló]|dij[oi]|mand[oó]|hablaste|conversaste)\s+(?:con\s+)?(.+)/i,
-      /conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,           // FIX: agrega "con"
+      /conversaci[oó]n\s+(?:de\s+|con\s+)?(.+)/i,
       /cu[aá]ntos?\s+mensajes?\s+(?:de\s+|tiene\s+)?(.+)/i,
       /medios?\s+(?:de|enviados?\s+(?:por|de))\s+(.+)/i,
       /archivos?\s+(?:de|enviados?\s+(?:por|de))\s+(.+)/i,
@@ -1112,7 +1064,7 @@ async function procesarConsultaMemoria(text) {
     ].join("\n");
 
   } catch (err) {
-    console.error("❌ Memoria: error procesando consulta:", err.message);
+    console.error("❌ Memoria: error procesando consulta:", describirErrorGoogle(err));
     return `❌ Error al buscar en memoria: ${err.message}`;
   }
 }
@@ -1166,7 +1118,7 @@ async function actualizarNombreInmediato(phone, nombre, { proyecto = "", zona = 
     await rellenarNombresAnteriores(sheetId, sheets, phone, nombre);
     console.log(`✅ Memoria: nombre "${nombre}" registrado inmediatamente para ${phone}`);
   } catch (err) {
-    console.error("❌ Memoria: error en actualizarNombreInmediato:", err.message);
+    console.error("❌ Memoria: error en actualizarNombreInmediato:", describirErrorGoogle(err));
   }
 }
 
@@ -1199,7 +1151,10 @@ module.exports = {
   esConsultaMemoria,
   procesarConsultaMemoria,
 
-  // NUEVO: Audio/Voz
+  // Audio/Voz
   detectarComandoVoz,
   parsearMontoEspanol,
+
+  // v5 — diagnóstico
+  diagnosticoMemoria,
 };
