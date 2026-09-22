@@ -24,6 +24,27 @@
  *   G = Total Mensajes
  *   H = Visita Agendada
  *
+ * ── CAMBIOS v6 (22 sept 2026) — CAUSA RAÍZ REAL DEL CRM CONGELADO ─────────────
+ * El bot SÍ estaba escribiendo, pero desde la fila 2245 (17 sept 19:19) cada
+ * fila nueva de MENSAJES caía DESPLAZADA a las columnas I:R en vez de A:J.
+ * El CRM lee el teléfono de la columna B; al estar vacía, descarta la fila
+ * (isValidPhone) → para el CRM no había mensajes nuevos.
+ *
+ * POR QUÉ: values.append() no escribe "al final de la hoja", sino al final
+ * de la "tabla" que Google DETECTA dentro del rango. La fila 2244 fue la
+ * primera con Proyecto/Zona en I:J (cambio v4 de A:F → A:J). Google tomó
+ * ese bloque I:J como el borde de la tabla y desde ahí anexó cada fila
+ * nueva a partir de la columna I. CLIENTES sufría lo mismo desde mayo
+ * (filas en E:L, una fila por mensaje, sin encabezado).
+ *
+ * FIX:
+ *   a) Toda escritura nueva usa appendCells (batchUpdate) con el ID de la
+ *      pestaña: SIEMPRE empieza en la columna A, sin detección de tabla.
+ *   b) REPARACIÓN AUTOMÁTICA al arrancar (idempotente, se puede correr
+ *      siempre): mueve las filas desplazadas de I:R a A:J, corrige el
+ *      encabezado de MENSAJES y reconstruye CLIENTES (una fila por
+ *      teléfono) a partir de MENSAJES. Log: "🔧 MEMORIA".
+ *
  * ── CAMBIOS v5 (22 sept 2026) — CRM CONGELADO DESDE EL 17 SEPT ────────────────
  * SÍNTOMA: Sasha responde normal a los clientes, pero el CRM
  *   (sasha-crm-ssr.netlify.app) no muestra ningún mensaje nuevo desde el
@@ -150,57 +171,52 @@ async function getOrCreateSheetId() {
   return _sheetId;
 }
 
-// ── v5 — Garantizar que MENSAJES tenga al menos A:J ───────────────────────────
-async function asegurarColumnasMensajes(sheets, sheetId) {
+// ── v6 — IDs de pestañas + escritura sin detección de tabla ──────────────────
+const _tabIds = {};
+
+async function getTabId(sheets, sheetId, title) {
+  const key = `${sheetId}:${title}`;
+  if (_tabIds[key] !== undefined) return _tabIds[key];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: sheetId,
-    fields: "sheets.properties(sheetId,title,gridProperties)",
+    fields: "sheets.properties(sheetId,title)",
   });
-  const tab = (meta.data.sheets || []).find(s => s.properties.title === "MENSAJES");
-  if (!tab) throw new Error(`El spreadsheet ${sheetId} no tiene una pestaña llamada MENSAJES`);
+  for (const s of meta.data.sheets || []) {
+    _tabIds[`${sheetId}:${s.properties.title}`] = s.properties.sheetId;
+  }
+  if (_tabIds[key] === undefined) throw new Error(`El spreadsheet ${sheetId} no tiene una pestaña "${title}"`);
+  return _tabIds[key];
+}
 
-  const cols = tab.properties.gridProperties?.columnCount || 0;
-  if (cols >= MENSAJES_COLS) return false;
+function aCelda(v) {
+  const t = v === null || v === undefined ? "" : String(v);
+  return t === "" ? {} : { userEnteredValue: { stringValue: t } };
+}
 
+// appendCells agrega la fila después de la última fila con datos de la
+// pestaña, SIEMPRE desde la columna A. A diferencia de values.append, no
+// intenta adivinar dónde empieza "la tabla", que fue lo que desplazó las
+// filas a la columna I.
+async function appendFila(sheets, sheetId, title, valores) {
+  const tabId = await getTabId(sheets, sheetId, title);
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId: sheetId,
     requestBody: {
       requests: [{
-        appendDimension: {
-          sheetId: tab.properties.sheetId,
-          dimension: "COLUMNS",
-          length: MENSAJES_COLS - cols,
+        appendCells: {
+          sheetId: tabId,
+          rows: [{ values: valores.map(aCelda) }],
+          fields: "userEnteredValue",
         },
       }],
     },
   });
-  console.warn(`⚠️ Memoria: MENSAJES tenía ${cols} columnas — ampliado a ${MENSAJES_COLS}.`);
-  return true;
-}
-
-async function appendFilaMensajes(sheets, sheetId, fila) {
-  const req = {
-    spreadsheetId: sheetId,
-    range: "MENSAJES!A:J",
-    valueInputOption: "RAW",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: { values: [fila] },
-  };
-  try {
-    return await sheets.spreadsheets.values.append(req);
-  } catch (err) {
-    const msg = describirErrorGoogle(err);
-    if (/grid limits|max columns|exceeds/i.test(msg)) {
-      const ampliado = await asegurarColumnasMensajes(sheets, sheetId);
-      if (ampliado) return await sheets.spreadsheets.values.append(req);
-    }
-    throw err;
-  }
 }
 
 // ── Guardar mensaje en Google Sheets ─────────────────────────────────────────
 async function guardarMensaje({ phone, clientName, direction, type, content, mediaId = "", driveUrl = "", session = null }) {
   try {
+    if (_reparacion) await _reparacion.catch(() => {});
     const sheetId = await getOrCreateSheetId();
     const sheets  = await getSheetsClient();
 
@@ -221,7 +237,7 @@ async function guardarMensaje({ phone, clientName, direction, type, content, med
     const proyecto = session?.project_desc || "";
     const zona     = session?.zone || "";
 
-    await appendFilaMensajes(sheets, sheetId, [
+    await appendFila(sheets, sheetId, "MENSAJES", [
       timestamp, phone, nombre, direction, type, mensajeCol,
       mediaId || "", driveUrl || "", proyecto, zona,
     ]);
@@ -282,6 +298,7 @@ async function rellenarNombresAnteriores(sheetId, sheets, phone, nombre) {
 
 // ── Actualizar resumen de cliente en CLIENTES (A:H) ───────────────────────────
 async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona, visitaAgendada) {
+  if (_reparacion) await _reparacion.catch(() => {});
   const res  = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "CLIENTES!A:H" });
   const rows = res.data.values || [];
   const now  = new Date().toISOString();
@@ -289,14 +306,8 @@ async function actualizarCliente(sheetId, sheets, phone, nombre, proyecto, zona,
   const idx = rows.findIndex((r, i) => i > 0 && r[0] === phone);
 
   if (idx === -1) {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: sheetId,
-      range: "CLIENTES!A:H",
-      valueInputOption: "RAW",
-      requestBody: {
-        values: [[phone, nombre, proyecto, zona, now, now, "1", visitaAgendada ? "Sí" : "No"]],
-      },
-    });
+    await appendFila(sheets, sheetId, "CLIENTES",
+      [phone, nombre, proyecto, zona, now, now, "1", visitaAgendada ? "Sí" : "No"]);
   } else {
     const prev       = rows[idx];
     const rowNum     = idx + 1;
@@ -372,7 +383,106 @@ async function diagnosticoMemoria() {
   }
 }
 
-setTimeout(() => { diagnosticoMemoria().catch(() => {}); }, 8000);
+// ── v6 — REPARACIÓN AUTOMÁTICA (idempotente) ──────────────────────────────────
+const ENCABEZADO_MENSAJES = [
+  "Fecha y Hora", "Número de Teléfono", "Nombre de Contacto", "Entrada / Salida",
+  "Tipo", "Mensaje", "mediaId", "driveUrl", "Proyecto", "Zona",
+];
+const ENCABEZADO_CLIENTES = [
+  "Teléfono", "Nombre", "Proyecto", "Zona",
+  "Primera Actividad", "Última Actividad", "Total Mensajes", "Visita Agendada",
+];
+const ES_ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+async function repararMemoria() {
+  const sheetId = await getOrCreateSheetId();
+  const sheets  = await getSheetsClient();
+
+  // ── MENSAJES: filas desplazadas I:R → A:J ────────────────────────────────
+  const res  = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "MENSAJES!A:R" });
+  const rows = res.data.values || [];
+  const data = [];
+
+  const header = rows[0] || [];
+  if (ENCABEZADO_MENSAJES.some((h, i) => (header[i] || "") !== h)) {
+    data.push({ range: "MENSAJES!A1:J1", values: [ENCABEZADO_MENSAJES] });
+  }
+
+  let movidas = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r[0] && r[8] && ES_ISO.test(String(r[8]))) {
+      const nueva = [];
+      for (let c = 0; c < 10; c++) nueva.push(r[8 + c] || "");
+      for (let c = 10; c < 18; c++) nueva.push("");
+      data.push({ range: `MENSAJES!A${i + 1}:R${i + 1}`, values: [nueva] });
+      rows[i] = nueva; // para reconstruir CLIENTES con datos ya corregidos
+      movidas++;
+    }
+  }
+
+  for (let k = 0; k < data.length; k += 400) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: sheetId,
+      requestBody: { valueInputOption: "RAW", data: data.slice(k, k + 400) },
+    });
+  }
+  if (movidas) console.log(`🔧 MEMORIA — ${movidas} filas de MENSAJES movidas de I:R a A:J.`);
+
+  // ── CLIENTES: reconstruir si está corrupto ────────────────────────────────
+  const resC  = await sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: "CLIENTES!A:L" });
+  const rowsC = resC.data.values || [];
+  const cliSano = (rowsC[0]?.[0] || "") === "Teléfono" &&
+    rowsC.slice(1).every(r => !r.length || (r[0] && !r[8]));
+
+  if (!cliSano) {
+    // Rescatar "Visita Agendada = Sí" de las filas viejas (normales o desplazadas).
+    const conVisita = new Set();
+    for (const r of rowsC) {
+      if (r[0] && r[7] === "Sí") conVisita.add(r[0]);
+      if (!r[0] && r[4] && r[11] === "Sí") conVisita.add(r[4]);
+    }
+
+    const porTel = new Map();
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      const tel = r[1];
+      if (!tel || !r[0]) continue;
+      const c = porTel.get(tel) || { nombre: "", proyecto: "", zona: "", primera: r[0], ultima: r[0], total: 0 };
+      if (r[2]) c.nombre = r[2];
+      if (r[8]) c.proyecto = r[8];
+      if (r[9]) c.zona = r[9];
+      if (r[0] < c.primera) c.primera = r[0];
+      if (r[0] > c.ultima)  c.ultima  = r[0];
+      c.total++;
+      porTel.set(tel, c);
+    }
+
+    const valores = [ENCABEZADO_CLIENTES];
+    for (const [tel, c] of porTel) {
+      valores.push([tel, c.nombre, c.proyecto, c.zona, c.primera, c.ultima, String(c.total), conVisita.has(tel) ? "Sí" : "No"]);
+    }
+
+    await sheets.spreadsheets.values.clear({ spreadsheetId: sheetId, range: "CLIENTES!A:Z" });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: `CLIENTES!A1:H${valores.length}`,
+      valueInputOption: "RAW",
+      requestBody: { values: valores },
+    });
+    console.log(`🔧 MEMORIA — CLIENTES reconstruido: ${porTel.size} clientes (antes ${rowsC.length} filas corruptas).`);
+  }
+
+  if (!movidas && cliSano) console.log("🔧 MEMORIA — nada que reparar.");
+}
+
+let _reparacion = null;
+
+setTimeout(() => {
+  _reparacion = repararMemoria()
+    .catch(err => console.error("🔧 MEMORIA — ❌ reparación falló:", describirErrorGoogle(err)))
+    .finally(() => { _reparacion = null; diagnosticoMemoria().catch(() => {}); });
+}, 5000);
 
 // ── Leer clientes del CRM principal ──────────────────────────────────────────
 async function listarClientesCRM(limit = 30) {
@@ -1084,14 +1194,8 @@ async function actualizarNombreInmediato(phone, nombre, { proyecto = "", zona = 
     const idx  = rows.findIndex((r, i) => i > 0 && r[0] === phone);
 
     if (idx === -1) {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: sheetId,
-        range: "CLIENTES!A:H",
-        valueInputOption: "RAW",
-        requestBody: {
-          values: [[phone, nombre, proyecto, zona, now, now, "0", visitaAgendada ? "Sí" : "No"]],
-        },
-      });
+      await appendFila(sheets, sheetId, "CLIENTES",
+        [phone, nombre, proyecto, zona, now, now, "0", visitaAgendada ? "Sí" : "No"]);
     } else {
       const prev   = rows[idx];
       const rowNum = idx + 1;
@@ -1155,6 +1259,7 @@ module.exports = {
   detectarComandoVoz,
   parsearMontoEspanol,
 
-  // v5 — diagnóstico
+  // v5/v6 — diagnóstico y reparación
   diagnosticoMemoria,
+  repararMemoria,
 };
