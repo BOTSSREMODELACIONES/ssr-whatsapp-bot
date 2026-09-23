@@ -3,11 +3,30 @@
  * Se ejecuta diariamente a las 8:00 AM hora Costa Rica.
  * Consulta Google Calendar, extrae las visitas del día siguiente
  * y envía un WhatsApp de recordatorio a cada cliente + resumen a Melvin.
+ *
+ * ── CAMBIOS v2 (23 sept 2026) — PLANTILLA APROBADA ─────────────
+ * BUG: el recordatorio se mandaba como texto libre, que WhatsApp solo
+ *   entrega si el cliente escribió en las últimas 24 h. Los clientes
+ *   agendan días antes, así que casi nunca les llegaba (Meta respondía
+ *   "OK" y después fallaba con error 131047).
+ * FIX: si WA_PLANTILLA_RECORDATORIO_VISITA está configurada, se envía
+ *   la plantilla aprobada "recordatorio_visita" con:
+ *     {{1}} nombre del cliente
+ *     {{2}} fecha de la visita (ej. "lunes 28 de septiembre")
+ *     {{3}} hora de la visita (del evento real: sirve para cualquier horario)
+ *     {{4}} costo de la visita (KNOWLEDGE.visita.costo_texto)
+ *   Si no está configurada, se usa el texto libre anterior.
+ *   Cada recordatorio queda registrado en MENSAJES (visible en el CRM/ERP)
+ *   y el resumen a Melvin indica a quién NO se le pudo enviar.
  */
 
 const { google } = require("googleapis");
 const { sendText } = require("./messenger");
 const KNOWLEDGE = require("./knowledge");
+const { plantillaConfigurada, enviarPlantilla } = require("./plantillas");
+const memoria = require("./memoria");
+
+const VAR_PLANTILLA = "WA_PLANTILLA_RECORDATORIO_VISITA";
 
 // ── Calendar client ───────────────────────────────────────────────────────────
 async function getCalendarClient() {
@@ -76,7 +95,6 @@ async function sendDailyReminders() {
     const tomorrowEnd = new Date(tomorrow);
     tomorrowEnd.setHours(23, 59, 59, 0);
 
-    // Consultar eventos de mañana
     const response = await calendar.events.list({
       calendarId: process.env.GOOGLE_CALENDAR_ID,
       timeMin: tomorrow.toISOString(),
@@ -87,7 +105,7 @@ async function sendDailyReminders() {
 
     const events = response.data.items || [];
 
-    // Filtrar solo eventos de visitas SSR (los que creó el bot)
+    // Solo eventos de visitas SSR (los que creó el bot)
     const visits = events.filter((e) =>
       e.summary && e.summary.includes("Visita SSR")
     );
@@ -97,12 +115,16 @@ async function sendDailyReminders() {
       return;
     }
 
-    console.log(`📅 ${visits.length} visita(s) mañana — enviando recordatorios...`);
+    const usarPlantilla = !!plantillaConfigurada(VAR_PLANTILLA);
+
+    console.log(`📅 ${visits.length} visita(s) mañana — enviando recordatorios${usarPlantilla ? " (plantilla)" : " (texto libre)"}...`);
 
     const summaryLines = [
       `📋 *VISITAS DE MAÑANA — ${formatDate(visits[0].start.dateTime)}*`,
       "",
     ];
+
+    const noEnviados = [];
 
     for (const event of visits) {
       const data = parseEventDescription(event.description);
@@ -111,24 +133,53 @@ async function sendDailyReminders() {
 
       // ── Mensaje al cliente ───────────────────────────────────────────────
       if (data.phone) {
-        const clientMsg = [
-          `Hola${data.name ? ` *${data.name}*` : ""} 👋`,
-          `Le recordamos su visita de diagnóstico con *SS Remodelaciones* mañana *${dateStr}* a las *${timeStr}*.`,
-          "",
-          `Nuestro equipo llegará puntualmente a su ubicación 📍`,
-          `Recuerde que el costo de la visita es de *${KNOWLEDGE.visita.costo_texto}*, descontable si decide contratar la obra 😊`,
-          "",
-          `Si necesita reagendar o tiene alguna consulta, con gusto le ayudamos.`,
-        ].join("\n");
-
         try {
-          await sendText(data.phone, clientMsg);
+          let registro;
+
+          if (usarPlantilla) {
+            await enviarPlantilla(data.phone, VAR_PLANTILLA, {
+              cuerpo: [
+                data.name || "estimado cliente",
+                dateStr,
+                timeStr,
+                KNOWLEDGE.visita.costo_texto,
+              ],
+            });
+            registro =
+              `[Recordatorio de visita enviado (plantilla)] Visita de diagnóstico mañana ${dateStr} a las ${timeStr}. ` +
+              `Costo: ${KNOWLEDGE.visita.costo_texto}, descontable si contrata la obra.`;
+          } else {
+            const clientMsg = [
+              `Hola${data.name ? ` *${data.name}*` : ""} 👋`,
+              `Le recordamos su visita de diagnóstico con *SS Remodelaciones* mañana *${dateStr}* a las *${timeStr}*.`,
+              "",
+              `Nuestro equipo llegará puntualmente a su ubicación 📍`,
+              `Recuerde que el costo de la visita es de *${KNOWLEDGE.visita.costo_texto}*, descontable si decide contratar la obra 😊`,
+              "",
+              `Si necesita reagendar o tiene alguna consulta, con gusto le ayudamos.`,
+            ].join("\n");
+
+            await sendText(data.phone, clientMsg);
+            registro = clientMsg;
+          }
+
+          memoria.guardarMensaje({
+            phone: data.phone.startsWith("+") ? data.phone : `+${data.phone.replace(/\D/g, "")}`,
+            clientName: data.name || null,
+            direction: "out",
+            type: "text",
+            content: registro,
+            session: null,
+          }).catch(() => {});
+
           console.log(`✅ Recordatorio enviado a ${data.phone} (${data.name || "sin nombre"})`);
         } catch (err) {
           console.error(`❌ Error enviando recordatorio a ${data.phone}:`, err.message);
+          noEnviados.push(`${data.name || data.phone}: ${err.message.slice(0, 120)}`);
         }
       } else {
         console.warn(`⚠️ Evento sin teléfono: ${event.summary}`);
+        noEnviados.push(`${data.name || event.summary}: sin teléfono en la cita`);
       }
 
       // Agregar al resumen para Melvin
@@ -141,6 +192,16 @@ async function sendDailyReminders() {
           ? `   🗺️ ${data.location}` : "",
         ""
       );
+    }
+
+    if (noEnviados.length) {
+      summaryLines.push(`⚠️ *Recordatorio NO enviado a:*`);
+      noEnviados.forEach(n => summaryLines.push(`• ${n}`));
+      summaryLines.push("");
+    }
+
+    if (!usarPlantilla) {
+      summaryLines.push(`ℹ️ Sin plantilla (${VAR_PLANTILLA}): el recordatorio solo llega a quien escribió en las últimas 24 h.`, "");
     }
 
     summaryLines.push(`_Total: ${visits.length} visita(s) — Sasha Bot SSR_`);
