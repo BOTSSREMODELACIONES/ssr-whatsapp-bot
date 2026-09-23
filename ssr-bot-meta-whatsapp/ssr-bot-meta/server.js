@@ -7,6 +7,43 @@ const { sendDailyReminders }  = require("./bot/reminders");
 const { enviarConfirmacionesVisitasManana } = require("./bot/confirmaciones");
 const memoria                 = require("./bot/memoria");
 
+// ══════════════════════════════════════════════════════════════════════════════
+// v21 (23 sept 2026) — MENSAJES MANUALES DESDE EL CRM/ERP QUE "NO LLEGABAN"
+//
+// SÍNTOMA: desde el chat del ERP se mandó "prueba de envio" a José Mata
+// (+506 7006-8477). El ERP lo mostró como enviado, quedó guardado en
+// MENSAJES, la pausa de Sasha se activó… pero el mensaje nunca llegó al
+// teléfono.
+//
+// CAUSA RAÍZ: regla de WhatsApp Business (Meta), no del ERP. Un mensaje de
+// texto libre solo se entrega si el cliente escribió en las últimas 24
+// horas ("ventana de atención"). El último mensaje de ese número fue el
+// jueves 17 a las 15:50 — 6 días antes. Fuera de esa ventana, Meta ACEPTA
+// la llamada (responde 200 con un ID de mensaje) y recién DESPUÉS manda un
+// aviso de fallo (error 131047) por el webhook como "status". Este servidor
+// ignoraba todos los "statuses" del webhook, así que el fallo era invisible:
+// /send-message respondía ok:true y el mensaje se perdía sin rastro.
+// "Antes funcionaba" porque las pruebas anteriores se hicieron con clientes
+// que habían escrito ese mismo día.
+//
+// FIX:
+//   1. /send-message revisa ANTES de enviar cuándo fue el último mensaje
+//      entrante del cliente (hoja MENSAJES). Si pasaron más de 24 h, NO
+//      manda el texto (se perdería) y devuelve un error claro que el ERP y
+//      el CRM muestran en pantalla. El texto queda en el cuadro de redacción.
+//   2. Si configurás una plantilla aprobada en Railway
+//      (WA_PLANTILLA_REAPERTURA = "nombre_plantilla|es"), en ese caso se
+//      envía la plantilla para reabrir la conversación; cuando el cliente
+//      responda, ya se le puede escribir libremente.
+//   3. El webhook ahora procesa los "statuses": si WhatsApp avisa que un
+//      mensaje NO se entregó (por cualquier motivo), queda en los logs y se
+//      registra en MENSAJES como "⚠️ WhatsApp no entregó…", visible en el
+//      chat del CRM/ERP.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const VENTANA_WHATSAPP_MS = 24 * 60 * 60 * 1000;
+const WA_API_VERSION      = process.env.WHATSAPP_API_VERSION || "v21.0";
+
 // ── KEEP-ALIVE: evita que Railway duerma el proceso ─────────────────────────────
 // Self-ping cada 14 min — sin archivo externo, todo inline.
 (function iniciarKeepAlive() {
@@ -65,10 +102,8 @@ cron.schedule("0 8 * * *", async () => {
 console.log("✅ Cron de recordatorios registrado (8:00 AM CR diario)");
 
 // ── Cron: confirmación de visitas de mañana, 7:00 PM Costa Rica ───────────────
-// v18 (16 sept 2026) — pedido por Darwin: la noche anterior a cada visita
-// agendada, mandarle al cliente un recordatorio con botones Sí/No
-// preguntando si confirma. Ver bot/confirmaciones.js para el detalle
-// completo (envío + manejo de la respuesta + aviso a Darwin y Melvin).
+// v18 — la noche anterior a cada visita agendada, recordatorio con botones
+// Sí/No. Ver bot/confirmaciones.js.
 cron.schedule("0 19 * * *", async () => {
   console.log("🕖 Cron activado → enviando confirmaciones de visitas de mañana...");
   await enviarConfirmacionesVisitasManana();
@@ -84,24 +119,9 @@ const NUMEROS_INTERNOS = new Set([
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // FIX v7 — ANTI-LOOP DE LEADS (bucle Make ↔ /meta-lead)
-// ═══════════════════════════════════════════════════════════════════════════════
-// BUG: cuando llegaba un lead a /meta-lead, el bot le mandaba WhatsApp al
-//   cliente y LUEGO hacía POST a MAKE_WEBHOOK_META_LEADS "para registrar en
-//   CRM". Pero ese webhook es EL MISMO que dispara el escenario de Make que
-//   llama a /meta-lead → bucle infinito:
-//   Web → Make → /meta-lead → WhatsApp → POST a Make → Make → /meta-lead → ...
-//   Cada vuelta = 1 mensaje al cliente + 3 a supervisores = "miles de mensajes".
-//
-// FIX (3 capas de protección):
-//   1. MARCADOR DE ORIGEN: el POST que el bot manda a Make lleva
-//      origen: "sasha-bot". Si un lead entrante trae ese marcador, se ignora
-//      (era nuestro propio eco rebotando).
-//   2. DEDUPLICACIÓN POR TELÉFONO: caché en memoria — si el mismo teléfono
-//      llega de nuevo dentro de 10 minutos, se ignora silenciosamente.
-//      Corta cualquier reintento de Make, Meta o la web.
-//   3. RESPUESTA 200 INMEDIATA: /meta-lead responde 200 {ok:true} ANTES de
-//      procesar. Así Make nunca marca error ("Source is not valid JSON"),
-//      nunca guarda ejecuciones incompletas y nunca reintenta.
+//   1. Marcador de origen "sasha-bot" en el POST a Make: si vuelve, se ignora.
+//   2. Deduplicación por teléfono: mismo teléfono dentro de 10 min se ignora.
+//   3. /meta-lead responde 200 inmediato para que Make nunca reintente.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const leadsRecientes    = new Map();           // telefonoNorm → timestamp
@@ -109,7 +129,6 @@ const LEAD_DEDUP_MS     = 10 * 60 * 1000;      // ventana de 10 minutos
 
 function esLeadDuplicado(telefonoNorm) {
   const ahora  = Date.now();
-  // Limpieza de entradas viejas para que el Map no crezca indefinidamente
   for (const [tel, ts] of leadsRecientes) {
     if (ahora - ts > LEAD_DEDUP_MS) leadsRecientes.delete(tel);
   }
@@ -117,6 +136,115 @@ function esLeadDuplicado(telefonoNorm) {
   if (ultimo && ahora - ultimo < LEAD_DEDUP_MS) return true;
   leadsRecientes.set(telefonoNorm, ahora);
   return false;
+}
+
+// ── Normalizar teléfono CR a "506XXXXXXXX" ────────────────────────────────────
+function normalizarTelefono(telefono) {
+  let t = String(telefono || "").replace(/\D/g, "");
+  if (!t.startsWith("506") && t.length === 8) t = "506" + t;
+  return t;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v21 — VENTANA DE 24 H DE WHATSAPP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Último mensaje ENTRANTE (del cliente) guardado en MENSAJES. null si nunca
+// escribió. Lanza error si no se pudo leer la hoja (el llamador decide).
+async function ultimoMensajeEntrante(telefonoNorm) {
+  const filas = await memoria.buscarPorTelefono(telefonoNorm, 1000);
+  let ultimo = null;
+  for (const r of filas) {
+    if (String(r[3] || "").trim().toLowerCase() !== "in") continue;
+    const d = new Date(r[0]);
+    if (!isNaN(d.getTime()) && (!ultimo || d > ultimo)) ultimo = d;
+  }
+  return ultimo;
+}
+
+function describirTiempo(ms) {
+  const h = Math.floor(ms / 3600000);
+  if (h < 48) return `${h} h`;
+  return `${Math.floor(h / 24)} días`;
+}
+
+// Envía la plantilla aprobada configurada en WA_PLANTILLA_REAPERTURA
+// ("nombre|idioma", idioma por defecto "es"). Debe ser una plantilla SIN
+// variables. Devuelve { enviada, nombre?, motivo? }.
+async function enviarPlantillaReapertura(telefonoNorm) {
+  const conf = String(process.env.WA_PLANTILLA_REAPERTURA || "").trim();
+  if (!conf) return { enviada: false, motivo: "sin_plantilla_configurada" };
+
+  const [nombre, idioma] = conf.split("|").map(s => (s || "").trim());
+  try {
+    const r = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${process.env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: telefonoNorm,
+        type: "template",
+        template: { name: nombre, language: { code: idioma || "es" } },
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) return { enviada: false, nombre, motivo: data?.error?.message || `HTTP ${r.status}` };
+    return { enviada: true, nombre };
+  } catch (err) {
+    return { enviada: false, nombre, motivo: err.message };
+  }
+}
+
+// Texto explicativo según el código de error que manda WhatsApp.
+function explicarErrorEntrega(code) {
+  const c = Number(code);
+  if (c === 131047) return "pasaron más de 24 h desde el último mensaje del cliente; WhatsApp solo permite plantillas aprobadas";
+  if (c === 131026) return "el número no tiene WhatsApp o no puede recibir mensajes";
+  if (c === 131049) return "WhatsApp limitó el envío a este cliente para cuidar la calidad de la cuenta";
+  if (c === 131051) return "tipo de mensaje no soportado";
+  if (c === 131031) return "la cuenta de WhatsApp Business está restringida";
+  if (c === 130472) return "el cliente está en un experimento de Meta y no recibe mensajes de marketing";
+  return "";
+}
+
+// Deduplicación de avisos de fallo (Meta puede reintentar el mismo webhook).
+const fallosRegistrados = new Map(); // wamid → timestamp
+function yaRegistradoFallo(id) {
+  const ahora = Date.now();
+  for (const [k, ts] of fallosRegistrados) if (ahora - ts > 6 * 3600000) fallosRegistrados.delete(k);
+  if (fallosRegistrados.has(id)) return true;
+  fallosRegistrados.set(id, ahora);
+  return false;
+}
+
+// Procesa los "statuses" del webhook: sent / delivered / read / failed.
+// Solo los "failed" dejan rastro (log + fila en MENSAJES).
+function procesarEstadosWhatsApp(statuses) {
+  for (const s of statuses || []) {
+    if (s.status !== "failed") continue;
+    if (s.id && yaRegistradoFallo(s.id)) continue;
+
+    const err     = (s.errors && s.errors[0]) || {};
+    const code    = err.code || "";
+    const titulo  = err.title || err.message || "error desconocido";
+    const detalle = err.error_data?.details || "";
+    const phone   = "+" + String(s.recipient_id || "").replace(/\D/g, "");
+    const explic  = explicarErrorEntrega(code);
+
+    console.error(`❌ WhatsApp NO entregó mensaje a ${phone} — [${code}] ${titulo}${detalle ? " · " + detalle : ""} (id ${s.id})`);
+
+    memoria.guardarMensaje({
+      phone,
+      clientName: null,
+      direction: "out",
+      type: "text",
+      content: `⚠️ WhatsApp no entregó el mensaje anterior${code ? ` (error ${code})` : ""}: ${explic || titulo}.`,
+      session: null,
+    }).catch(e => console.warn("⚠️ No se pudo registrar el fallo de entrega en memoria:", e.message));
+  }
 }
 
 // ── Transcripción de audio vía OpenAI Whisper ─────────────────────────────────
@@ -206,7 +334,7 @@ function addToBuffer(from, messageId, text, mediaId) {
   buffer.timer = setTimeout(() => flushBuffer(from), BATCH_WINDOW_MS);
 }
 
-// ── HEALTH CHECK — requerido por keepalive.js ─────────────────────────────────
+// ── HEALTH CHECK — requerido por keepalive ────────────────────────────────────
 app.get("/health", (_req, res) => {
   res.json({
     status:   "ok",
@@ -235,7 +363,13 @@ app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
     if (body?.object !== "whatsapp_business_account") return;
-    const messages = body.entry?.[0]?.changes?.[0]?.value?.messages;
+
+    const value = body.entry?.[0]?.changes?.[0]?.value;
+
+    // v21 — avisos de entrega (antes se ignoraban por completo).
+    if (value?.statuses?.length) procesarEstadosWhatsApp(value.statuses);
+
+    const messages = value?.messages;
     if (!messages?.length) return;
 
     for (const msg of messages) {
@@ -253,6 +387,13 @@ app.post("/webhook", async (req, res) => {
           msg.interactive?.button_reply?.id   ||
           msg.interactive?.list_reply?.id     ||
           msg.interactive?.button_reply?.title;
+        if (!text) continue;
+        addToBuffer(from, messageId, text, null);
+
+      } else if (msg.type === "button") {
+        // Respuesta a un botón de PLANTILLA (p. ej. la plantilla de
+        // reapertura): llega como msg.button, no como interactive.
+        const text = msg.button?.payload || msg.button?.text;
         if (!text) continue;
         addToBuffer(from, messageId, text, null);
 
@@ -287,12 +428,8 @@ app.post("/webhook", async (req, res) => {
           (async () => {
             const transcripcion = await transcribirAudio(audioId, esInterno);
 
-            // v20 (16 sept 2026) — NUEVO: guardar el audio original (con su
-            // driveUrl) en memoria para clientes, además de la transcripción
-            // que ya se usaba para que Sasha respondiera. Así el CRM puede
-            // mostrar el audio real (reproductor), no solo el texto
-            // transcrito. Fire-and-forget: si falla, no afecta la respuesta
-            // normal del bot al cliente — ver memoria.js:guardarAdjuntoCliente.
+            // v20 — guardar el audio original (con driveUrl) para clientes,
+            // además de la transcripción, para que el CRM muestre el audio.
             if (!esInterno) {
               memoria.guardarAdjuntoCliente({
                 phone: "+" + from,
@@ -332,14 +469,9 @@ app.post("/webhook", async (req, res) => {
         }
 
       } else if (msg.type === "document") {
-        // v20 (16 sept 2026) — NUEVO: antes este tipo de mensaje caía
-        // directo en la rama "Tipo ignorado" de abajo — un PDF que mandara
-        // un cliente ni siquiera quedaba registrado en ningún lado. Ahora
-        // se guarda en memoria (con su driveUrl) para que sea visible en el
-        // CRM, igual que las fotos. Por ahora Sasha NO procesa el contenido
-        // del PDF ni responde nada especial sobre él — solo queda visible
-        // en el chat del CRM; el cliente puede seguir escribiendo texto
-        // normal sobre lo que mandó y Sasha responde a eso como siempre.
+        // v20 — PDFs y documentos de clientes se guardan en memoria (con
+        // driveUrl) para verlos en el CRM. Sasha no interpreta el contenido;
+        // si trae caption, ese texto sí se procesa normal.
         const mediaId  = msg.document?.id;
         const filename = msg.document?.filename || "documento";
         const caption  = msg.document?.caption || "";
@@ -357,9 +489,6 @@ app.post("/webhook", async (req, res) => {
           }).catch(e => console.warn("⚠️ No se pudo guardar documento de cliente en memoria:", e.message));
         }
 
-        // Si el cliente mandó el PDF junto con un texto (caption), ese texto
-        // sí se procesa normal — es lo único de este mensaje que Sasha puede
-        // interpretar por ahora.
         if (caption) addToBuffer(from, messageId, caption, null);
 
       } else {
@@ -384,19 +513,13 @@ app.get("/meta-lead", (req, res) => {
 });
 
 app.post("/meta-lead", async (req, res) => {
-  // ── FIX v7 (capa 3): responder 200 JSON INMEDIATAMENTE ─────────────────────
-  // Make marca "Source is not valid JSON" y reintenta si la respuesta demora
-  // o falla. Respondiendo primero, Make siempre queda en Success y jamás
-  // acumula ejecuciones incompletas ni reintentos.
+  // FIX v7 (capa 3): responder 200 JSON INMEDIATAMENTE.
   res.status(200).json({ ok: true });
 
   try {
     const body = req.body;
 
-    // ── FIX v7 (capa 1): ignorar nuestro propio eco ───────────────────────────
-    // El POST que este mismo endpoint manda a MAKE_WEBHOOK_META_LEADS lleva
-    // origen: "sasha-bot". Si Make nos lo devuelve (mismo webhook que dispara
-    // el escenario), lo descartamos acá y el bucle muere.
+    // FIX v7 (capa 1): ignorar nuestro propio eco.
     if (body?.origen === "sasha-bot" || body?.fuente === "Meta Ads") {
       console.log("🔁 Lead ignorado: eco del propio bot (origen sasha-bot / fuente Meta Ads). Anti-loop v7.");
       return;
@@ -425,14 +548,9 @@ app.post("/meta-lead", async (req, res) => {
       return;
     }
 
-    let telefonoNorm = telefono.replace(/\D/g, "");
-    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
-      telefonoNorm = "506" + telefonoNorm;
-    }
+    const telefonoNorm = normalizarTelefono(telefono);
 
-    // ── FIX v7 (capa 2): deduplicación por teléfono (ventana 10 min) ──────────
-    // Aunque Make, Meta o la web reintenten, el mismo lead solo se procesa
-    // UNA vez cada 10 minutos. Corta cualquier bucle o reintento residual.
+    // FIX v7 (capa 2): deduplicación por teléfono (ventana 10 min).
     if (esLeadDuplicado(telefonoNorm)) {
       console.log(`🔁 Lead duplicado ignorado: +${telefonoNorm} (ya procesado hace <10 min). Anti-loop v7.`);
       return;
@@ -474,22 +592,14 @@ app.post("/meta-lead", async (req, res) => {
       sendText(sup, notifSup).catch(e => console.warn(`⚠️ No se pudo notificar a ${sup}:`, e.message));
     }
 
-    // ── FIX v7: el POST de registro a Make lleva marcador de origen ───────────
-    // Si MAKE_WEBHOOK_META_LEADS apunta al MISMO webhook que dispara el
-    // escenario que llama a /meta-lead, el marcador origen: "sasha-bot" hace
-    // que la capa 1 lo descarte al volver — sin bucle.
-    // RECOMENDACIÓN: idealmente MAKE_WEBHOOK_META_LEADS debe apuntar a un
-    // webhook de Make DISTINTO (uno solo para CRM que NO llame a /meta-lead),
-    // o eliminarse si el escenario de Make ya escribe el lead en el Sheet
-    // ANTES de llamar a /meta-lead (que es tu caso actual: Webhooks →
-    // Google Sheets → HTTP). En ese caso este POST es redundante.
+    // FIX v7: el POST de registro a Make lleva marcador de origen anti-loop.
     if (process.env.MAKE_WEBHOOK_META_LEADS) {
       try {
         await fetch(process.env.MAKE_WEBHOOK_META_LEADS, {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            origen:   "sasha-bot",          // ← marcador anti-loop v7
+            origen:   "sasha-bot",
             nombre,
             telefono: "+" + telefonoNorm,
             interes,
@@ -507,7 +617,6 @@ app.post("/meta-lead", async (req, res) => {
 
   } catch (err) {
     console.error("❌ Error en /meta-lead:", err.message);
-    // Ya respondimos 200 arriba — el error queda solo en logs, Make no reintenta.
   }
 });
 
@@ -531,9 +640,6 @@ app.get("/test-reminders", async (_req, res) => {
 });
 
 // ── Test de confirmaciones de visita ────────────────────────────────────────────
-// v18 (16 sept 2026) — permite a Darwin disparar manualmente el envío de
-// confirmaciones sin esperar hasta las 7:00 PM, igual que /test-reminders
-// ya existía para los recordatorios de las 8:00 AM.
 app.get("/test-confirmaciones-visita", async (_req, res) => {
   await enviarConfirmacionesVisitasManana();
   res.json({ ok: true, message: "Confirmaciones de visita ejecutadas" });
@@ -796,10 +902,6 @@ app.post("/api/transcribir-voz", async (req, res) => {
 });
 
 // ── Cotizador Web App ───────────────────────────────────────────────────────────
-// FIX 2026-07-27: faltaba esta ruta. express.static() solo servía el archivo en
-// /cotizador.html (con extensión), nunca en /cotizador (limpia). Por eso Melvin
-// recibía "Cannot GET /cotizador" al abrir el link — el archivo existía en
-// public/, pero ninguna ruta lo servía sin la extensión .html.
 app.get("/cotizador", (_req, res) => {
   res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   res.setHeader("Pragma", "no-cache");
@@ -810,7 +912,7 @@ app.get("/cotizador", (_req, res) => {
 // ── Servir archivos estáticos ──────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
 
-// ── Endpoint: Enviar mensaje outbound desde CRM o Make ───────────────────────
+// ── Endpoint: Enviar mensaje outbound desde CRM / ERP / Make ─────────────────
 app.post("/send-message", async (req, res) => {
   try {
     const { telefono, mensaje } = req.body;
@@ -818,17 +920,70 @@ app.post("/send-message", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Faltan telefono y mensaje" });
     }
 
-    let telefonoNorm = telefono.replace(/\D/g, "");
-    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
-      telefonoNorm = "506" + telefonoNorm;
+    const telefonoNorm = normalizarTelefono(telefono);
+    const tel = "+" + telefonoNorm;
+
+    // ── v21: revisar la ventana de 24 h ANTES de enviar ─────────────────────
+    let ultimoEntrante = null;
+    let ventanaVerificada = false;
+    try {
+      ultimoEntrante = await ultimoMensajeEntrante(telefonoNorm);
+      ventanaVerificada = true;
+    } catch (errVentana) {
+      // Si no se pudo leer MENSAJES, no bloqueamos: se intenta el envío y,
+      // si WhatsApp lo rechaza, el aviso llega igual por el webhook.
+      console.warn(`⚠️ /send-message: no se pudo verificar la ventana de 24 h de ${tel}:`, errVentana.message);
     }
 
+    const fueraDeVentana = ventanaVerificada &&
+      (!ultimoEntrante || Date.now() - ultimoEntrante.getTime() > VENTANA_WHATSAPP_MS);
+
+    if (fueraDeVentana) {
+      const hace = ultimoEntrante
+        ? `hace ${describirTiempo(Date.now() - ultimoEntrante.getTime())}`
+        : "nunca";
+      console.warn(`⛔ /send-message → ${tel}: fuera de la ventana de 24 h (último mensaje del cliente: ${hace}). Texto NO enviado.`);
+
+      const plantilla = await enviarPlantillaReapertura(telefonoNorm);
+
+      if (plantilla.enviada) {
+        memoria.guardarMensaje({
+          phone: tel, clientName: null, direction: "out", type: "text",
+          content: `[Plantilla de WhatsApp enviada: ${plantilla.nombre}]`, session: null,
+        }).catch(() => {});
+        console.log(`📨 Plantilla de reapertura "${plantilla.nombre}" enviada a ${tel}`);
+
+        return res.status(409).json({
+          ok: false,
+          fueraDeVentana: true,
+          plantillaEnviada: plantilla.nombre,
+          error:
+            `El cliente escribió por última vez ${hace}. WhatsApp no permite mensajes libres después de 24 h, ` +
+            `así que tu texto NO se envió. Se le mandó la plantilla "${plantilla.nombre}" para reabrir la conversación: ` +
+            `cuando responda, volvé a enviar tu mensaje.`,
+        });
+      }
+
+      return res.status(409).json({
+        ok: false,
+        fueraDeVentana: true,
+        error:
+          `El cliente escribió por última vez ${hace}. WhatsApp solo entrega mensajes libres dentro de las 24 h ` +
+          `siguientes al último mensaje del cliente, así que tu texto NO se envió. ` +
+          (plantilla.motivo === "sin_plantilla_configurada"
+            ? `Para reabrir la conversación hace falta una plantilla aprobada (configurá WA_PLANTILLA_REAPERTURA en Railway) ` +
+              `o escribile desde el WhatsApp de la oficina.`
+            : `Además falló la plantilla de reapertura: ${plantilla.motivo}.`),
+      });
+    }
+
+    // ── Dentro de la ventana: enviar normal ──────────────────────────────────
     const { sendText } = require("./bot/messenger");
-    await sendText("+" + telefonoNorm, mensaje);
-    console.log(`📤 /send-message → +${telefonoNorm}: "${mensaje.substring(0, 60)}"`);
+    await sendText(tel, mensaje);
+    console.log(`📤 /send-message → ${tel}: "${mensaje.substring(0, 60)}"`);
 
     memoria.guardarMensaje({
-      phone: "+" + telefonoNorm,
+      phone: tel,
       clientName: null,
       direction: "out",
       type: "text",
@@ -836,15 +991,10 @@ app.post("/send-message", async (req, res) => {
       session: null,
     }).catch(e => console.warn("⚠️ No se pudo guardar en memoria:", e.message));
 
-    // v20 (16 sept 2026) — cada vez que Darwin (o quien sea) le manda un
-    // mensaje manual a un cliente desde el CRM, se pausa/renueva
-    // automáticamente el control manual por 60 minutos más — así Sasha no
-    // le contesta encima mientras Darwin sigue conversando activo. No hace
-    // falta que haya tocado "Tomar control" antes; mandar un mensaje manual
-    // YA implica que quiere el control de esa conversación.
-    const expiraEn = pausarConversacion("+" + telefonoNorm);
+    // v20 — cada mensaje manual pausa/renueva a Sasha 60 min con ese cliente.
+    const expiraEn = pausarConversacion(tel);
 
-    res.json({ ok: true, telefono: "+" + telefonoNorm, pausadoHasta: expiraEn });
+    res.json({ ok: true, telefono: tel, pausadoHasta: expiraEn });
   } catch (err) {
     console.error("❌ /send-message error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
@@ -852,24 +1002,18 @@ app.post("/send-message", async (req, res) => {
 });
 
 // ── Control manual de conversación (Darwin toma/devuelve el control) ─────────
-// v20 (16 sept 2026) — usados por el botón "Tomar control" / "Devolver a
-// Sasha" del CRM. Ver la lógica completa (Map en memoria, 60 min de
-// inactividad) en bot/index.js.
+// v20 — botón "Tomar control" / "Devolver a Sasha" del CRM/ERP.
 
 app.post("/api/conversacion/tomar-control", (req, res) => {
   try {
     const { telefono } = req.body;
     if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
 
-    let telefonoNorm = telefono.replace(/\D/g, "");
-    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
-      telefonoNorm = "506" + telefonoNorm;
-    }
+    const tel = "+" + normalizarTelefono(telefono);
+    const expiraEn = pausarConversacion(tel);
+    console.log(`⏸️ /api/conversacion/tomar-control → ${tel}`);
 
-    const expiraEn = pausarConversacion("+" + telefonoNorm);
-    console.log(`⏸️ /api/conversacion/tomar-control → +${telefonoNorm}`);
-
-    res.json({ ok: true, telefono: "+" + telefonoNorm, pausadoHasta: expiraEn });
+    res.json({ ok: true, telefono: tel, pausadoHasta: expiraEn });
   } catch (err) {
     console.error("❌ /api/conversacion/tomar-control error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
@@ -881,42 +1025,48 @@ app.post("/api/conversacion/liberar-control", (req, res) => {
     const { telefono } = req.body;
     if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
 
-    let telefonoNorm = telefono.replace(/\D/g, "");
-    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
-      telefonoNorm = "506" + telefonoNorm;
-    }
+    const tel = "+" + normalizarTelefono(telefono);
+    reanudarConversacion(tel);
+    console.log(`▶️ /api/conversacion/liberar-control → ${tel}`);
 
-    reanudarConversacion("+" + telefonoNorm);
-    console.log(`▶️ /api/conversacion/liberar-control → +${telefonoNorm}`);
-
-    res.json({ ok: true, telefono: "+" + telefonoNorm });
+    res.json({ ok: true, telefono: tel });
   } catch (err) {
     console.error("❌ /api/conversacion/liberar-control error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
 });
 
-// GET para que el CRM pueda pintar el estado ("🔴 Control manual activo
-// hasta las X:XX") sin adivinar — telefono va como query param.
-app.get("/api/conversacion/estado", (req, res) => {
+// GET para que el CRM pinte el estado sin adivinar. v21: además informa si la
+// conversación está dentro de la ventana de 24 h de WhatsApp.
+app.get("/api/conversacion/estado", async (req, res) => {
   try {
     const telefono = req.query.telefono;
     if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
 
-    let telefonoNorm = telefono.replace(/\D/g, "");
-    if (!telefonoNorm.startsWith("506") && telefonoNorm.length === 8) {
-      telefonoNorm = "506" + telefonoNorm;
-    }
+    const telefonoNorm = normalizarTelefono(telefono);
     const tel = "+" + telefonoNorm;
 
     const pausado    = estaEnPausaManual(tel);
     const msRestante = msRestantesPausa(tel);
+
+    let ventana = null;
+    try {
+      const ultimo = await ultimoMensajeEntrante(telefonoNorm);
+      ventana = {
+        abierta: !!ultimo && Date.now() - ultimo.getTime() <= VENTANA_WHATSAPP_MS,
+        ultimoMensajeCliente: ultimo ? ultimo.toISOString() : null,
+        cierraEn: ultimo ? new Date(ultimo.getTime() + VENTANA_WHATSAPP_MS).toISOString() : null,
+      };
+    } catch (e) {
+      ventana = null;
+    }
 
     res.json({
       ok: true,
       telefono: tel,
       pausado,
       pausadoHasta: pausado ? Date.now() + msRestante : null,
+      ventana,
     });
   } catch (err) {
     console.error("❌ /api/conversacion/estado error:", err.message);
@@ -934,17 +1084,17 @@ app.listen(PORT, () => {
 │  📋  Confirmación visitas: 7:00 PM CR diario                │
 │  💓  KeepAlive: ping cada 14 min (siempre activa)          │
 │  🛡️  Anti-loop leads v7: dedup 10 min + marcador origen    │
+│  🪟  Ventana 24 h WhatsApp: verificada en /send-message    │
 │  🚀  Puerto: ${PORT}                                           │
 │  📌  Webhook WhatsApp: GET|POST /webhook                   │
 │  🔥  Webhook Meta Leads: GET|POST /meta-lead               │
 │  🎙️  Audio interno: transcripción en tiempo real           │
 │  🧾  Cotizador: GET /cotizador                              │
 │  🩺  Health check: GET /health                             │
-│  🧪  Test leads: GET /test-meta-lead                       │
-│  🧪  Test confirmaciones: GET /test-confirmaciones-visita  │
 │  🎛️  Control manual: POST /api/conversacion/tomar-control  │
 └────────────────────────────────────────────────────────────┘
   `);
+  console.log(`📨 Plantilla de reapertura: ${process.env.WA_PLANTILLA_REAPERTURA ? process.env.WA_PLANTILLA_REAPERTURA : "no configurada (WA_PLANTILLA_REAPERTURA)"}`);
 });
 
 module.exports = app;
