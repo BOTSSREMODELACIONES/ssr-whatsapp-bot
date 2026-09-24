@@ -542,8 +542,9 @@ function procesarWebhookMeta(body) {
     }
 
     if (ev.tipo === "eco") {
-      metaMensajeria.esEcoHumano(ev).then(esHumano => {
-        if (!esHumano) return;
+      metaMensajeria.clasificarEco(ev).then(({ humano, motivo }) => {
+        console.log(`↩️ Eco ${ev.canal} a ${ev.cliente} (app_id ${ev.appId || "—"}): ${motivo} — "${String(ev.texto).substring(0, 60)}"`);
+        if (!humano) return;
         pausarConversacion(ev.cliente);
         console.log(`⏸️ Respuesta humana desde la bandeja de Meta a ${ev.cliente} — Sasha en pausa 60 min con ese cliente.`);
         memoria.guardarMensaje({
@@ -1079,6 +1080,12 @@ app.post("/send-message", async (req, res) => {
 });
 
 // ── Control manual de conversación (Darwin toma/devuelve el control) ─────────
+// v22: acepta también clientes de Instagram/Messenger ("ig_..." / "fb_...").
+function idConversacion(telefono) {
+  const t = String(telefono || "").trim().replace(/^\+/, "");
+  if (/^(ig|fb)_/i.test(t)) return t;
+  return "+" + normalizarTelefono(t);
+}
 // v20 — botón "Tomar control" / "Devolver a Sasha" del CRM/ERP.
 
 app.post("/api/conversacion/tomar-control", (req, res) => {
@@ -1086,7 +1093,7 @@ app.post("/api/conversacion/tomar-control", (req, res) => {
     const { telefono } = req.body;
     if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
 
-    const tel = "+" + normalizarTelefono(telefono);
+    const tel = idConversacion(telefono);
     const expiraEn = pausarConversacion(tel);
     console.log(`⏸️ /api/conversacion/tomar-control → ${tel}`);
 
@@ -1102,7 +1109,7 @@ app.post("/api/conversacion/liberar-control", (req, res) => {
     const { telefono } = req.body;
     if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
 
-    const tel = "+" + normalizarTelefono(telefono);
+    const tel = idConversacion(telefono);
     reanudarConversacion(tel);
     console.log(`▶️ /api/conversacion/liberar-control → ${tel}`);
 
@@ -1111,6 +1118,16 @@ app.post("/api/conversacion/liberar-control", (req, res) => {
     console.error("❌ /api/conversacion/liberar-control error:", err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+// GET desde el navegador: /api/conversacion/liberar-control?telefono=ig_123
+app.get("/api/conversacion/liberar-control", (req, res) => {
+  const telefono = req.query.telefono;
+  if (!telefono) return res.status(400).json({ ok: false, error: "Falta telefono" });
+  const tel = idConversacion(telefono);
+  reanudarConversacion(tel);
+  console.log(`▶️ GET /api/conversacion/liberar-control → ${tel}`);
+  res.json({ ok: true, telefono: tel, mensaje: "Sasha retoma la conversación." });
 });
 
 // GET para que el CRM pinte el estado sin adivinar. v21: además informa si la
