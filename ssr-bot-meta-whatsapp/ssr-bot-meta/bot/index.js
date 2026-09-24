@@ -2,6 +2,18 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
+ * ── CAMBIOS v25 (24 sept 2026) — CANCELAR / CONSULTAR VISITA DESDE INSTAGRAM ──
+ * BUG 1: un cliente de Instagram agendó (la visita quedó con su WhatsApp) y al
+ *   pedir cancelar, el bot buscó la visita con el id "ig_..." → "no encontré
+ *   una visita asociada a este número de WhatsApp".
+ * FIX: telefonoAgendaCliente() — en Instagram/Messenger se usa el WhatsApp de
+ *   contacto para cancelar y consultar; si no lo tiene, se le pide.
+ * BUG 2: "tengo una visita programada para el lunes 28" entraba al flujo de
+ *   disponibilidad ("lunes 28 no está disponible", ofrecía fechas) y terminaba
+ *   agendando una SEGUNDA visita.
+ * FIX: clienteHablaDeVisitaExistente() — esos mensajes saltan el flujo de
+ *   disponibilidad y Claude responde con la agenda real (consulta v23).
+ *
  * ── CAMBIOS v24 (24 sept 2026) — SASHA EN INSTAGRAM Y MESSENGER ─────────────
  * Sasha atiende también a clientes que escriben por Instagram Direct y
  * Facebook Messenger (ids "ig_..." / "fb_...", misma convención del CRM).
@@ -1323,6 +1335,33 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
 // Solo frases inequívocas de cancelación. Calendar es la fuente de verdad.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// v25 — Teléfono con el que la visita del cliente está en Google Calendar.
+// WhatsApp → su propio número. Instagram/Messenger → el WhatsApp que dio al
+// agendar (whatsapp_contacto); si no lo dio, null.
+function telefonoAgendaCliente(fromE164, session) {
+  if (/^(ig|fb)_/i.test(String(fromE164 || ""))) return session?.whatsapp_contacto || null;
+  return fromE164;
+}
+
+// v25 — El cliente habla de una visita que YA tiene (no pide agendar una).
+// Ej.: "tengo una visita programada para el lunes 28", "mi cita del viernes",
+// "quiero cambiar mi visita". Estos mensajes NO deben entrar al flujo de
+// disponibilidad (antes "lunes 28" se tomaba como pedido de fecha nueva y
+// terminaba agendando una segunda visita).
+function clienteHablaDeVisitaExistente(texto) {
+  const n = String(texto || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+  if (!n) return false;
+  if (/\b(tengo|tenia|tenemos|mi|nuestra)\s+(una\s+)?(visita|cita)\b/.test(n)) return true;
+  if (/\b(visita|cita)\s+(ya\s+)?(programada|agendada|reservada|confirmada)\b/.test(n)) return true;
+  if (/\b(reprogram|reagend|cambiar|mover|posponer|adelantar)\w*\b.*\b(visita|cita)\b/.test(n)) return true;
+  if (/\b(visita|cita)\b.*\b(reprogram|reagend|cambiar|mover|posponer|adelantar)\w*\b/.test(n)) return true;
+  return false;
+}
+
 function clientePideCancelarVisita(texto) {
   const n = String(texto || "")
     .toLowerCase()
@@ -2104,18 +2143,42 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // v21 — CANCELACIÓN AUTOMÁTICA SOLICITADA POR EL CLIENTE
     // Sasha solo confirma "cancelada" después de que Calendar lo confirme.
     // ══════════════════════════════════════════════════════════════════════
+    // v25 — si se le pidió el WhatsApp para cancelar y ahora lo manda, se
+    // retoma la cancelación sin que tenga que repetir "cancelar".
+    const retomaCancelacion =
+      esCanalMeta &&
+      !!session.cancelacion_pendiente &&
+      Date.now() - Number(session.cancelacion_pendiente) < 30 * 60 * 1000 &&
+      !!session.whatsapp_contacto &&
+      /\d{4}[\s-]?\d{4}/.test(normalized || "");
+
     if (
       !esSupervisor &&
       normalized &&
-      clientePideCancelarVisita(normalized)
+      (clientePideCancelarVisita(normalized) || retomaCancelacion)
     ) {
+      if (session.cancelacion_pendiente) update(from, { cancelacion_pendiente: null });
       console.log(
         `🗑️ Cancelación solicitada por cliente ${fromE164}: "${normalized}"`
       );
 
+      // v25 — Instagram/Messenger: la visita está con su WhatsApp, no con el id ig_/fb_.
+      const telefonoAgenda = telefonoAgendaCliente(fromE164, session);
+
+      if (!telefonoAgenda) {
+        const pideNumero =
+          "Con gusto le ayudo a cancelar su visita 😊. ¿Me confirma el número de WhatsApp " +
+          "que usó al agendarla? Así la ubico en nuestra agenda.";
+        await sendText(from, pideNumero);
+        addMsg(from, "assistant", pideNumero);
+        update(from, { cancelacion_pendiente: Date.now() });
+        console.log(`🗑️ v25 — Cancelación desde ${fromE164} sin WhatsApp de contacto: se le pidió el número.`);
+        return;
+      }
+
       try {
         const resultadoCancelacion =
-          await cancelClientVisitByPhone(fromE164);
+          await cancelClientVisitByPhone(telefonoAgenda);
 
         console.log(
           "📅 Resultado cancelación cliente:",
@@ -2200,7 +2263,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         ) {
           await sendText(
             from,
-            "No encontré una visita futura activa asociada a este número de WhatsApp. No eliminé ningún evento de la agenda."
+            esCanalMeta
+              ? `No encontré una visita futura agendada con el WhatsApp ${telefonoAgenda}. No eliminé nada de la agenda. ¿La agendó con otro número? Si me lo indica, la busco.`
+              : "No encontré una visita futura activa asociada a este número de WhatsApp. No eliminé ningún evento de la agenda."
           );
 
           console.warn(
@@ -2368,7 +2433,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // 2. Día/fecha no hábil → regla + fechas reales.
     // 3. Día/fecha hábil concreto → getAvailableSlots() verifica ese día.
     // ══════════════════════════════════════════════════════════════════════
-    const dayMentioned = detectDayOrDate(normalized);
+    // v25 — "tengo una visita para el lunes 28" habla de una visita existente:
+    // no se ofrece disponibilidad; Claude responde con la agenda real (v23).
+    const hablaDeVisitaExistente = !esSupervisor && clienteHablaDeVisitaExistente(normalized);
+    if (hablaDeVisitaExistente) {
+      console.log(`📅 v25 — ${fromE164} habla de una visita existente; se omite el flujo de disponibilidad.`);
+    }
+    const dayMentioned = hablaDeVisitaExistente ? null : detectDayOrDate(normalized);
     let availabilityContext = "";
 
     if (dayMentioned === "GENERICO") {
@@ -2582,7 +2653,10 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // realmente hay en Calendar para este número (o por nombre, si no hay).
     let contextoVisitas = "";
     if (!esSupervisor && normalized && clienteHablaDeSuVisita(normalized)) {
-      const resultadoVisitas = await buscarVisitasDelCliente(fromE164, session.name || "");
+      const resultadoVisitas = await buscarVisitasDelCliente(
+        telefonoAgendaCliente(fromE164, session) || fromE164,
+        session.name || ""
+      );
       console.log(
         `📅 v23 — Consulta de visitas de ${fromE164}: ` +
         (resultadoVisitas.ok
