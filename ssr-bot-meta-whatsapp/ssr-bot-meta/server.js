@@ -6,6 +6,7 @@ const { handleMessage, pausarConversacion, reanudarConversacion, estaEnPausaManu
 const { sendDailyReminders }  = require("./bot/reminders");
 const { enviarConfirmacionesVisitasManana } = require("./bot/confirmaciones");
 const memoria                 = require("./bot/memoria");
+const metaMensajeria          = require("./bot/metaMensajeria");
 
 // ══════════════════════════════════════════════════════════════════════════════
 // v21 (23 sept 2026) — MENSAJES MANUALES DESDE EL CRM/ERP QUE "NO LLEGABAN"
@@ -39,6 +40,17 @@ const memoria                 = require("./bot/memoria");
 //      mensaje NO se entregó (por cualquier motivo), queda en los logs y se
 //      registra en MENSAJES como "⚠️ WhatsApp no entregó…", visible en el
 //      chat del CRM/ERP.
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════════════
+// v22 (24 sept 2026) — SASHA EN INSTAGRAM DIRECT Y FACEBOOK MESSENGER
+// El mismo /webhook recibe body.object "instagram" y "page". Los mensajes de
+// clientes van al mismo buffer y handleMessage que WhatsApp, con id
+// "ig_<IGSID>" / "fb_<PSID>" (convención del CRM). Las respuestas salen por
+// bot/canales.js → bot/metaMensajeria.js. Si alguien del equipo contesta
+// desde la bandeja de Meta Business Suite, Sasha se pausa 60 min con ese
+// cliente. Diagnóstico: GET /api/meta/diagnostico · Suscripción de la
+// página: GET /api/meta/suscribir.
 // ══════════════════════════════════════════════════════════════════════════════
 
 const VENTANA_WHATSAPP_MS = 24 * 60 * 60 * 1000;
@@ -322,7 +334,9 @@ function flushBuffer(from) {
   const mediaIds     = items.map(i => i.mediaId).filter(Boolean);
   const combinedText = texts.join(" ") || null;
   console.log(`📦 Lote de +${from}: ${items.length} msg, ${mediaIds.length} foto(s), texto: "${combinedText || "[ninguno]"}"`);
-  handleMessage("+" + from, combinedText, messageId, mediaIds.length ? mediaIds : null)
+  // v22: Instagram/Messenger llegan como "ig_..."/"fb_..." (sin +).
+  const destino = /^(ig|fb)_/i.test(from) ? from : "+" + from;
+  handleMessage(destino, combinedText, messageId, mediaIds.length ? mediaIds : null)
     .catch(err => console.error("❌ Error procesando lote de", from, ":", err));
 }
 
@@ -362,6 +376,13 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
   try {
     const body = req.body;
+
+    // v22 — Instagram Direct / Facebook Messenger (mismo webhook).
+    if (body?.object === "instagram" || body?.object === "page") {
+      procesarWebhookMeta(body);
+      return;
+    }
+
     if (body?.object !== "whatsapp_business_account") return;
 
     const value = body.entry?.[0]?.changes?.[0]?.value;
@@ -497,6 +518,62 @@ app.post("/webhook", async (req, res) => {
     }
   } catch (err) {
     console.error("❌ Error en POST /webhook:", err);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// v22 — INSTAGRAM DIRECT Y FACEBOOK MESSENGER
+// Los mensajes de clientes entran al mismo buffer y a handleMessage que
+// WhatsApp (con id "ig_..." / "fb_..."). Si alguien del equipo responde
+// desde la bandeja de Meta Business Suite, se pausa a Sasha 60 min con ese
+// cliente, igual que "Tomar control" en el ERP.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function procesarWebhookMeta(body) {
+  const eventos = metaMensajeria.parsearWebhook(body);
+
+  for (const ev of eventos) {
+    if (ev.mid && metaMensajeria.yaProcesado(ev.mid)) continue;
+
+    if (ev.tipo === "mensaje") {
+      console.log(`📨 ${ev.canal === "instagram" ? "Instagram" : "Messenger"} de ${ev.from}: "${String(ev.texto).substring(0, 80)}"`);
+      addToBuffer(ev.from, ev.mid, ev.texto, null);
+      continue;
+    }
+
+    if (ev.tipo === "eco") {
+      metaMensajeria.esEcoHumano(ev).then(esHumano => {
+        if (!esHumano) return;
+        pausarConversacion(ev.cliente);
+        console.log(`⏸️ Respuesta humana desde la bandeja de Meta a ${ev.cliente} — Sasha en pausa 60 min con ese cliente.`);
+        memoria.guardarMensaje({
+          phone: ev.cliente,
+          clientName: null,
+          direction: "out",
+          type: "text",
+          content: ev.texto ? `${ev.texto}` : "[Respuesta enviada desde la bandeja de Meta]",
+          session: null,
+        }).catch(e => console.warn("⚠️ No se pudo guardar respuesta humana de Meta:", e.message));
+      }).catch(() => {});
+    }
+  }
+}
+
+// Estado de la integración (token, permisos, Instagram vinculado, suscripción).
+app.get("/api/meta/diagnostico", async (_req, res) => {
+  try {
+    res.json({ ok: true, ...(await metaMensajeria.diagnostico()) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Suscribe la página a los eventos de mensajería de esta app (una sola vez).
+app.get("/api/meta/suscribir", async (_req, res) => {
+  try {
+    res.json({ ok: true, ...(await metaMensajeria.suscribirPagina()) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -1092,6 +1169,7 @@ app.listen(PORT, () => {
 │  🧾  Cotizador: GET /cotizador                              │
 │  🩺  Health check: GET /health                             │
 │  🎛️  Control manual: POST /api/conversacion/tomar-control  │
+│  📸  Instagram + Messenger: POST /webhook (object ig/page) │
 └────────────────────────────────────────────────────────────┘
   `);
   console.log(`📨 Plantilla de reapertura: ${process.env.WA_PLANTILLA_REAPERTURA ? process.env.WA_PLANTILLA_REAPERTURA : "no configurada (WA_PLANTILLA_REAPERTURA)"}`);
