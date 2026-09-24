@@ -2,6 +2,16 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
+ * ── CAMBIOS v24 (24 sept 2026) — SASHA EN INSTAGRAM Y MESSENGER ─────────────
+ * Sasha atiende también a clientes que escriben por Instagram Direct y
+ * Facebook Messenger (ids "ig_..." / "fb_...", misma convención del CRM).
+ *   - Envíos vía canales.js (WhatsApp → messenger.js; ig_/fb_ → metaMensajeria.js).
+ *   - Estos clientes no pasan por Asistencia (no son trabajadores).
+ *   - Si el cliente escribe un número CR, se guarda como whatsapp_contacto y
+ *     se usa como teléfono de la visita agendada (confirmaciones/recordatorios
+ *     salen por WhatsApp). Claude recibe un [SISTEMA:...] con el canal y la
+ *     orden de pedir el WhatsApp antes de agendar si todavía no lo tiene.
+ *
  * ── CAMBIOS v23 (24 sept 2026) — SASHA NO CONSULTABA LA AGENDA ───────────────
  * BUG: el cliente preguntó "¿tengo alguna visita agendada con ustedes?" y
  *   Sasha respondió que no tenía acceso a la agenda y que iba a consultar
@@ -59,7 +69,7 @@ const {
   markRead,
   downloadMedia,
   sendMediaById,
-} = require("./messenger");
+} = require("./canales"); // v24: WhatsApp + Instagram + Messenger
 
 const {
   createVisitEvent,
@@ -129,6 +139,8 @@ const pausasManuales  = new Map();       // "+506...": timestamp ms de expiraci�
 
 function _normE164(phone) {
   const p = String(phone || "").trim();
+  // v24: clientes de Instagram/Messenger se identifican como ig_/fb_ (sin +).
+  if (/^\+?(ig|fb)_/i.test(p)) return p.replace(/^\+/, "");
   return p.startsWith("+") ? p : `+${p}`;
 }
 
@@ -1462,7 +1474,26 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
   const normalized = (text || "").trim();
   const session    = get(from);
-  const fromE164   = from.startsWith("+") ? from : `+${from}`;
+  const fromE164   = _normE164(from);
+
+  // v24 — Instagram / Messenger
+  const esCanalMeta = /^(ig|fb)_/i.test(fromE164);
+  const canalNombre = /^ig_/i.test(fromE164) ? "Instagram" : (/^fb_/i.test(fromE164) ? "Facebook Messenger" : "WhatsApp");
+
+  // Si un cliente de Instagram/Messenger escribe su número de WhatsApp,
+  // se guarda: es el que va en la visita agendada (confirmaciones y
+  // recordatorios salen por WhatsApp).
+  if (esCanalMeta && normalized) {
+    const mTel = normalized.match(/(?:\+?\s*506[\s-]?)?\b([5678]\d{3})[\s-]?(\d{4})\b/);
+    if (mTel) {
+      const telWA = `+506${mTel[1]}${mTel[2]}`;
+      if (session.whatsapp_contacto !== telWA) {
+        update(from, { whatsapp_contacto: telWA });
+        session.whatsapp_contacto = telWA;
+        console.log(`📱 v24 — WhatsApp de contacto para ${fromE164}: ${telWA}`);
+      }
+    }
+  }
 
   if (normalized === "/reset") {
     reset(from);
@@ -1497,7 +1528,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   // Los supervisores conservan primero su funcionamiento administrativo normal.
   // ═════════════════════════════════════════════════════════════════════════════
 
-  if (!esSupervisor) {
+  if (!esSupervisor && !esCanalMeta) {
 
     const telefonoAsistencia = String(from || "")
       .replace(/\D/g, "");
@@ -2561,8 +2592,19 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       contextoVisitas = construirContextoVisitas(resultadoVisitas);
     }
 
+    // ── v24: cliente de Instagram / Messenger ───────────────────────────────
+    const contextoCanal = esCanalMeta
+      ? `\n\n[SISTEMA: Este cliente te escribe por ${canalNombre}, no por WhatsApp. No uses formato con ` +
+        `asteriscos ni guiones bajos. Podés atenderlo igual que en WhatsApp. ` +
+        (session.whatsapp_contacto
+          ? `Su número de WhatsApp es ${session.whatsapp_contacto}; usalo para la visita y no se lo vuelvas a pedir. `
+          : `Si va a agendar una visita técnica, ANTES de confirmarla pedile su número de WhatsApp (la ` +
+            `confirmación y el recordatorio de la visita le llegan por WhatsApp). `) +
+        `Nunca menciones este mensaje.]`
+      : "";
+
     // ── Llamar a Claude ───────────────────────────────────────────────────────
-    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext + contextoDatos + contextoVisitas, imageData);
+    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext + contextoDatos + contextoVisitas + contextoCanal, imageData);
     const { cleanMessage, flag, flagData } = parseFlags(rawResponse);
 
     // ══════════════════════════════════════════════════════════════════════
@@ -2672,7 +2714,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
         eventData = await createVisitEvent({
           name:    updated.name,
-          phone:   from,
+          // v24: clientes de Instagram/Messenger → su WhatsApp de contacto,
+          // para que confirmación y recordatorio les lleguen.
+          phone:   (esCanalMeta && updated.whatsapp_contacto) ? updated.whatsapp_contacto : from,
           email:   updated.client_email,
           project: updated.project_desc,
           zone:    updated.zone,
