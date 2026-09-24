@@ -2,6 +2,19 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
+ * ── CAMBIOS v23 (24 sept 2026) — SASHA NO CONSULTABA LA AGENDA ───────────────
+ * BUG: el cliente preguntó "¿tengo alguna visita agendada con ustedes?" y
+ *   Sasha respondió que no tenía acceso a la agenda y que iba a consultar
+ *   con el equipo, aunque la visita estaba en Google Calendar.
+ * CAUSA RAÍZ: el bot solo leía Calendar para disponibilidad, agendar y
+ *   cancelar. Cuando el cliente PREGUNTABA por su visita, el mensaje llegaba
+ *   a Claude sin ningún dato de la agenda.
+ * FIX: si el cliente habla de su visita/cita (visitasCliente.js →
+ *   clienteHablaDeSuVisita), se buscan en Calendar sus visitas futuras por
+ *   teléfono (y por nombre como coincidencia posible) y se le inyecta a
+ *   Claude un [SISTEMA:...] con el resultado real, con la instrucción de
+ *   nunca decir que no tiene acceso a la agenda.
+ *
  * ── CAMBIOS v22 (22 sept 2026) — SASHA NO PEDÍA EL NOMBRE DEL CLIENTE ────────
  * BUG REAL (+50662285575): 24 mensajes de conversación, proyecto ya explicado
  *   (cielo raso PVC en toda la casa), y Sasha nunca preguntó el nombre. En el
@@ -67,6 +80,7 @@ const { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImage
 const { esConsultaFinanciera, procesarConsultaFinanciera } = require("./consultas");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 const { manejarRespuestaConfirmacion } = require("./confirmaciones");
+const { buscarVisitasDelCliente, clienteHablaDeSuVisita, construirContextoVisitas } = require("./visitasCliente");
 
 // ── MÓDULO ASISTENCIA SASHA V1 ───────────────────────────────────────────────
 const {
@@ -2531,8 +2545,24 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // ── v22: datos del cliente + recordatorio de nombre (solo clientes) ──────
     const contextoDatos = esSupervisor ? "" : construirContextoDatosCliente(from, session);
 
+    // ── v23: el cliente habla de SU visita → consultar Google Calendar ───────
+    // Antes Sasha no tenía forma de leer la agenda al responder y decía
+    // "no tengo acceso, le consulto al equipo". Ahora se le pasa lo que
+    // realmente hay en Calendar para este número (o por nombre, si no hay).
+    let contextoVisitas = "";
+    if (!esSupervisor && normalized && clienteHablaDeSuVisita(normalized)) {
+      const resultadoVisitas = await buscarVisitasDelCliente(fromE164, session.name || "");
+      console.log(
+        `📅 v23 — Consulta de visitas de ${fromE164}: ` +
+        (resultadoVisitas.ok
+          ? `${resultadoVisitas.porTelefono.length} por teléfono, ${resultadoVisitas.porNombre.length} por nombre`
+          : `ERROR ${resultadoVisitas.error}`)
+      );
+      contextoVisitas = construirContextoVisitas(resultadoVisitas);
+    }
+
     // ── Llamar a Claude ───────────────────────────────────────────────────────
-    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext + contextoDatos, imageData);
+    const rawResponse = await ask(session.history.slice(0, -1), normalized + availabilityContext + contextoDatos + contextoVisitas, imageData);
     const { cleanMessage, flag, flagData } = parseFlags(rawResponse);
 
     // ══════════════════════════════════════════════════════════════════════
