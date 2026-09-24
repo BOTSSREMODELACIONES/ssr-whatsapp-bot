@@ -17,7 +17,9 @@
  * teléfono y se conoce el nombre, busca por nombre como coincidencia
  * POSIBLE (el cliente pudo agendar desde otro número).
  *
- * No escribe nada. Usa las mismas credenciales que reminders.js
+ * v26: además borra una visita por id (eliminarVisitaPorId) para la
+ * reprogramación, y detecta pedidos de reprogramar
+ * (clientePideReprogramarVisita). Usa las mismas credenciales que reminders.js
  * (GOOGLE_SERVICE_ACCOUNT + GOOGLE_CALENDAR_ID).
  * ============================================================
  */
@@ -31,7 +33,7 @@ async function getCalendarClient() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
   const auth = new google.auth.GoogleAuth({
     credentials,
-    scopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+    scopes: ["https://www.googleapis.com/auth/calendar"],
   });
   return google.calendar({ version: "v3", auth });
 }
@@ -83,11 +85,21 @@ function formatearEvento(event) {
     ? d.toLocaleTimeString("es-CR", { timeZone: TZ, hour: "numeric", minute: "2-digit", hour12: true })
     : "";
 
+  const fechaISO = event.start?.dateTime
+    ? d.toLocaleDateString("en-CA", { timeZone: TZ })          // yyyy-mm-dd
+    : String(event.start?.date || "");
+  const horaHHMM = event.start?.dateTime
+    ? d.toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false })
+    : "09:00";
+
   return {
     eventId: event.id,
     inicio: d,
+    fechaISO,
+    horaHHMM,
     fechaTexto: fecha,
     horaTexto: hora,
+    ubicacion: datos.ubicacion,
     nombre: datos.nombre || String(event.summary || "").replace(/^.*Visita SSR\s*[—-]\s*/, "").split("|")[0].trim(),
     telefono: datos.telefono,
     proyecto: datos.proyecto,
@@ -202,8 +214,38 @@ function construirContextoVisitas(resultado) {
   );
 }
 
+// Borra UNA visita por su id de evento (reprogramación: se borra la anterior
+// solo después de crear la nueva). Devuelve { ok, error? }.
+async function eliminarVisitaPorId(eventId) {
+  if (!eventId) return { ok: false, error: "sin eventId" };
+  try {
+    const calendar = await getCalendarClient();
+    await calendar.events.delete({ calendarId: process.env.GOOGLE_CALENDAR_ID, eventId });
+    return { ok: true };
+  } catch (err) {
+    // 410 = ya estaba borrado: para el propósito, cuenta como borrado.
+    if (err && (err.code === 410 || err.status === 410)) return { ok: true };
+    console.error("❌ visitasCliente — no se pudo borrar la visita anterior:", err.message);
+    return { ok: false, error: err.message };
+  }
+}
+
+// El cliente pide mover su visita a otra fecha.
+function clientePideReprogramarVisita(texto) {
+  const n = normalizar(texto);
+  if (!n) return false;
+  if (/\b(reprogram|reagend|pospon|posterg|aplaz)\w*/.test(n)) return true;
+  const objeto = /\b(visita|cita|fecha)\b/;
+  if (/\b(cambi|mover|muev|correr|corra|adelant)\w*/.test(n) && objeto.test(n)) return true;
+  if (/\b(pasar|pasarla|pasemos|pase)\b/.test(n) && /\b(visita|cita)\b/.test(n)) return true;
+  if (/\b(visita|cita)\b/.test(n) && /\b(otro dia|otra fecha|otro horario)\b/.test(n)) return true;
+  return false;
+}
+
 module.exports = {
   buscarVisitasDelCliente,
+  eliminarVisitaPorId,
+  clientePideReprogramarVisita,
   clienteHablaDeSuVisita,
   construirContextoVisitas,
 };
