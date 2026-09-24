@@ -263,7 +263,12 @@ async function manejarRespuestaConfirmacion(from, texto) {
 
   } else {
 
-    const respuesta = `Entendido, gracias por avisar. Alguien de nuestro equipo le va a escribir para reprogramar. 🙏`;
+    // v3 (24 sept 2026): el cliente puede reprogramar solo — Sasha le
+    // muestra las fechas libres si responde "reprogramar" (index.js v26).
+    const respuesta =
+      `Entendido, gracias por avisar 🙏\n\n` +
+      `Si desea, puede reprogramarla ahora mismo: escríbame *reprogramar* y le muestro las fechas disponibles. ` +
+      `Si prefiere, nuestro equipo también le puede escribir para coordinar.`;
     await sendText(from, respuesta);
     registrarEnMemoria(fromE164, visita?.name, respuesta);
 
@@ -273,7 +278,7 @@ async function manejarRespuestaConfirmacion(from, texto) {
       `🕐 ${horaVisita}\n` +
       (zonaVisita ? `📍 ${zonaVisita}\n` : "") +
       `📱 ${fromE164}\n\n` +
-      `Hay que contactarlo para reprogramar.`;
+      `Se le ofreció reprogramar solo (escribiendo "reprogramar"). Si no lo hace, hay que contactarlo.`;
 
     for (const sup of SUPERVISORES_CONFIRMACION) {
       sendText(sup, aviso).catch(() => {});
