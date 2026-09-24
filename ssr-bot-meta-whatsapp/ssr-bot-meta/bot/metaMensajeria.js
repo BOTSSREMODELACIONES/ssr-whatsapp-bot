@@ -23,6 +23,11 @@
  *   index.js envía con canales.js, que manda por acá todo lo dirigido a
  *   "ig_..." / "fb_...".
  *
+ * FIX 24 sept (tarde): el eco de la "respuesta instantánea" de Meta Business
+ *   Suite se tomaba como una persona respondiendo y pausaba a Sasha 60 min
+ *   (respondía el 1er mensaje y se callaba en el 2º). Ahora clasificarEco()
+ *   ignora ecos de automatizaciones (textos conocidos o tarjetas sin texto).
+ *
  * VARIABLES (Railway):
  *   FB_PAGE_ACCESS_TOKEN  token de la página con pages_messaging e
  *                         instagram_manage_messages (ya existe)
@@ -286,6 +291,7 @@ function parsearWebhook(body) {
           canal,
           cliente: prefijo + recipientId,
           texto: msg.text || describirAdjuntos(msg.attachments) || "",
+          textoReal: msg.text ? String(msg.text) : "",
           mid: msg.mid,
           appId: msg.app_id ? String(msg.app_id) : "",
         });
@@ -308,20 +314,38 @@ function parsearWebhook(body) {
   return eventos;
 }
 
+// Textos de las automatizaciones de Meta Business Suite (respuesta
+// instantánea, mensaje de ausencia, preguntas frecuentes). Sus ecos NO son
+// una persona respondiendo y no deben pausar a Sasha.
+const PATRONES_AUTOMATICOS = [
+  /gracias por comunicarse con nosotros/i,
+  /si no le atendemos en 1 minuto/i,
+  /gerencia@ssremodelaciones\.com/i,
+];
+
 /**
- * Decide si un eco lo mandó Sasha o una persona desde la bandeja de Meta.
- * Se espera unos segundos porque el eco puede llegar antes de que la API
- * nos devuelva el message_id del envío.
- * Devuelve Promise<boolean> (true = lo mandó un humano).
+ * Decide si un eco lo mandó Sasha, una automatización de Meta, o una
+ * persona desde la bandeja de Business Suite. Se espera unos segundos
+ * porque el eco puede llegar antes de que la API devuelva el message_id.
+ * Devuelve Promise<{ humano: boolean, motivo: string }>.
  */
-function esEcoHumano(eco) {
+function clasificarEco(eco) {
   return new Promise((resolve) => {
     setTimeout(() => {
-      if (eco.appId && eco.appId === META_APP_ID) return resolve(false);
-      if (eco.mid && midsPropios.has(eco.mid)) return resolve(false);
-      resolve(true);
+      if (eco.appId && eco.appId === META_APP_ID) return resolve({ humano: false, motivo: "enviado por Sasha (app_id)" });
+      if (eco.mid && midsPropios.has(eco.mid)) return resolve({ humano: false, motivo: "enviado por Sasha (mid)" });
+      if (!eco.textoReal) return resolve({ humano: false, motivo: "sin texto (tarjeta/plantilla automática)" });
+      if (PATRONES_AUTOMATICOS.some((re) => re.test(eco.textoReal))) {
+        return resolve({ humano: false, motivo: "respuesta automática de Meta" });
+      }
+      resolve({ humano: true, motivo: "texto escrito desde la bandeja de Meta" });
     }, 5000);
   });
+}
+
+// Compatibilidad: true = lo mandó un humano.
+function esEcoHumano(eco) {
+  return clasificarEco(eco).then((r) => r.humano);
 }
 
 // ── Diagnóstico / configuración ─────────────────────────────────────────────
@@ -397,6 +421,7 @@ module.exports = {
   parsearWebhook,
   yaProcesado,
   esEcoHumano,
+  clasificarEco,
   diagnostico,
   suscribirPagina,
 };
