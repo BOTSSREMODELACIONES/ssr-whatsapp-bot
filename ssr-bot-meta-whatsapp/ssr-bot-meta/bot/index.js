@@ -2,6 +2,18 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
+ * ── CAMBIOS v26 (24 sept 2026) — EL CLIENTE REPROGRAMA SU VISITA (3 CANALES) ──
+ * "Quiero cambiar mi visita", "¿la podemos pasar al viernes?", "reprogramar",
+ * "posponer"… en WhatsApp, Instagram o Messenger:
+ *   1. Se busca su visita en Calendar por teléfono (en IG/FB, su WhatsApp de
+ *      contacto; si no lo tiene, se le pide).
+ *   2. Se le muestran las fechas libres (lista / botones).
+ *   3. Al elegir: se CREA la nueva visita y SOLO si quedó confirmada se BORRA
+ *      la anterior (visitasCliente.eliminarVisitaPorId). Si la nueva falla, la
+ *      anterior sigue intacta. Aviso a Darwin y Melvin con antes → ahora.
+ *   Si en vez de tocar la lista escribe la fecha y la visita sale por el flujo
+ *   normal de [VISITA], igual se borra la anterior (no quedan dos).
+ *
  * ── CAMBIOS v25 (24 sept 2026) — CANCELAR / CONSULTAR VISITA DESDE INSTAGRAM ──
  * BUG 1: un cliente de Instagram agendó (la visita quedó con su WhatsApp) y al
  *   pedir cancelar, el bot buscó la visita con el id "ig_..." → "no encontré
@@ -102,7 +114,13 @@ const { procesarComandoFinanciero, esComandoFinanciero, procesarComprobanteImage
 const { esConsultaFinanciera, procesarConsultaFinanciera } = require("./consultas");
 const { guardarSolicitante, guardarProveedor, PASOS_SOLICITANTE, PASOS_PROVEEDOR } = require("./rrhh");
 const { manejarRespuestaConfirmacion } = require("./confirmaciones");
-const { buscarVisitasDelCliente, clienteHablaDeSuVisita, construirContextoVisitas } = require("./visitasCliente");
+const {
+  buscarVisitasDelCliente,
+  clienteHablaDeSuVisita,
+  construirContextoVisitas,
+  eliminarVisitaPorId,
+  clientePideReprogramarVisita,
+} = require("./visitasCliente");
 
 // ── MÓDULO ASISTENCIA SASHA V1 ───────────────────────────────────────────────
 const {
@@ -1335,6 +1353,137 @@ async function gestionarCalendarioSupervisor(texto, supervisorPhone) {
 // Solo frases inequívocas de cancelación. Calendar es la fuente de verdad.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// v26 — REPROGRAMACIÓN DE VISITA POR EL PROPIO CLIENTE (WhatsApp, IG, Messenger)
+// 1. El cliente pide mover su visita → se busca en Calendar por su teléfono.
+// 2. Se le muestran las fechas libres (lista en WhatsApp, botones en IG/FB).
+// 3. Al elegir: se CREA la visita nueva y, solo si quedó confirmada, se BORRA
+//    la anterior. Si la nueva falla, la anterior sigue intacta.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const REPROGRAMACION_VIGENCIA_MS = 2 * 60 * 60 * 1000; // 2 h para elegir fecha
+const AVISO_REPROGRAMACION = ["+50683091817", "+50671981370"]; // Darwin y Melvin
+
+function reprogramacionActiva(session) {
+  const rp = session && session.reprogramacion;
+  return !!(rp && rp.eventId && Date.now() - Number(rp.ts || 0) < REPROGRAMACION_VIGENCIA_MS);
+}
+
+function horaLegible(hhmm) {
+  const [hh, mm] = String(hhmm || "09:00").split(":");
+  const h = parseInt(hh, 10);
+  const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+  return `${h12}:${mm || "00"} ${h >= 12 ? "p.m." : "a.m."}`;
+}
+
+// Avisa a Darwin y Melvin de una reprogramación hecha por el cliente.
+function avisarReprogramacion({ nombre, telefono, canal, antes, ahora, borradaAnterior }) {
+  const texto = [
+    `🔁 *Visita reprogramada por el cliente*`,
+    ``,
+    `👤 ${nombre || "Cliente"}`,
+    `📱 ${telefono}${canal && canal !== "WhatsApp" ? ` (escribió por ${canal})` : ""}`,
+    `📅 Antes: ${antes}`,
+    `📅 Ahora: ${ahora}`,
+    borradaAnterior
+      ? ``
+      : `\n⚠️ No se pudo borrar automáticamente la visita anterior. Bórrenla a mano en Google Calendar.`,
+  ].filter(l => l !== undefined).join("\n");
+
+  for (const sup of AVISO_REPROGRAMACION) {
+    sendText(sup, texto).catch(e => console.warn(`⚠️ No se pudo avisar reprogramación a ${sup}:`, e.message));
+  }
+}
+
+// Ejecuta la reprogramación hacia fechaISO (visita a las 09:00).
+async function ejecutarReprogramacion(from, fromE164, session, fechaISO, canalNombre) {
+  const rp = session.reprogramacion;
+  const hora = "09:00";
+
+  let ev = null;
+  try {
+    ev = await createVisitEvent({
+      name:    session.name || rp.nombre,
+      phone:   rp.telefono,
+      email:   session.client_email || "",
+      project: session.project_desc || rp.proyecto,
+      zone:    session.zone || rp.zona,
+      day:     fechaISO,
+      hour:    hora,
+      notes: [
+        rp.ubicacion ? `Ubicación / Waze: ${rp.ubicacion}` : "",
+        `Reprogramada por el cliente (antes: ${rp.fechaAnterior}).`,
+      ].filter(Boolean).join("\n"),
+    });
+  } catch (err) {
+    console.error("❌ v26 — Error creando la visita reprogramada:", err.message);
+  }
+
+  if (!ev || ev.success !== true) {
+    const rechazo = ev
+      ? await formatearRechazoDisponibilidad(ev, fechaISO)
+      : "⚠️ Hubo un problema técnico al consultar el calendario.";
+    const msg = [
+      `Disculpe 🙏 no pude mover su visita a esa fecha.`,
+      ``,
+      rechazo.replace(/^⚠️ No se pudo agendar: /, ""),
+      ``,
+      `Su visita del ${rp.fechaAnterior} sigue confirmada. ¿Desea elegir otra fecha?`,
+    ].join("\n");
+    await sendText(from, msg);
+    addMsg(from, "assistant", msg);
+    console.warn(`⛔ v26 — Reprogramación de ${fromE164} a ${fechaISO} rechazada: ${ev?.reason || "error"}`);
+    return false;
+  }
+
+  const borrado = await eliminarVisitaPorId(rp.eventId);
+
+  const nuevaFecha = ev.date instanceof Date
+    ? ev.date.toLocaleDateString("es-CR", { weekday: "long", day: "numeric", month: "long", timeZone: TZ })
+    : fechaISO;
+  const nuevaTexto = `${nuevaFecha} a las ${horaLegible(hora)}`;
+
+  update(from, {
+    reprogramacion:       null,
+    visit_day:            fechaISO,
+    visit_hour:           hora,
+    visit_confirmed:      true,
+    agenda_selected_date: null,
+    slots_shown:          null,
+  });
+
+  const msg = [
+    `✅ ¡Listo! Su visita quedó reprogramada para el *${nuevaTexto}*.`,
+    ``,
+    `La visita anterior (${rp.fechaAnterior}) ya no está en nuestra agenda.`,
+    `La noche anterior le enviaremos la confirmación por WhatsApp 😊`,
+  ].join("\n");
+
+  await sendText(from, msg);
+  addMsg(from, "assistant", msg);
+
+  memoria.guardarMensaje({
+    phone: fromE164,
+    clientName: session.name || rp.nombre || null,
+    direction: "out",
+    type: "text",
+    content: msg,
+    session: get(from),
+  }).catch(() => {});
+
+  avisarReprogramacion({
+    nombre: session.name || rp.nombre,
+    telefono: rp.telefono,
+    canal: canalNombre,
+    antes: rp.fechaAnterior,
+    ahora: nuevaTexto,
+    borradaAnterior: borrado.ok,
+  });
+
+  console.log(`🔁 v26 — Visita de ${fromE164} reprogramada: ${rp.fechaAnterior} → ${nuevaTexto} (anterior borrada: ${borrado.ok})`);
+  return true;
+}
+
 // v25 — Teléfono con el que la visita del cliente está en Google Calendar.
 // WhatsApp → su propio número. Instagram/Messenger → el WhatsApp que dio al
 // agendar (whatsapp_contacto); si no lo dio, null.
@@ -2158,6 +2307,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       (clientePideCancelarVisita(normalized) || retomaCancelacion)
     ) {
       if (session.cancelacion_pendiente) update(from, { cancelacion_pendiente: null });
+      if (session.reprogramacion) update(from, { reprogramacion: null }); // v26
       console.log(
         `🗑️ Cancelación solicitada por cliente ${fromE164}: "${normalized}"`
       );
@@ -2305,6 +2455,99 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     }
 
     // ══════════════════════════════════════════════════════════════════════
+    // v26 — REPROGRAMACIÓN SOLICITADA POR EL CLIENTE (los 3 canales)
+    // ══════════════════════════════════════════════════════════════════════
+    const retomaReprogramacion =
+      esCanalMeta &&
+      !!session.reprogramacion_pide_numero &&
+      Date.now() - Number(session.reprogramacion_pide_numero) < 30 * 60 * 1000 &&
+      !!session.whatsapp_contacto &&
+      /\d{4}[\s-]?\d{4}/.test(normalized || "");
+
+    if (
+      !esSupervisor &&
+      normalized &&
+      !clientePideCancelarVisita(normalized) &&
+      (clientePideReprogramarVisita(normalized) || retomaReprogramacion)
+    ) {
+      if (session.reprogramacion_pide_numero) update(from, { reprogramacion_pide_numero: null });
+
+      console.log(`🔁 v26 — Reprogramación solicitada por ${fromE164}: "${normalized}"`);
+
+      const telefonoAgenda = telefonoAgendaCliente(fromE164, session);
+
+      if (!telefonoAgenda) {
+        const pideNumero =
+          "Con gusto le ayudo a cambiar la fecha de su visita 😊. ¿Me confirma el número de WhatsApp " +
+          "que usó al agendarla? Así la ubico en nuestra agenda.";
+        await sendText(from, pideNumero);
+        addMsg(from, "assistant", pideNumero);
+        update(from, { reprogramacion_pide_numero: Date.now() });
+        return;
+      }
+
+      const resultado = await buscarVisitasDelCliente(telefonoAgenda, "");
+
+      if (!resultado.ok) {
+        const msg = "Disculpe 🙏 en este momento no pude consultar la agenda. ¿Me escribe de nuevo en unos minutos?";
+        await sendText(from, msg);
+        addMsg(from, "assistant", msg);
+        return;
+      }
+
+      if (resultado.porTelefono.length === 0) {
+        const msg = esCanalMeta
+          ? `No encontré una visita agendada con el WhatsApp ${telefonoAgenda}. ¿La agendó con otro número? Si me lo indica, la busco. También puedo agendarle una visita nueva 😊`
+          : "No encontré una visita agendada con este número. ¿Desea que le agendemos una visita nueva? 😊";
+        await sendText(from, msg);
+        addMsg(from, "assistant", msg);
+        return;
+      }
+
+      if (resultado.porTelefono.length > 1) {
+        const msg = "Encontré más de una visita agendada con su número. Para no mover la equivocada, nuestro equipo le escribe enseguida para coordinar el cambio 🙏";
+        await sendText(from, msg);
+        addMsg(from, "assistant", msg);
+        for (const sup of AVISO_REPROGRAMACION) {
+          sendText(sup, `🔁 ${session.name || fromE164} (${telefonoAgenda}) quiere reprogramar, pero tiene ${resultado.porTelefono.length} visitas futuras. Coordinar a mano.`).catch(() => {});
+        }
+        return;
+      }
+
+      const v = resultado.porTelefono[0];
+      const fechaAnterior = `${v.fechaTexto}${v.horaTexto ? " a las " + v.horaTexto : ""}`;
+
+      update(from, {
+        reprogramacion: {
+          eventId:   v.eventId,
+          fechaISO:  v.fechaISO,
+          fechaAnterior,
+          telefono:  telefonoAgenda,
+          nombre:    v.nombre,
+          proyecto:  v.proyecto,
+          zona:      v.zona,
+          ubicacion: v.ubicacion,
+          ts:        Date.now(),
+        },
+        name:         session.name || v.nombre || session.name,
+        project_desc: session.project_desc || v.proyecto || session.project_desc,
+        zone:         session.zone || v.zona || session.zone,
+      });
+
+      const lista = await enviarListaFechasAgenda(from, {
+        daysAhead: 35,
+        maxDates: 10,
+        texto:
+          `Su visita actual es el *${fechaAnterior}*.\n\n` +
+          `¿Para qué fecha desea moverla? Estas son las fechas disponibles:`,
+      });
+
+      addMsg(from, "assistant", `[Se le mostraron fechas para reprogramar su visita del ${fechaAnterior}]`);
+      console.log(`🔁 v26 — Fechas enviadas a ${fromE164} para reprogramar (${lista.ok ? lista.fechas.length + " fechas" : "sin fechas"}).`);
+      return;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
     // v20 — RESPUESTA A LISTA INTERACTIVA DE AGENDA (agenda_fecha_YYYY-MM-DD)
     // El backend extrae la fecha y revalida Calendar; Claude no interviene.
     // ══════════════════════════════════════════════════════════════════════
@@ -2336,6 +2579,12 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
             texto: "Estas son las fechas disponibles actualmente:",
           });
 
+          return;
+        }
+
+        // v26 — si el cliente está reprogramando, se mueve su visita y listo.
+        if (reprogramacionActiva(session)) {
+          await ejecutarReprogramacion(from, fromE164, get(from), fechaAgendaSeleccionada, canalNombre);
           return;
         }
 
@@ -2784,6 +3033,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
       let eventOk = false;
       let eventData = null;
+      let reprogramadaInfo = null; // v26
       try {
 
         eventData = await createVisitEvent({
@@ -2803,6 +3053,18 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
         if (eventData.success === true) {
           eventOk = true;
+
+          // v26 — si el cliente estaba reprogramando y la nueva visita salió por
+          // el flujo normal (escribió la fecha en vez de tocar la lista), se
+          // borra la visita anterior para que no queden dos.
+          const sesionRp = get(from);
+          if (reprogramacionActiva(sesionRp)) {
+            const rp = sesionRp.reprogramacion;
+            const borrado = await eliminarVisitaPorId(rp.eventId);
+            reprogramadaInfo = { antes: rp.fechaAnterior, telefono: rp.telefono, nombre: rp.nombre, borrado: borrado.ok };
+            update(from, { reprogramacion: null });
+            console.log(`🔁 v26 — Visita reprogramada vía flujo normal para ${fromE164} (anterior borrada: ${borrado.ok})`);
+          }
 
           // SOLO ahora la visita se considera confirmada.
           update(from, {
@@ -2872,7 +3134,20 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
         registerVisit({ ...updated, phone: from }).catch(() => {});
         logLead(from, updated, "visita_solicitada");
-        finalClientMessage = `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`;
+        finalClientMessage = reprogramadaInfo
+          ? `✅ ¡Listo! Su visita quedó reprogramada para el *${dateStr} a las ${timeStr}*. La visita anterior (${reprogramadaInfo.antes}) ya no está en nuestra agenda 📅`
+          : `✅ ¡Listo! Su cita quedó agendada para el *${dateStr} a las ${timeStr}*. Le llegará una confirmación por correo 📅`;
+
+        if (reprogramadaInfo) {
+          avisarReprogramacion({
+            nombre: updated.name || reprogramadaInfo.nombre,
+            telefono: reprogramadaInfo.telefono,
+            canal: canalNombre,
+            antes: reprogramadaInfo.antes,
+            ahora: `${dateStr} a las ${timeStr}`,
+            borradaAnterior: reprogramadaInfo.borrado,
+          });
+        }
 
         await notifyAllSupervisors(from, updated, "Visita confirmada automáticamente por Sasha.", "visita_solicitada");
 
