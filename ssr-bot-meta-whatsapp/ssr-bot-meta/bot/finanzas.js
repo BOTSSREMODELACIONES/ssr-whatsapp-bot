@@ -1,5 +1,27 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v12 (28 sept 2026) — PAGO DE PLANILLA → SOLO CAJA_GENERAL ──────
+//
+//        BUG REAL: casi ningún pago de planilla se registraba
+//        ("Encontré más de una posibilidad… PROY 043/2026 / PROY
+//        070/2026"). La causa estaba en Apps Script (motor V13.30
+//        la corrige: el pago ya no pasa por el emparejador de
+//        proyectos; lee el proyecto del trabajador en la planilla
+//        madre esa semana y escribe UNA fila en CAJA_GENERAL).
+//        Cambios de este lado:
+//        1) El prompt ahora marca los pagos de planilla con
+//           "pago_planilla": true y no le pide a la IA que adivine
+//           proyecto (lo decide Apps Script con la planilla madre).
+//        2) La confirmación de WhatsApp muestra lo que Apps Script
+//           realmente registró: trabajador, semana, proyecto y
+//           "Caja general" (antes mostraba "SSR (Mano de obra)").
+//        3) Lista TRABAJADORES al día (Jessy, Mario, Edgard, David,
+//           Eddy, Roberto, Stif, Keny, Enrique): un trabajador que
+//           no está en la lista no se reconoce en "pago a X".
+//        4) getSemanaDelMes() usa semanas lunes-domingo, igual que
+//           la planilla madre (antes Math.ceil(día/7)).
+// ────────────────────────────────────────────────────────────────
+//
 // v11 (14 sept 2026) — FIX CRÍTICO: "OK_CON_ADVERTENCIA" SE
 //        REPORTABA COMO RECHAZADO AUNQUE EL MOVIMIENTO SÍ SE
 //        HABÍA REGISTRADO ────────────────────────────────────
@@ -374,9 +396,17 @@ const TRABAJADORES = [
   { nombre: "Maribel",                 alias: ["maribel"] },
   { nombre: "Victor Guillón",          alias: ["victor", "vic"] },
   { nombre: "Eithan Tames Salazar",    alias: ["eithan"] },
-  { nombre: "Kenny",                   alias: ["kenny"] },
-  { nombre: "Enrique",                 alias: ["enrique"] },
-  { nombre: "Roilan",                  alias: ["roilan"] }
+  { nombre: "Keny",                    alias: ["keny", "kenny"] },
+  { nombre: "Enrique Galvan",          alias: ["enrique"] },
+  { nombre: "Roilan",                  alias: ["roilan"] },
+  // v12 (28 sept 2026) — trabajadores nuevos
+  { nombre: "Jessy Zuñiga",            alias: ["jessy", "jessie", "jessi", "yessi", "yessy"] },
+  { nombre: "Mario Gamez",             alias: ["mario"] },
+  { nombre: "Edgard",                  alias: ["edgard"] },
+  { nombre: "David",                   alias: ["david"] },
+  { nombre: "Eddy",                    alias: ["eddy"] },
+  { nombre: "Roberto",                 alias: ["roberto"] },
+  { nombre: "Stif",                    alias: ["stif"] }
 ];
 
 const KEYWORDS_FINANZAS = [
@@ -465,7 +495,12 @@ const getSemanaDelMes = () => {
     })
   );
 
-  return Math.ceil(cr.getDate() / 7);
+  // v12 — semana lunes-domingo dentro del mes (igual que la planilla
+  // madre): la semana 1 va del día 1 al primer domingo.
+  const primero = new Date(cr.getFullYear(), cr.getMonth(), 1);
+  const dow = primero.getDay() === 0 ? 7 : primero.getDay(); // 1=lun … 7=dom
+  const offset = dow === 7 ? -1 : dow - 1;
+  return Math.max(1, Math.floor((cr.getDate() - 1 + offset) / 7) + 1);
 };
 
 
@@ -2232,9 +2267,15 @@ REGLAS PARA PLANILLA (cuando alguien dice "X trabajó N horas"):
   monto=[vale], categoria="Mano de obra", pestaña_principal="GASTOS_PROYECTO",
   pestanas_adicionales=["CAJA_GENERAL"]
 
-REGLA CRÍTICA #4 — pago de planilla SIN mención de horas trabajadas:
-"pago de planilla a [nombre] por [monto]" sin horas = VALE/ADELANTO (GASTO real con
-monto real, categoria "Mano de obra"). NUNCA tipo="PLANILLA" con monto=0 — el gasto
+REGLA CRÍTICA #4 — PAGO de planilla (sin mención de horas trabajadas):
+"pago de planilla a [nombre] por [monto]", "le pagué la semana a [nombre]", "[monto]
+a [nombre] por concepto de planilla" = PAGO DE PLANILLA:
+- tipo="GASTO", monto real, categoria="Mano de obra", "pago_planilla": true
+- responsable = nombre completo del trabajador, descripcion = "Pago planilla [nombre]"
+- proyecto_codigo = "SSR" (NO adivines proyecto: el sistema lee en qué proyecto está
+  el trabajador esa semana en la planilla y lo registra solo en CAJA_GENERAL)
+NO es pago de planilla un "vale", "adelanto" o "préstamo": esos siguen la REGLA #2
+(sin "pago_planilla"). NUNCA tipo="PLANILLA" con monto=0 para un pago — el gasto
 desaparecería en silencio.
 
 PESTAÑAS VÁLIDAS — SOLO ESTOS NOMBRES:
@@ -2936,6 +2977,33 @@ function formatCRC(n) {
 
 
 // ─── Confirmación WhatsApp ───────────────────────────────────
+// v12 — Confirmación de un PAGO DE PLANILLA con lo que Apps Script
+// realmente registró (trabajador, semana, proyecto de la planilla
+// madre, solo CAJA_GENERAL). null si el movimiento no fue eso.
+function confirmacionPagoPlanilla(resultado, datos, index, total) {
+  const r = resultado?.resultado || resultado || {};
+  const pp = r.pago_planilla;
+  if (!pp || r.clasificacion !== "PAGO_PLANILLA_CAJA") return null;
+
+  const prefijo = total > 1 ? `*${index + 1}/${total}* ` : "";
+  const lineas = [
+    `${prefijo}👷 *Pago de planilla registrado*`,
+    `👤 ${pp.trabajador} — ${pp.semana}`,
+    `💵 *${formatCRC(r.monto_crc || datos.monto)}*`,
+    `🏦 ${r.cuenta || datos.cuenta || "BAC CRC"} · Caja general (descuenta el saldo)`,
+    pp.proyecto && pp.proyecto !== "SSR"
+      ? `🏗️ ${pp.proyecto}${pp.proyectos && pp.proyectos.length > 1 ? ` (también ${pp.proyectos.slice(1).join(", ")})` : ""}`
+      : `🏢 SSR — no aparece en la planilla de esas semanas`
+  ];
+
+  if (pp.origen === "SEMANA_ANTERIOR") {
+    lineas.push(`ℹ️ No tenía fila en la semana del pago; usé su proyecto de ${pp.semana_leida}.`);
+  }
+
+  return lineas.join("\n");
+}
+
+
 function generarConfirmacionItem(
   data,
   index,
@@ -3309,6 +3377,13 @@ async function procesarComandoFinanciero(texto) {
           // ==================================================
 
           confirmaciones.push(
+
+            confirmacionPagoPlanilla(
+              resultado,
+              datos,
+              confirmaciones.length,
+              movimientos.length
+            ) ||
 
             generarConfirmacionItem(
 
@@ -3730,10 +3805,13 @@ async function procesarComprobanteImagen(
 
     return (
 
-      generarConfirmacionItem(
-        datos,
-        0,
-        1
+      (
+        confirmacionPagoPlanilla(resultado, datos, 0, 1) ||
+        generarConfirmacionItem(
+          datos,
+          0,
+          1
+        )
       ) +
 
       "\n\n📸 _Registrado desde comprobante bancario_"
