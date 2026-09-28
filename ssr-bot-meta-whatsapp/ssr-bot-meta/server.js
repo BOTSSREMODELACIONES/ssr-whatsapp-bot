@@ -246,6 +246,17 @@ function procesarEstadosWhatsApp(statuses) {
     const phone   = "+" + String(s.recipient_id || "").replace(/\D/g, "");
     const explic  = explicarErrorEntrega(code);
 
+    // v27 — fallo de entrega a un SUPERVISOR (copias del monitor): se
+    // pausa el monitor para ese número y no se guarda en el CRM.
+    let esSupervisor = false;
+    try {
+      const { SUPERVISORES } = require("./bot/index");
+      esSupervisor = require("./bot/monitorSupervisores").marcarFalloEntrega(phone, code, SUPERVISORES || []);
+    } catch (e) {
+      console.warn("⚠️ monitorSupervisores:", e.message);
+    }
+    if (esSupervisor) continue;
+
     console.error(`❌ WhatsApp NO entregó mensaje a ${phone} — [${code}] ${titulo}${detalle ? " · " + detalle : ""} (id ${s.id})`);
 
     memoria.guardarMensaje({
@@ -715,6 +726,15 @@ app.get("/manifest.json", (_req, res) => {
 app.get("/test-reminders", async (_req, res) => {
   await sendDailyReminders();
   res.json({ ok: true, message: "Recordatorios ejecutados" });
+});
+
+// ── v27: estado del monitor de supervisores ────────────────────────────────────
+app.get("/api/monitor/estado", (_req, res) => {
+  try {
+    res.json({ ok: true, ...require("./bot/monitorSupervisores").estadoMonitor() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // ── Test de confirmaciones de visita ────────────────────────────────────────────
