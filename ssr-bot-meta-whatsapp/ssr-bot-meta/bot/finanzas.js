@@ -15,7 +15,8 @@
 //        2) La confirmación de WhatsApp muestra lo que Apps Script
 //           realmente registró: trabajador, semana, proyecto y
 //           "Caja general" (antes mostraba "SSR (Mano de obra)").
-//        3) Lista TRABAJADORES al día (Jessy, Mario, Edgard, David,
+//        3) Lista TRABAJADORES al día (Jessie Miranda, Jessy Zuñiga —
+//           dos personas distintas—, Mario, Edgard, David,
 //           Eddy, Roberto, Stif, Keny, Enrique): un trabajador que
 //           no está en la lista no se reconoce en "pago a X".
 //        4) getSemanaDelMes() usa semanas lunes-domingo, igual que
@@ -400,7 +401,10 @@ const TRABAJADORES = [
   { nombre: "Enrique Galvan",          alias: ["enrique"] },
   { nombre: "Roilan",                  alias: ["roilan"] },
   // v12 (28 sept 2026) — trabajadores nuevos
-  { nombre: "Jessy Zuñiga",            alias: ["jessy", "jessie", "jessi", "yessi", "yessy"] },
+  // Jessy Zuñiga y Jessie Miranda son personas distintas: "Jessie"
+  // NO debe convertirse en Jessy Zuñiga (28 sept 2026).
+  { nombre: "Jessie Miranda",          alias: ["jessie", "jessi"] },
+  { nombre: "Jessy Zuñiga",            alias: ["jessy", "yessi", "yessy"] },
   { nombre: "Mario Gamez",             alias: ["mario"] },
   { nombre: "Edgard",                  alias: ["edgard"] },
   { nombre: "David",                   alias: ["david"] },
