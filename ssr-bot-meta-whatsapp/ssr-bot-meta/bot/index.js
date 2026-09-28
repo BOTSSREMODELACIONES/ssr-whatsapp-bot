@@ -94,6 +94,7 @@ const {
   downloadMedia,
   sendMediaById,
 } = require("./canales"); // v24: WhatsApp + Instagram + Messenger
+const monitorSup = require("./monitorSupervisores"); // v27: copias a supervisores sin errores repetidos
 
 const {
   createVisitEvent,
@@ -1391,7 +1392,7 @@ function avisarReprogramacion({ nombre, telefono, canal, antes, ahora, borradaAn
   ].filter(l => l !== undefined).join("\n");
 
   for (const sup of AVISO_REPROGRAMACION) {
-    sendText(sup, texto).catch(e => console.warn(`⚠️ No se pudo avisar reprogramación a ${sup}:`, e.message));
+    monitorSup.enviarASupervisor(sup, texto, sendText);
   }
 }
 
@@ -1709,6 +1710,10 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
   const esSupervisor =
     SUPERVISORES.includes(fromE164) ||
     SUPERVISORES.includes(from);
+
+  // v27 — un supervisor que escribe reabre su ventana de 24 h: se
+  // reanudan las copias del monitor que se habían pausado.
+  if (esSupervisor) monitorSup.registrarMensajeDeSupervisor(fromE164 || from);
 
   // ═════════════════════════════════════════════════════════════════════════════
   // SASHA ASISTENCIA V1
@@ -3190,15 +3195,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         : finalClientMessage;
       const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientLabel}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${sashaTexto}`;
       for (const supervisor of SUPERVISORES) {
-        sendText(supervisor, monitorMsg).catch(err => {
-          console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
-        });
+        monitorSup.enviarASupervisor(supervisor, monitorMsg, sendText);
       }
       if (mediaIds) {
         const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
         for (const mediaId of ids) {
           for (const supervisor of SUPERVISORES) {
-            sendMediaById(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientLabel}`).catch(() => {});
+            monitorSup.enviarMediaASupervisor(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientLabel}`, sendMediaById);
           }
         }
       }
@@ -3221,15 +3224,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       : normalized;
     const monitorMsg = `👁️ *Conversación en tiempo real*\n👤 Cliente: ${clientLabel}\n\n💬 *Cliente:* ${clientMsgLabel}\n🤖 *Sasha:* ${cleanMessage}`;
     for (const supervisor of SUPERVISORES) {
-      sendText(supervisor, monitorMsg).catch(err => {
-        console.error(`❌ Monitor [${supervisor}]: ${err.message}`);
-      });
+      monitorSup.enviarASupervisor(supervisor, monitorMsg, sendText);
     }
     if (mediaIds) {
       const ids = Array.isArray(mediaIds) ? mediaIds : [mediaIds];
       for (const mediaId of ids) {
         for (const supervisor of SUPERVISORES) {
-          sendMediaById(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientLabel}`).catch(() => {});
+          monitorSup.enviarMediaASupervisor(supervisor, mediaId, "image", `📷 Foto de cliente: ${clientLabel}`, sendMediaById);
         }
       }
     }
@@ -3334,7 +3335,7 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
     });
     await sendText(from, `✅ *¡Gracias ${data.nombre || ""}!*\n\nSu información quedó registrada en nuestro sistema de Recursos Humanos 📋\n\nCuando tengamos proyectos disponibles, lo contactaremos. ¡Mucho éxito! 🏗️\n\n_Sasha — Bot SS Remodelaciones_`);
     for (const sup of SUPERVISORES) {
-      sendText(sup, `👷 *Nuevo solicitante de trabajo*\n\n📱 ${from}\n👤 ${data.nombre||"—"}\n🪪 Cédula: ${data.cedula||"—"}\n📞 ${data.telefono||"—"}\n📍 ${data.direccion||"—"}\n🔧 ${data.habilidad||"—"}\n📋 ${data.curriculum||"—"}\n\n_Sasha — Bot SSR_`).catch(() => {});
+      monitorSup.enviarASupervisor(sup, `👷 *Nuevo solicitante de trabajo*\n\n📱 ${from}\n👤 ${data.nombre||"—"}\n🪪 Cédula: ${data.cedula||"—"}\n📞 ${data.telefono||"—"}\n📍 ${data.direccion||"—"}\n🔧 ${data.habilidad||"—"}\n📋 ${data.curriculum||"—"}\n\n_Sasha — Bot SSR_`, sendText);
     }
   } else {
     await guardarProveedor({
@@ -3343,7 +3344,7 @@ async function handleRRHHFlow(from, normalized, session, tipo) {
     });
     await sendText(from, `✅ ¡Perfecto! Registramos la información de *${data.empresa||"su empresa"}* en nuestra base de proveedores.\n\nCuando tengamos necesidades en su área, los contactaremos. ¡Gracias! 🏗️`);
     for (const sup of SUPERVISORES) {
-      sendText(sup, `🏭 *Nuevo proveedor registrado*\n\n📱 ${from}\n🏢 ${data.empresa||"—"}\n👤 ${data.contacto||"—"}\n📧 ${data.email||"—"}\n📞 ${data.telefono||"—"}\n🏗️ ${data.sector||"—"}\n\n_Sasha — Bot SSR_`).catch(() => {});
+      monitorSup.enviarASupervisor(sup, `🏭 *Nuevo proveedor registrado*\n\n📱 ${from}\n🏢 ${data.empresa||"—"}\n👤 ${data.contacto||"—"}\n📧 ${data.email||"—"}\n📞 ${data.telefono||"—"}\n🏗️ ${data.sector||"—"}\n\n_Sasha — Bot SSR_`, sendText);
     }
   }
 }
@@ -3441,10 +3442,10 @@ async function notifyAllSupervisors(from, session, lastMsg, tipo) {
     "_Sasha — Bot SSR_",
   ].filter(Boolean).join("\n");
 
-  const resultados = await Promise.allSettled(SUPERVISORES.map(num => sendText(num, lines)));
+  const resultados = await Promise.all(SUPERVISORES.map(num => monitorSup.enviarASupervisor(num, lines, sendText)));
   resultados.forEach((r, i) => {
-    if (r.status === "fulfilled") console.log(`✅ Supervisor [${SUPERVISORES[i]}] notificado [${tipo}]`);
-    else console.error(`❌ Error notificando ${SUPERVISORES[i]}: ${r.reason?.message}`);
+    if (r.enviado) console.log(`✅ Supervisor [${SUPERVISORES[i]}] notificado [${tipo}]`);
+    else console.log(`ℹ️ Supervisor [${SUPERVISORES[i]}] no notificado [${tipo}]: ${r.motivo}`);
   });
 }
 
@@ -3466,4 +3467,5 @@ module.exports = {
   reanudarConversacion,
   estaEnPausaManual,
   msRestantesPausa,
+  SUPERVISORES,   // v27 — server.js lo usa para no guardar en el CRM los fallos de entrega a supervisores
 };
