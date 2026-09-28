@@ -3343,7 +3343,8 @@ async function procesarComandoFinanciero(texto) {
 
         const mensajeAS =
 
-          resultado?.resultado?.mensaje ||
+          [resultado?.resultado?.mensaje, resultado?.resultado?.error]
+            .filter(Boolean).join(" — ") ||
 
           resultado?.error ||
 
@@ -3800,7 +3801,8 @@ async function procesarComprobanteImagen(
 
       const mensajeAS =
 
-        resultado?.resultado?.mensaje ||
+        [resultado?.resultado?.mensaje, resultado?.resultado?.error]
+          .filter(Boolean).join(" — ") ||
 
         resultado?.error ||
 
