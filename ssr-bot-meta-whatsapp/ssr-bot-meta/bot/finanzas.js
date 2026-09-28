@@ -2278,6 +2278,10 @@ a [nombre] por concepto de planilla" = PAGO DE PLANILLA:
 - responsable = nombre completo del trabajador, descripcion = "Pago planilla [nombre]"
 - proyecto_codigo = "SSR" (NO adivines proyecto: el sistema lee en qué proyecto está
   el trabajador esa semana en la planilla y lo registra solo en CAJA_GENERAL)
+Un pago de planilla hecho DESDE LA CUENTA PERSONAL de Darwin se registra igual (resta de
+SSR). Un TRASPASO de SSR a la cuenta personal de Darwin ("pasé 400 mil a mi cuenta",
+TEF a 702483660) se envía como tipo="GASTO" con esa descripción: el sistema lo reconoce y
+NO lo registra como gasto.
 NO es pago de planilla un "vale", "adelanto" o "préstamo": esos siguen la REGLA #2
 (sin "pago_planilla"). NUNCA tipo="PLANILLA" con monto=0 para un pago — el gasto
 desaparecería en silencio.
@@ -2986,6 +2990,11 @@ function formatCRC(n) {
 // madre, solo CAJA_GENERAL). null si el movimiento no fue eso.
 function confirmacionPagoPlanilla(resultado, datos, index, total) {
   const r = resultado?.resultado || resultado || {};
+  if (r.clasificacion === "TRASPASO_CUENTA_PERSONAL") {
+    const prefijoT = total > 1 ? `*${index + 1}/${total}* ` : "";
+    return `${prefijoT}🔁 *Traspaso a tu cuenta personal* (${formatCRC(r.monto_crc || datos.monto)})\n` +
+      `No lo registré como gasto. Los pagos de planilla que hagas desde esa cuenta sí se descuentan de SSR.`;
+  }
   const pp = r.pago_planilla;
   if (!pp || r.clasificacion !== "PAGO_PLANILLA_CAJA") return null;
 
