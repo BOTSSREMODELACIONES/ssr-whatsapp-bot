@@ -94,7 +94,25 @@ const {
   downloadMedia,
   sendMediaById,
 } = require("./canales"); // v24: WhatsApp + Instagram + Messenger
-const monitorSup = require("./monitorSupervisores"); // v27: copias a supervisores sin errores repetidos
+// v27: copias a supervisores sin errores repetidos. Si el archivo
+// monitorSupervisores.js no está en /bot, Sasha NO se cae: usa el envío
+// directo de siempre (antes, un require faltante tumbaba todo el bot).
+let monitorSup;
+try {
+  monitorSup = require("./monitorSupervisores");
+} catch (errMonitor) {
+  console.error("⚠️ Falta bot/monitorSupervisores.js — se usa el envío directo a supervisores:", errMonitor.message);
+  monitorSup = {
+    enviarASupervisor: async (n, t, send) => {
+      try { await send(n, t); return { enviado: true }; }
+      catch (e) { console.error(`❌ Monitor [${n}]: ${e.message}`); return { enviado: false, motivo: e.message }; }
+    },
+    enviarMediaASupervisor: async (n, id, tipo, cap, sendMedia) => { try { await sendMedia(n, id, tipo, cap); } catch (e) {} },
+    registrarMensajeDeSupervisor: () => {},
+    marcarFalloEntrega: () => false,
+    estadoMonitor: () => ({ disponible: false }),
+  };
+}
 
 const {
   createVisitEvent,
