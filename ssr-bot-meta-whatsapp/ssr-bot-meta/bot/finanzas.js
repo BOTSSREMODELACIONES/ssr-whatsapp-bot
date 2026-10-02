@@ -1,5 +1,35 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v12.1 (2 oct 2026) — FIX trabajadorEnContextoPlanilla ──────────
+//
+//        BUG REAL: "Registra este pago de Vale para Roberto,
+//        descuéntalo en Caja General de SSR" se rechazó con
+//        "Encontré más de una posibilidad… PROY 043/2026 / PROY
+//        070/2026" — nada que ver con Roberto.
+//
+//        CAUSA RAÍZ: trabajadorEnContextoPlanilla() buscaba la
+//        PRIMERA palabra clave (vale|planilla|adelanto|...|pago) y
+//        capturaba lo que seguía a la preposición más cercana. En
+//        "pago de vale para roberto", la palabra clave que el regex
+//        encuentra primero es "pago" (no "vale"), y lo que sigue a
+//        su "de" es "vale para" (1-2 palabras) — no "roberto". El
+//        regex nunca llegaba a intentar con "vale para roberto"
+//        porque ya se había quedado con el primer match. Resultado:
+//        no se reconocía a Roberto como trabajador, su nombre no se
+//        quitaba del texto antes de buscar proyecto, y el mensaje
+//        quedaba expuesto al emparejador de proyectos de
+//        detectarProyectoLocal() (aunque el motor de verdad que
+//        decide el proyecto final es Apps Script — ver fix gemelo
+//        en 99_SASHA_WEBHOOK_V13.gs v13.34).
+//
+//        FIX: en vez de quedarse con el primer match de
+//        "palabra_clave ... preposición + nombre", se prueban TODAS
+//        las ocurrencias de "preposición + nombre" en el mensaje
+//        (siempre que exista alguna palabra clave de planilla/vale
+//        en el texto) hasta encontrar una que coincida con algún
+//        TRABAJADOR conocido.
+// ────────────────────────────────────────────────────────────────
+//
 // v12 (28 sept 2026) — PAGO DE PLANILLA → SOLO CAJA_GENERAL ──────
 //
 //        BUG REAL: casi ningún pago de planilla se registraba
@@ -568,19 +598,44 @@ function esContextoPlanilla(texto) {
 }
 
 
-// Trabajador mencionado justo después de
-// vale/planilla/adelanto/pago ... (para|de|a)
+// Trabajador mencionado en un mensaje de planilla/vale/adelanto.
+//
+// v12.1 — FIX: antes se quedaba con la PRIMERA preposición después
+// de la PRIMERA palabra clave encontrada (vale|planilla|adelanto|
+// quincena|salario|sueldo|pago), y si ese primer intento no era un
+// trabajador reconocido, se rendía (null) en vez de seguir probando.
+// En "pago de vale para roberto", la primera palabra clave es
+// "pago", y lo que sigue a su "de" es "vale para" — nunca llegaba a
+// "roberto". Ahora: si el mensaje contiene alguna palabra clave de
+// planilla/vale en cualquier parte, se prueban TODAS las ocurrencias
+// de "preposición + nombre" del texto, en orden, hasta encontrar una
+// que coincida con un TRABAJADOR conocido.
 function trabajadorEnContextoPlanilla(texto) {
 
   const t = norm(texto);
 
-  const m = t.match(
-    /\b(?:vale|planilla|adelanto|quincena|salario|sueldo|pago)\b[^.]{0,40}?\b(?:para|de|a|al)\s+([a-z]+(?:\s+[a-z]+)?)/
-  );
+  if (!/\b(?:vale|planilla|adelanto|quincena|salario|sueldo|pago)\b/.test(t)) {
+    return null;
+  }
 
-  if (!m) return null;
+  // v12.1 — una sola palabra por candidato (no 1-2 palabras): con un
+  // grupo opcional de 2 palabras, "pago de Vale para Roberto" hacía
+  // que el PRIMER match ("de vale para") se tragara "vale para"
+  // completo como si fuera el nombre (dos palabras válidas en
+  // a-z), dejando a "roberto" fuera de cualquier match siguiente
+  // (la "g" global ya había avanzado más allá de "para"). Con una
+  // sola palabra por candidato, cada preposición se evalúa por
+  // separado: "de vale" (no es trabajador) y luego "para roberto"
+  // (sí lo es) se prueban como dos candidatos distintos.
+  const regexCandidatos = /\b(?:para|de|a|al)\s+([a-z]+)/g;
 
-  return detectarTrabajador(m[1]);
+  let match;
+  while ((match = regexCandidatos.exec(t)) !== null) {
+    const candidato = detectarTrabajador(match[1]);
+    if (candidato) return candidato;
+  }
+
+  return null;
 
 }
 
