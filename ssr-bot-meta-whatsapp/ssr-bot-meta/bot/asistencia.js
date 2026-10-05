@@ -63,6 +63,48 @@
  *   la verificación antifraude, sin que eso le impida al trabajador
  *   fichar.
  * ────────────────────────────────────────────────────────────────
+ *
+ * ── CAMBIOS v3 (5 oct 2026) — REDONDEO CERRADO DE HORAS + RESUMEN
+ *    SEMANAL REDISEÑADO EN EL MENSAJE DE SALIDA ───────────────────
+ *
+ * PEDIDO DE DARWIN: el mensaje de salida mostraba los minutos sueltos
+ *   ("5 h 14 min"), lo cual complica pagar en números redondos. Se
+ *   pidió una regla de redondeo "cerrado" — minuto 00-15 → baja a la
+ *   hora exacta, 16-45 → sube a la media hora, 46-59 → sube a la
+ *   hora siguiente — aplicada TANTO al total de hoy como al
+ *   acumulado de la semana, y que el pago se calcule sobre esas
+ *   horas YA redondeadas, no sobre el tiempo exacto en minutos.
+ *   También se pidió agregar una línea de vales tomados en la semana
+ *   y separar claramente el pago por horas del monto final a
+ *   recibir, con un formato más fácil de identificar a simple vista
+ *   ("RESUMEN DE LA SEMANA").
+ *
+ * IMPLEMENTACIÓN:
+ *   - redondearHorasCerrado(): aplica la regla de redondeo descrita
+ *     arriba sobre un número de horas en decimal (ej. 5.233 → 5).
+ *   - formatearHorasCerrado(): da formato legible sin minutos
+ *     ("7 horas", "7 horas y media", "8 horas").
+ *   - formatColonesLocal(): formateador de colones propio de este
+ *     archivo (asistencia.js no importaba ningún helper de moneda
+ *     hasta ahora).
+ *   - mensajeSalidaRegistrada() ya NO usa horasHoyTexto/
+ *     horasSemanaTexto/pagoSemanaTexto (los textos pre-formateados
+ *     que manda Apps Script, con minutos sueltos). En su lugar
+ *     recalcula todo localmente a partir de los valores numéricos
+ *     crudos (resultado.horasHoy, resultado.horasSemana,
+ *     resultado.tarifaHora), que Apps Script ya venía enviando desde
+ *     antes — así el redondeo queda controlado enteramente desde
+ *     este archivo, sin tocar Apps Script.
+ *
+ * PENDIENTE (requiere un cambio en Apps Script, fuera de este
+ *   archivo): la línea de "vales tomados en la semana" necesita que
+ *   el handler de `asistencia_salida` en Apps Script empiece a
+ *   devolver el total de vales de la semana (ej. `valeSemana`). Hasta
+ *   que ese campo llegue, se muestra como ₡0 — el campo ya está
+ *   leído de forma defensiva (resultado.valeSemana ?? 0) para que
+ *   active automáticamente en cuanto Apps Script lo agregue, sin
+ *   que haga falta volver a tocar este archivo.
+ * ────────────────────────────────────────────────────────────────
  */
 
 
@@ -1311,25 +1353,180 @@ function mensajeProyectoAsignado(resultado) {
 }
 
 
+// ============================================================
+// REDONDEO CERRADO DE HORAS (v3 — 5 oct 2026)
+// ============================================================
+//
+// Regla pedida por Darwin, confirmada con sus propios ejemplos:
+//   7h 15min -> 7 horas
+//   7h 32min -> 7.5 horas
+//   7h 51min -> 8 horas
+//
+// Es decir, sobre los minutos de la hora en curso:
+//   0  - 15 min  -> baja a la hora exacta
+//   16 - 45 min  -> sube a la media hora
+//   46 - 59 min  -> sube a la hora siguiente
+//
+// Recibe horas en decimal (ej. 7.2333 = 7h14min) y devuelve un
+// número ya redondeado a .0 o .5 (ej. 7, 7.5, 8).
+// ============================================================
+
+function redondearHorasCerrado(horasDecimales) {
+
+  const horas =
+    Number(horasDecimales);
+
+  if (
+    !isFinite(horas) ||
+    isNaN(horas) ||
+    horas <= 0
+  ) {
+    return 0;
+  }
+
+  const totalMinutos =
+    Math.round(horas * 60);
+
+  const horasEnteras =
+    Math.floor(totalMinutos / 60);
+
+  const minutosSueltos =
+    totalMinutos % 60;
+
+  if (minutosSueltos <= 15) {
+    return horasEnteras;
+  }
+
+  if (minutosSueltos <= 45) {
+    return horasEnteras + 0.5;
+  }
+
+  return horasEnteras + 1;
+}
+
+
+// Da formato legible a un número de horas YA redondeado
+// (sin minutos sueltos): "7 horas", "7 horas y media", "8 horas".
+
+function formatearHorasCerrado(horasRedondeadas) {
+
+  const horas =
+    Number(horasRedondeadas) || 0;
+
+  const horasEnteras =
+    Math.floor(horas);
+
+  const tieneMedia =
+    horas - horasEnteras >= 0.5;
+
+  const plural =
+    horasEnteras === 1
+      ? "hora"
+      : "horas";
+
+  if (horasEnteras === 0 && tieneMedia) {
+    return "media hora";
+  }
+
+  if (tieneMedia) {
+    return `${horasEnteras} ${plural} y media`;
+  }
+
+  return `${horasEnteras} ${plural}`;
+}
+
+
+// formatColonesLocal() — asistencia.js no importaba ningún helper
+// de moneda hasta ahora (finanzas.js tiene el suyo, formatCRC(),
+// pero vive en otro módulo). Formato CR: punto de miles, coma de
+// decimales, sin decimales cuando el monto es un número redondo.
+
+function formatColonesLocal(monto) {
+
+  const valor =
+    Number(monto) || 0;
+
+  const redondeado =
+    Math.round(valor * 100) / 100;
+
+  const partes =
+    redondeado
+      .toFixed(
+        redondeado % 1 === 0 ? 0 : 2
+      )
+      .split(".");
+
+  partes[0] =
+    partes[0].replace(
+      /\B(?=(\d{3})+(?!\d))/g,
+      "."
+    );
+
+  const numeroFormateado =
+    partes.length > 1
+      ? partes.join(",")
+      : partes[0];
+
+  return `₡${numeroFormateado}`;
+}
+
+
 function mensajeSalidaRegistrada(resultado) {
 
-  const horasHoy =
-    resultado.horasHoyTexto ||
-    resultado.resultado?.horasHoyTexto ||
-    "";
+  // ----------------------------------------------------------
+  // v3 (5 oct 2026) — ya no se usan horasHoyTexto/horasSemanaTexto/
+  // pagoSemanaTexto (los textos de Apps Script, con minutos sueltos).
+  // Todo se recalcula acá a partir de los valores numéricos crudos,
+  // aplicando el redondeo cerrado pedido por Darwin — tanto al total
+  // de hoy como al acumulado de la semana — y el pago se calcula
+  // sobre las horas YA redondeadas, no sobre el tiempo exacto.
+  // ----------------------------------------------------------
 
-  const horasSemana =
-    resultado.horasSemanaTexto ||
-    resultado.resultado?.horasSemanaTexto ||
-    "";
+  const horasHoyCrudas =
+    Number(
+      resultado.horasHoy ??
+      resultado.resultado?.horasHoy ??
+      0
+    );
+
+  const horasSemanaCrudas =
+    Number(
+      resultado.horasSemana ??
+      resultado.resultado?.horasSemana ??
+      0
+    );
+
+  const tarifaHora =
+    Number(
+      resultado.tarifaHora ??
+      resultado.resultado?.tarifaHora ??
+      0
+    );
+
+  // PENDIENTE (requiere cambio en Apps Script — ver changelog v3
+  // arriba): hasta que asistencia_salida devuelva valeSemana, esto
+  // se lee de forma defensiva y muestra ₡0.
+  const valeSemana =
+    Number(
+      resultado.valeSemana ??
+      resultado.resultado?.valeSemana ??
+      0
+    );
+
+  const horasHoyRedondeadas =
+    redondearHorasCerrado(horasHoyCrudas);
+
+  const horasSemanaRedondeadas =
+    redondearHorasCerrado(horasSemanaCrudas);
 
   const pagoSemana =
-    resultado.pagoSemanaTexto ||
-    resultado.resultado?.pagoSemanaTexto ||
-    "";
+    horasSemanaRedondeadas * tarifaHora;
+
+  const montoTotalARecibir =
+    pagoSemana - valeSemana;
 
   return (
-    `📤 ASISTENCIA — SALIDA\n\n` +
+    `📤 *ASISTENCIA — SALIDA*\n\n` +
 
     `👷 ${resultado.trabajador || ""}\n` +
     `🏗️ ${resultado.proyecto || ""}\n\n` +
@@ -1337,11 +1534,14 @@ function mensajeSalidaRegistrada(resultado) {
     `🕐 Entrada: ${resultado.entrada || ""}\n` +
     `🕔 Salida: ${resultado.salida || ""}\n\n` +
 
-    `⏱️ Horas laboradas hoy: ${horasHoy}\n` +
-    `📊 Horas acumuladas en la semana: ${horasSemana}\n` +
-    `💰 Pago acumulado de la semana: ${pagoSemana}\n\n` +
+    `⏱️ Horas trabajadas hoy: ${formatearHorasCerrado(horasHoyRedondeadas)}\n\n` +
 
-    `🧾 Monto acumulado antes de vales.\n` +
+    `📋 *RESUMEN DE LA SEMANA*\n` +
+    `⏱️ Horas trabajadas: ${formatearHorasCerrado(horasSemanaRedondeadas)}\n` +
+    `💰 Pago neto: ${formatColonesLocal(pagoSemana)}\n` +
+    `🧾 Vales: ${formatColonesLocal(valeSemana)}\n` +
+    `✅ Monto total a recibir: ${formatColonesLocal(montoTotalARecibir)}\n\n` +
+
     `📸 Fotografía registrada`
   );
 }
@@ -2174,6 +2374,16 @@ module.exports = {
 
   mensajeSalidaRegistrada,
 
-  normalizarTelefono
+  normalizarTelefono,
+
+  // ----------------------------------------------------------
+  // v3 (5 oct 2026) — REDONDEO CERRADO DE HORAS
+  // ----------------------------------------------------------
+
+  redondearHorasCerrado,
+
+  formatearHorasCerrado,
+
+  formatColonesLocal
 
 };
