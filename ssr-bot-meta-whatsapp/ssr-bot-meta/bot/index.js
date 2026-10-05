@@ -2,6 +2,25 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
+ * ── CAMBIOS v27 (6 oct 2026) — COPIA DE SUPERVISIÓN DE SALIDA (DARWIN_PHONE)
+ *    NUNCA REFLEJABA EL REDONDEO CERRADO NI EL RESUMEN DE LA SEMANA ────────
+ * SÍNTOMA: Darwin pidió (y se implementó en asistencia.js) redondeo cerrado
+ *   de horas y un "RESUMEN DE LA SEMANA" con vales en el mensaje de salida.
+ *   Pero la notificación que Darwin recibe como supervisor (a DARWIN_PHONE)
+ *   le seguía llegando igual que siempre: "9 h 45 min", sin vales.
+ * CAUSA RAÍZ: el bloque "SALIDA — REPORTE COMPLETO" (más abajo) tenía su
+ *   PROPIA reconstrucción manual del texto, leyendo los campos viejos
+ *   (horasHoyTexto/horasSemanaTexto/pagoSemanaTexto) en vez de llamar a
+ *   mensajeSalidaRegistrada() de asistencia.js — dos implementaciones del
+ *   mismo mensaje en dos archivos, que se desincronizan apenas se arregla
+ *   solo una.
+ * FIX: ese bloque ahora llama directamente a mensajeSalidaRegistrada()
+ *   (se agrega al import de ./asistencia arriba) — una sola fuente de
+ *   verdad para el texto del reporte de salida, con un encabezado extra
+ *   ("📋 Copia de supervisión") para diferenciarla del mensaje que recibe
+ *   el trabajador.
+ * ────────────────────────────────────────────────────────────────
+ *
  * ── CAMBIOS v26 (24 sept 2026) — EL CLIENTE REPROGRAMA SU VISITA (3 CANALES) ──
  * "Quiero cambiar mi visita", "¿la podemos pasar al viernes?", "reprogramar",
  * "posponer"… en WhatsApp, Instagram o Messenger:
@@ -144,7 +163,11 @@ const {
 // ── MÓDULO ASISTENCIA SASHA V1 ───────────────────────────────────────────────
 const {
   esTrabajadorSSR,
-  procesarAsistencia
+  procesarAsistencia,
+  // v27 (6 oct 2026) — ver nota en el bloque "SALIDA — REPORTE COMPLETO"
+  // más abajo: la copia de supervisión para Darwin ahora reutiliza esta
+  // misma función en vez de reconstruir el mensaje por su cuenta.
+  mensajeSalidaRegistrada
 } = require("./asistencia");
 
 // ── Constantes ────────────────────────────────────────────────────────────────
@@ -1935,64 +1958,36 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
             }
 
             // SALIDA — REPORTE COMPLETO
+            //
+            // ── FIX v27 (6 oct 2026) — LA COPIA DE DARWIN NUNCA REFLEJABA
+            //    EL REDONDEO CERRADO NI EL RESUMEN DE LA SEMANA ───────────
+            // SÍNTOMA: Darwin pidió redondeo cerrado de horas (sin minutos)
+            //   y un RESUMEN DE LA SEMANA con vales en asistencia.js — se
+            //   implementó y se desplegó, pero la notificación que él mismo
+            //   recibe (DARWIN_PHONE) le seguía llegando en el formato
+            //   viejo, con minutos sueltos ("9 h 45 min") y sin vales.
+            //
+            // CAUSA RAÍZ: este bloque NUNCA llamaba a
+            //   mensajeSalidaRegistrada() de asistencia.js — reconstruía su
+            //   propio texto desde cero, leyendo los campos de texto viejos
+            //   (horasHoyTexto/horasSemanaTexto/pagoSemanaTexto, con
+            //   minutos) que mensajeSalidaRegistrada() ya dejó de usar.
+            //   Dos implementaciones del mismo mensaje en dos archivos
+            //   distintos: al arreglar una, la otra queda desactualizada en
+            //   silencio — exactamente lo que pasó acá.
+            //
+            // FIX: se elimina la reconstrucción manual. La copia de Darwin
+            //   ahora es la MISMA función que ya usa el mensaje del
+            //   trabajador (mensajeSalidaRegistrada, import arriba) — una
+            //   sola fuente de verdad para el texto, con una línea extra
+            //   al inicio para distinguir que es la copia de supervisión.
             if (
               tipoAsistencia === "salida_registrada"
             ) {
 
-              const entrada =
-                resultadoAsistencia.entrada ||
-                (
-                  resultadoAsistencia.jornada &&
-                  resultadoAsistencia.jornada.entrada
-                ) ||
-                "";
-
-              const salida =
-                resultadoAsistencia.salida ||
-                resultadoAsistencia.hora ||
-                "";
-
-              const horasHoy =
-                resultadoAsistencia.horasHoyTexto ||
-                resultadoAsistencia.resultado?.horasHoyTexto ||
-                (
-                  resultadoAsistencia.horas !== undefined &&
-                  resultadoAsistencia.horas !== null
-                    ? String(resultadoAsistencia.horas)
-                    : ""
-                );
-
-              const horasSemana =
-                resultadoAsistencia.horasSemanaTexto ||
-                resultadoAsistencia.resultado?.horasSemanaTexto ||
-                "";
-
-              const pagoSemana =
-                resultadoAsistencia.pagoSemanaTexto ||
-                resultadoAsistencia.resultado?.pagoSemanaTexto ||
-                "";
-
               mensajeDarwin =
-                `📋 *REPORTE DE SALIDA — SUPERVISIÓN*\n\n` +
-                `👷 ${trabajador}\n` +
-                `🏗️ ${proyecto}\n\n` +
-                (entrada
-                  ? `🕐 Entrada: ${entrada}\n`
-                  : "") +
-                (salida
-                  ? `🕔 Salida: ${salida}\n\n`
-                  : "\n") +
-                (horasHoy
-                  ? `⏱️ Horas laboradas hoy: ${horasHoy}\n`
-                  : "") +
-                (horasSemana
-                  ? `📊 Horas acumuladas en la semana: ${horasSemana}\n`
-                  : "") +
-                (pagoSemana
-                  ? `💰 Pago acumulado de la semana: ${pagoSemana}\n`
-                  : "") +
-                `\n🧾 Monto acumulado antes de vales.\n` +
-                `📸 Fotografía registrada`;
+                `📋 *Copia de supervisión*\n\n` +
+                mensajeSalidaRegistrada(resultadoAsistencia);
             }
 
             if (mensajeDarwin) {
