@@ -1503,15 +1503,26 @@ function mensajeSalidaRegistrada(resultado) {
       0
     );
 
-  // PENDIENTE (requiere cambio en Apps Script — ver changelog v3
-  // arriba): hasta que asistencia_salida devuelva valeSemana, esto
-  // se lee de forma defensiva y muestra ₡0.
+  // v4 (6 oct 2026) — YA DISPONIBLE: 11_SASHA_ASISTENCIA_V1.gs v1.1
+  // agregó valeSemana a la respuesta de asistencia_salida. Se sigue
+  // leyendo de forma defensiva (?? 0) por si algún día falta.
   const valeSemana =
     Number(
       resultado.valeSemana ??
       resultado.resultado?.valeSemana ??
       0
     );
+
+  // v4 (6 oct 2026) — NUEVO: nota que Darwin escribe a mano sobre el
+  // vale en la columna NOTAS de PLANILLA_<MES> (ej. "Descuento
+  // semanal del INS"). Viene de 11_SASHA_ASISTENCIA_V1.gs v1.2.
+  // Vacía si no hay nota — en ese caso no se agrega ninguna línea.
+  const valeSemanaNota =
+    String(
+      resultado.valeSemanaNota ??
+      resultado.resultado?.valeSemanaNota ??
+      ""
+    ).trim();
 
   const horasHoyRedondeadas =
     redondearHorasCerrado(horasHoyCrudas);
@@ -1524,6 +1535,11 @@ function mensajeSalidaRegistrada(resultado) {
 
   const montoTotalARecibir =
     pagoSemana - valeSemana;
+
+  const lineaNotaVale =
+    valeSemanaNota
+      ? `   📝 _${valeSemanaNota}_\n`
+      : "";
 
   return (
     `📤 *ASISTENCIA — SALIDA*\n\n` +
@@ -1540,6 +1556,7 @@ function mensajeSalidaRegistrada(resultado) {
     `⏱️ Horas trabajadas: ${formatearHorasCerrado(horasSemanaRedondeadas)}\n` +
     `💰 Pago neto: ${formatColonesLocal(pagoSemana)}\n` +
     `🧾 Vales: ${formatColonesLocal(valeSemana)}\n` +
+    lineaNotaVale +
     `✅ Monto total a recibir: ${formatColonesLocal(montoTotalARecibir)}\n\n` +
 
     `📸 Fotografía registrada`
