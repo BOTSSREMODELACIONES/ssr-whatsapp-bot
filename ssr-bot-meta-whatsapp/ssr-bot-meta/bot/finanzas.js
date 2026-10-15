@@ -1,5 +1,22 @@
 // ============================================================
 // finanzas.js — Módulo financiero para Sasha (SS Remodelaciones)
+// v13 (15 oct 2026) — PROYECTOS EN USD ───────────────────────────
+//
+//        El catálogo de proyectos (accion=proyectos) ahora trae la
+//        MONEDA de cada proyecto y la tasa del ERP (tasa_usd).
+//        1) Un INGRESO a un proyecto en USD que no dice "colones" se
+//           registra en USD / BAC USD ("abono de 20.000 de Marriott
+//           029" = $20.000). Apps Script v13.38 aplica la misma regla
+//           como respaldo.
+//        2) TIPO_CAMBIO_USD ya no es fijo: usa la tasa del ERP (la
+//           misma que CAJA_GENERAL). La variable de Railway
+//           TIPO_CAMBIO_USD queda solo como respaldo si el ERP no
+//           responde.
+//        3) La confirmación de WhatsApp muestra lo que Apps Script
+//           realmente registró (moneda/monto) y el saldo del proyecto
+//           en su moneda: "Cobrado $X de $Y · pendiente $Z".
+// ────────────────────────────────────────────────────────────────
+//
 // v12.1 (2 oct 2026) — FIX trabajadorEnContextoPlanilla ──────────
 //
 //        BUG REAL: "Registra este pago de Vale para Roberto,
@@ -182,7 +199,10 @@ const SHEETS_ID = process.env.SHEETS_ID ||
   "1txCpYo8h30i_GW-aa0M59AwsukgRr3rjlKbgRguz9eA";
 
 // Tipo de cambio USD → CRC.
-const TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 530;
+// v13 — `let`: se actualiza con la tasa del ERP en cada refresco del
+// catálogo (refrescarCatalogoProyectos). El valor de Railway es solo
+// el respaldo mientras el ERP no responde.
+let TIPO_CAMBIO_USD = Number(process.env.TIPO_CAMBIO_USD) || 530;
 
 // ⚠️ Códigos VERIFICADOS contra la hoja PROYECTOS (julio 2026).
 // OJO: el proyecto del panel acanalado de Leonardo es PROY SC1/2026
@@ -386,13 +406,57 @@ async function SASHA_FETCH_PROYECTOS_REMOTOS_() {
     throw new Error("Respuesta de catálogo de proyectos vacía o inválida");
   }
 
+  // v13 — tasa única del ERP (la misma que usa CAJA_GENERAL).
+  const tasa = Number(data.tasa_usd);
+  if (Number.isFinite(tasa) && tasa > 100) {
+    if (tasa !== TIPO_CAMBIO_USD) {
+      console.log(`💱 Tipo de cambio actualizado desde el ERP: ₡${tasa}`);
+    }
+    TIPO_CAMBIO_USD = tasa;
+  }
+
   return data.proyectos
     .map(p => ({
       codigo: String(p.codigo || "").trim(),
       nombre: String(p.nombre || "").trim(),
+      moneda: String(p.moneda || "").toUpperCase() === "USD" ? "USD" : "CRC",
       alias: Array.isArray(p.alias) ? p.alias.filter(Boolean) : []
     }))
     .filter(p => p.codigo);
+}
+
+
+// v13 — Clave de proyecto ("PROY 029/2026" → "29/2026"), igual que
+// Apps Script, para buscar la moneda sin depender del formato exacto.
+function claveProyecto(codigo) {
+  const s = String(codigo || "").toUpperCase();
+  let m = s.match(/0*(\d{1,3})\s*[\/\-]\s*(\d{4})/);
+  if (m) return Number(m[1]) + "/" + m[2];
+  if (s.includes("SC1")) {
+    m = s.match(/(\d{4})/);
+    return "SC1/" + (m ? m[1] : "2026");
+  }
+  if (s.includes("CASA-DG") || s.includes("CASA DG")) {
+    m = s.match(/(\d{4})/);
+    return "CASA-DG/" + (m ? m[1] : "2026");
+  }
+  return s.trim();
+}
+
+
+// v13 — Moneda de control del proyecto ("CRC" si no se conoce).
+function monedaDeProyecto(codigo) {
+  const clave = claveProyecto(codigo);
+  if (!clave || clave === "SSR") return "CRC";
+  const p = PROYECTOS.find(x => claveProyecto(x.codigo) === clave);
+  return p && p.moneda === "USD" ? "USD" : "CRC";
+}
+
+
+// v13 — ¿El usuario dijo explícitamente que son colones?
+function mencionaColones(texto) {
+  return /₡/.test(String(texto || "")) ||
+    /\b(colon|colones|crc)\b/.test(norm(texto));
 }
 
 async function refrescarCatalogoProyectos() {
@@ -2126,6 +2190,46 @@ function postProcesarMovimiento(
 
 
   // ==========================================================
+  // 2.7 v13 — PROYECTO EN USD
+  //
+  // Un INGRESO a un proyecto cuyo contrato está en dólares se registra
+  // en USD si el usuario no dijo "colones". Así "abono de 20.000 de
+  // Marriott 029" = $20.000 en BAC USD, sin conversiones a mano.
+  // Comprobantes bancarios (respetarMonedaModelo) no se tocan: ahí
+  // Claude leyó la moneda real del banco.
+  // ==========================================================
+
+  if (
+    out.tipo === "INGRESO" &&
+    out.moneda !== "USD" &&
+    !opciones.respetarMonedaModelo &&
+    monedaDeProyecto(out.proyecto_codigo) === "USD" &&
+    !mencionaColones(textoOriginal)
+  ) {
+
+    const usd = Number(out.monto_original || out.monto) || 0;
+
+    if (usd > 0) {
+
+      out.moneda = "USD";
+      out.monto_original = usd;
+      out.monto = Math.round(usd * TIPO_CAMBIO_USD * 100) / 100;
+      out.tipo_cambio = TIPO_CAMBIO_USD;
+      out.cuenta = cuentaSegunMoneda("USD");
+
+      out.observaciones = [
+        out.observaciones || "",
+        `Proyecto con contrato en USD: registrado como $${usd} USD (TC ₡${TIPO_CAMBIO_USD})`
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+    }
+
+  }
+
+
+  // ==========================================================
   // 3. DESTINO CONTABLE DETERMINÍSTICO
   //
   // Aquí vuelve a entrar la regla:
@@ -2247,7 +2351,7 @@ function postProcesarMovimiento(
 // ─── System prompt para Claude ───────────────────────────────
 const buildSystemPrompt = () => {
   const proyectosCtx = PROYECTOS
-    .map(p => `- ${p.codigo}: ${p.nombre} (alias: ${p.alias.join(", ")})`)
+    .map(p => `- ${p.codigo}: ${p.nombre}${p.moneda === "USD" ? " [CONTRATO EN USD]" : ""} (alias: ${p.alias.join(", ")})`)
     .join("\n");
 
   const trabajadoresCtx = TRABAJADORES
@@ -2275,6 +2379,8 @@ REGLAS DE INTERPRETACIÓN:
 - MONEDA: si el mensaje menciona "usd", "dólares", "dolares" o "$" antes/después del número,
   el monto está en USD. Devolvé "moneda": "USD" y "monto" en USD (NO conviertas).
   Si no se menciona moneda extranjera, asumí colones y "moneda": "CRC".
+- PROYECTOS [CONTRATO EN USD]: un INGRESO a uno de esos proyectos va en USD
+  ("moneda": "USD", monto en dólares) SALVO que el mensaje diga "colones" o "₡".
 - Sin fecha = hoy: ${TODAY()}
 - Detectá proyecto por nombre o alias EN CUALQUIER PARTE del mensaje, incluso con errores
   de tipeo leves. Si no encontrás el proyecto por ningún alias → proyecto_codigo = "SSR".
@@ -3072,6 +3178,32 @@ function confirmacionPagoPlanilla(resultado, datos, index, total) {
 }
 
 
+// v13 — Combina lo que se mandó con lo que Apps Script REALMENTE
+// registró (la moneda puede haber cambiado allá si el proyecto es USD)
+// y agrega el saldo del proyecto en su moneda.
+function fusionarConResultadoAS(datos, resultado) {
+  const r = resultado?.resultado || resultado || {};
+  const out = { ...datos };
+
+  if (r.moneda) out.moneda = r.moneda;
+  if (r.monto_original) out.monto_original = r.monto_original;
+  if (r.monto_crc) out.monto = r.monto_crc;
+  if (r.cuenta) out.cuenta = r.cuenta;
+  if (r.proyecto) out.proyecto_codigo = r.proyecto;
+  if (r.cobro && r.cobro.contrato > 0) out._cobro = r.cobro;
+  if (r.aviso_moneda) out._aviso_moneda = r.aviso_moneda;
+
+  return out;
+}
+
+
+function formatMonedaProyecto(n, moneda) {
+  return moneda === "USD"
+    ? `$${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+    : formatCRC(n);
+}
+
+
 function generarConfirmacionItem(
   data,
   index,
@@ -3234,6 +3366,32 @@ function generarConfirmacionItem(
   lineas.push(
     `📊 ${data.pestaña_principal}`
   );
+
+
+  // v13 — saldo del proyecto en su propia moneda (ingresos).
+  if (data._cobro) {
+
+    const c = data._cobro;
+    const mon = c.moneda || "CRC";
+    const pendiente = Math.max(Number(c.pendiente) || 0, 0);
+
+    lineas.push(
+      `📈 Cobrado ${formatMonedaProyecto(c.pagado, mon)} de ${formatMonedaProyecto(c.contrato, mon)}` +
+      (pendiente > 0
+        ? ` · pendiente *${formatMonedaProyecto(pendiente, mon)}*`
+        : " · ✅ proyecto cobrado")
+    );
+
+  }
+
+
+  if (data._aviso_moneda) {
+
+    lineas.push(
+      `💱 ${data._aviso_moneda}`
+    );
+
+  }
 
 
   if (
@@ -3456,7 +3614,7 @@ async function procesarComandoFinanciero(texto) {
 
             generarConfirmacionItem(
 
-              datos,
+              fusionarConResultadoAS(datos, resultado),
 
               confirmaciones.length,
 
@@ -3878,7 +4036,7 @@ async function procesarComprobanteImagen(
       (
         confirmacionPagoPlanilla(resultado, datos, 0, 1) ||
         generarConfirmacionItem(
-          datos,
+          fusionarConResultadoAS(datos, resultado),
           0,
           1
         )
