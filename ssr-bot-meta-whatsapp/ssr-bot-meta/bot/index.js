@@ -2,6 +2,28 @@
  * index.js — Orquestador principal de mensajes para Sasha
  * SS Remodelaciones
  *
+ * ── CAMBIOS v28 (14 oct 2026) — VISITAS L/M/Mi/V CON 3 HORARIOS ──────────
+ * Darwin reabre las visitas en todos los horarios desde las 9:00 a.m.,
+ * todos los días hábiles menos jueves: lunes, martes, miércoles y viernes,
+ * a las 9:00 a.m., 11:30 a.m. y 2:00 p.m. (fuente única: BUSINESS_DAYS y
+ * VISIT_SLOTS en calendar.js).
+ *   1. La lista "Ver fechas" muestra en cada fila los horarios libres de ese
+ *      día. Al elegir la fecha se revalida Calendar y se envían BOTONES con
+ *      los horarios libres (id agenda_hora_YYYY-MM-DD_HHMM). Al tocar uno se
+ *      revalida ESA hora exacta y se guarda agenda_selected_hour.
+ *   2. Cliente que escribe un día hábil ("el miércoles") → además de la
+ *      respuesta de Sasha, recibe los botones de hora de esa fecha real.
+ *   3. [VISITA:...] usa la hora elegida en botones; si no hay, la hora del
+ *      flag si es un horario válido; si no, 09:00. Antes era siempre 09:00.
+ *   4. Reprogramación (v26) también pasa por los botones de hora.
+ *   5. FIX: fechaSigueDisponibleAgenda() armaba la hora con offset -06:00,
+ *      y verificarDisponibilidadExacta() lee getHours() — en Railway (UTC)
+ *      eso revalidaba las 3:00 p.m. en vez de las 9:00 a.m. Ahora usa la
+ *      misma fecha "hora CR disfrazada de local" que el resto de calendar.js.
+ *   6. "hoy"/"mañana" → el PRÓXIMO día de visita después de hoy (antes, un
+ *      martes "mañana" resolvía al martes de la otra semana).
+ * ────────────────────────────────────────────────────────────────
+ *
  * ── CAMBIOS v27 (6 oct 2026) — COPIA DE SUPERVISIÓN DE SALIDA (DARWIN_PHONE)
  *    NUNCA REFLEJABA EL REDONDEO CERRADO NI EL RESUMEN DE LA SEMANA ────────
  * SÍNTOMA: Darwin pidió (y se implementó en asistencia.js) redondeo cerrado
@@ -142,6 +164,12 @@ const {
   cancelClientVisitByPhone,
   rescheduleEventByNameAndDate,
   listUpcomingEvents,
+  BUSINESS_DAYS,
+  VISIT_SLOTS,
+  normalizarHoraVisita,
+  horaLegibleSlot,
+  diasVisitaTexto,
+  horariosVisitaTexto,
 } = require("./calendar");
 
 const { sendVisitConfirmation }      = require("./email");
@@ -529,8 +557,10 @@ async function handleMsgCliente(cmd, supervisorPhone) {
 const DIAS_SEMANA_ES = ["domingo","lunes","martes","miercoles","jueves","viernes","sabado"];
 const MESES_ES = ["enero","febrero","marzo","abril","mayo","junio","julio","agosto",
                    "septiembre","octubre","noviembre","diciembre"];
-const DIAS_HABILES = ["lunes","martes","viernes"];
-const NOMBRES_DIA_NO_HABIL = ["miercoles","jueves","sabado","domingo"];
+// v28 — derivados de BUSINESS_DAYS (calendar.js): hoy lunes, martes,
+// miércoles y viernes. Jueves, sábado y domingo NO.
+const DIAS_HABILES = DIAS_SEMANA_ES.filter((_, i) => BUSINESS_DAYS.includes(i));
+const NOMBRES_DIA_NO_HABIL = DIAS_SEMANA_ES.filter((_, i) => !BUSINESS_DAYS.includes(i));
 
 // v13/v21 — frases de disponibilidad genérica (sin día ni fecha puntual).
 // Fuerzan una consulta real a Calendar en vez de dejar que Claude invente.
@@ -549,7 +579,7 @@ const PALABRAS_DISPONIBILIDAD_GENERICA = [
 
 function calcularFechaYDiaSemana(dayMentioned) {
   if (!dayMentioned) return null;
-  if (/^(lunes|martes|viernes)$/i.test(dayMentioned)) return null; // nombre de día, no hace falta
+  if (DIAS_HABILES.includes(String(dayMentioned).toLowerCase())) return null; // nombre de día, no hace falta
   if (NOMBRES_DIA_NO_HABIL.includes(dayMentioned)) return null;    // nombre de día no hábil, se maneja aparte
 
   const now = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
@@ -668,16 +698,21 @@ async function enviarListaFechasAgenda(from, {
       item.label ||
       fechaISOaLegibleAgenda(fechaISO);
 
+    const horas = Array.isArray(item.hours) && item.hours.length
+      ? item.hours
+      : [item.hour || VISIT_SLOTS[0]];
+
     return {
       id: `agenda_fecha_${fechaISO}`,
       title: capitalizarAgenda(legible).slice(0, 24),
-      description: "Visita técnica · 9:00 a.m.",
+      // Máx. 72 caracteres en la descripción de una fila de lista.
+      description: `Horarios: ${horas.map(horaLegibleSlot).join(" · ")}`.slice(0, 72),
     };
   });
 
   await sendList(
     from,
-    `${texto}\n\n📅 Seleccione el día que le funciona mejor.\n🕘 Las visitas se realizan a las 9:00 a.m.`,
+    `${texto}\n\n📅 Seleccione el día que le funciona mejor; luego le muestro los horarios libres de ese día.`,
     "Ver fechas",
     [
       {
@@ -704,20 +739,68 @@ function extraerFechaAgendaInteractiva(texto) {
 }
 
 
-// Verifica que una fecha seleccionada siga disponible AHORA MISMO.
+// v28 — Reconoce los botones de hora: agenda_hora_2026-10-19_1130.
+function extraerHoraAgendaInteractiva(texto) {
+  const match = String(texto || "")
+    .trim()
+    .match(/^agenda_hora_(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})$/);
+
+  if (!match) return null;
+  const hora = `${match[2]}:${match[3]}`;
+  return VISIT_SLOTS.includes(hora) ? { fechaISO: match[1], hora } : null;
+}
+
+// v28 — Fecha "hora CR disfrazada de local", igual que getNextAvailableDate()
+// en calendar.js (verificarDisponibilidadExacta lee getHours()/getDate()).
+function fechaHoraAgendaLocal(fechaISO, hhmm) {
+  const [y, mo, d] = String(fechaISO).split("-").map(Number);
+  const [h, mi] = String(hhmm || VISIT_SLOTS[0]).split(":").map(Number);
+  return new Date(y, mo - 1, d, h || 0, mi || 0, 0, 0);
+}
+
+// v28 — Horarios libres de una fecha ISO, verificados en Calendar AHORA.
+// Devuelve [] si la fecha no es de visita, es hoy/pasada o hubo error.
+async function horasLibresAgenda(fechaISO) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fechaISO || ""))) return [];
+  const resultado = await getAvailableSlots(fechaISO);
+  if (resultado?.error) throw new Error(resultado.error);
+  return Array.isArray(resultado?.slots) ? resultado.slots : [];
+}
+
+// v28 — Envía hasta 3 botones con los horarios libres de una fecha.
+async function enviarBotonesHoraAgenda(from, fechaISO, horas, encabezado = "") {
+  const fechaLegible = capitalizarAgenda(fechaISOaLegibleAgenda(fechaISO));
+  const botones = horas.slice(0, 3).map(h => ({
+    id: `agenda_hora_${fechaISO}_${h.replace(":", "")}`,
+    title: horaLegibleSlot(h),
+  }));
+
+  const texto = [
+    encabezado,
+    `📅 *${fechaLegible}*`,
+    horas.length === 1
+      ? `Ese día queda libre el horario de las *${horaLegibleSlot(horas[0])}*. Tóquelo para reservarlo 👇`
+      : `¿Qué horario le funciona mejor? 👇`,
+  ].filter(Boolean).join("\n");
+
+  await sendButtons(from, texto, botones);
+  return { fechaLegible, texto };
+}
+
+// Verifica que una fecha/hora seleccionada siga disponible AHORA MISMO.
 // createVisitEvent() vuelve a validar justo antes de insertar el evento.
-async function fechaSigueDisponibleAgenda(fechaISO) {
+async function fechaSigueDisponibleAgenda(fechaISO, hora = VISIT_SLOTS[0], phone = null) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(fechaISO || ""))) {
     return false;
   }
 
   try {
-    // La visita de clientes siempre es a las 09:00 hora Costa Rica.
-    // Offset explícito para no depender de la zona horaria de Railway.
-    const startDate = new Date(`${fechaISO}T09:00:00-06:00`);
+    // FIX v28: antes `new Date(`${fechaISO}T09:00:00-06:00`)`. En Railway
+    // (UTC) getHours() de esa fecha da 15, así que se revalidaba 3:00 p.m.
+    const startDate = fechaHoraAgendaLocal(fechaISO, hora);
 
     const resultado =
-      await verificarDisponibilidadExacta(startDate);
+      await verificarDisponibilidadExacta(startDate, phone);
 
     return resultado?.disponible === true;
 
@@ -755,7 +838,7 @@ async function formatearRechazoDisponibilidad(eventData, day) {
       "ese horario ya está ocupado",
 
     dia_no_laborable:
-      "esa fecha no cae en un día de visitas (solo trabajamos lunes, martes y viernes)",
+      `esa fecha no cae en un día de visitas (las visitas son ${diasVisitaTexto()})`,
 
     error_calendario:
       "no se pudo consultar el calendario en este momento",
@@ -840,7 +923,11 @@ async function formatearRechazoDisponibilidad(eventData, day) {
           item.label ||
           fechaISOaLegibleAgenda(fechaISO);
 
-        return `${capitalizarAgenda(legible)} a las 9:00 a.m.`;
+        const horas = Array.isArray(item.hours) && item.hours.length
+          ? item.hours
+          : [item.hour || VISIT_SLOTS[0]];
+
+        return `${capitalizarAgenda(legible)}: ${horariosVisitaTexto(horas)}`;
       });
 
       lineas.push(
@@ -1412,10 +1499,7 @@ function reprogramacionActiva(session) {
 }
 
 function horaLegible(hhmm) {
-  const [hh, mm] = String(hhmm || "09:00").split(":");
-  const h = parseInt(hh, 10);
-  const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
-  return `${h12}:${mm || "00"} ${h >= 12 ? "p.m." : "a.m."}`;
+  return horaLegibleSlot(hhmm || VISIT_SLOTS[0]);
 }
 
 // Avisa a Darwin y Melvin de una reprogramación hecha por el cliente.
@@ -1437,10 +1521,10 @@ function avisarReprogramacion({ nombre, telefono, canal, antes, ahora, borradaAn
   }
 }
 
-// Ejecuta la reprogramación hacia fechaISO (visita a las 09:00).
-async function ejecutarReprogramacion(from, fromE164, session, fechaISO, canalNombre) {
+// Ejecuta la reprogramación hacia fechaISO a la hora elegida (v28).
+async function ejecutarReprogramacion(from, fromE164, session, fechaISO, canalNombre, horaElegida = null) {
   const rp = session.reprogramacion;
-  const hora = "09:00";
+  const hora = normalizarHoraVisita(horaElegida) || VISIT_SLOTS[0];
 
   let ev = null;
   try {
@@ -1491,6 +1575,7 @@ async function ejecutarReprogramacion(from, fromE164, session, fechaISO, canalNo
     visit_hour:           hora,
     visit_confirmed:      true,
     agenda_selected_date: null,
+    agenda_selected_hour: null,
     slots_shown:          null,
   });
 
@@ -2569,21 +2654,21 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // v20 — RESPUESTA A LISTA INTERACTIVA DE AGENDA (agenda_fecha_YYYY-MM-DD)
     // El backend extrae la fecha y revalida Calendar; Claude no interviene.
     // ══════════════════════════════════════════════════════════════════════
+    // v28 — PASO 1: el cliente eligió una FECHA → se revalida Calendar y se
+    // le envían botones con los horarios libres de ese día.
     const fechaAgendaSeleccionada = extraerFechaAgendaInteractiva(normalized);
 
     if (fechaAgendaSeleccionada) {
       try {
         console.log(
-          `📅 Agenda interactiva — ${fromE164} seleccionó ${fechaAgendaSeleccionada}. Revalidando Calendar...`
+          `📅 Agenda interactiva — ${fromE164} seleccionó ${fechaAgendaSeleccionada}. Consultando horarios libres...`
         );
 
-        const sigueDisponible = await fechaSigueDisponibleAgenda(
-          fechaAgendaSeleccionada
-        );
+        const horas = await horasLibresAgenda(fechaAgendaSeleccionada);
 
-        if (!sigueDisponible) {
+        if (horas.length === 0) {
           console.warn(
-            `⛔ Agenda interactiva — ${fechaAgendaSeleccionada} ya no está disponible para ${fromE164}.`
+            `⛔ Agenda interactiva — ${fechaAgendaSeleccionada} ya no tiene horarios libres para ${fromE164}.`
           );
 
           await sendText(
@@ -2600,80 +2685,34 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
           return;
         }
 
-        // v26 — si el cliente está reprogramando, se mueve su visita y listo.
-        if (reprogramacionActiva(session)) {
-          await ejecutarReprogramacion(from, fromE164, get(from), fechaAgendaSeleccionada, canalNombre);
-          return;
+        // La fecha ya está verificada; la hora todavía no. Si está
+        // reprogramando, no se toca su visita actual: los botones ya llevan
+        // la fecha y ejecutarReprogramacion() hace el cambio al elegir hora.
+        if (!reprogramacionActiva(session)) {
+          update(from, {
+            agenda_selected_date: fechaAgendaSeleccionada,
+            agenda_selected_hour: null,
+            visit_day:            fechaAgendaSeleccionada,
+            visit_confirmed:      false,
+            slots_shown:          fechaAgendaSeleccionada,
+          });
         }
 
-        const fechaLegible = capitalizarAgenda(
-          fechaISOaLegibleAgenda(fechaAgendaSeleccionada)
+        const { fechaLegible, texto } = await enviarBotonesHoraAgenda(
+          from,
+          fechaAgendaSeleccionada,
+          horas
         );
 
-        update(from, {
-          agenda_selected_date: fechaAgendaSeleccionada,
-          visit_day:            fechaAgendaSeleccionada,
-          visit_hour:           "09:00",
-          visit_confirmed:      false,
-          slots_shown:          fechaAgendaSeleccionada,
-        });
-
-        const seleccionHumana =
-          `El cliente seleccionó la fecha ${fechaLegible} a las 9:00 a.m. de las opciones verificadas por el sistema.`;
-
-        addMsg(from, "user", `[SISTEMA AGENDA: ${seleccionHumana}]`);
-
-        const sesionActual = get(from);
-
-        const datosFaltantes = [];
-
-        if (!sesionActual.name) {
-          datosFaltantes.push("su nombre");
-        }
-
-        if (!sesionActual.project_desc) {
-          datosFaltantes.push("qué trabajo o remodelación necesita");
-        }
-
-        if (!sesionActual.zone) {
-          datosFaltantes.push("la zona donde se realizará el trabajo");
-        }
-
-        if (!sesionActual.waze_link) {
-          datosFaltantes.push("la ubicación o enlace de Waze");
-        }
-
-        if (!sesionActual.client_email) {
-          datosFaltantes.push("su correo electrónico");
-        }
-
-        const siguientePregunta = datosFaltantes.length > 0
-          ? `Para completar la visita todavía necesito ${datosFaltantes.join(", ")}.`
-          : "Ya tengo los datos necesarios para completar la solicitud de visita.";
-
-        const mensajeSeleccion = [
-          `📅 Perfecto. Seleccionó *${fechaLegible} a las 9:00 a.m.*`,
-          ``,
-          `La fecha está disponible en este momento.`,
-          siguientePregunta,
-        ].join("\n");
-
-        await sendText(from, mensajeSeleccion);
-        addMsg(from, "assistant", mensajeSeleccion);
-
-        if (!esSupervisor) {
-          memoria.guardarMensaje({
-            phone:      fromE164,
-            clientName: session.name || null,
-            direction:  "out",
-            type:       "text",
-            content:    mensajeSeleccion,
-            session:    get(from),
-          }).catch(() => {});
-        }
+        addMsg(
+          from,
+          "user",
+          `[SISTEMA AGENDA: El cliente seleccionó la fecha ${fechaLegible}. Horarios libres verificados: ${horariosVisitaTexto(horas)}. Se le enviaron botones para elegir la hora.]`
+        );
+        addMsg(from, "assistant", texto);
 
         console.log(
-          `✅ Agenda interactiva — ${fechaAgendaSeleccionada} sigue disponible. Selección guardada para ${fromE164}.`
+          `✅ Agenda interactiva — ${fechaAgendaSeleccionada}: horarios ${horas.join(", ")} enviados a ${fromE164}.`
         );
 
         return;
@@ -2694,6 +2733,129 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
       }
     }
 
+    // v28 — PASO 2: el cliente tocó un botón de HORA → se revalida esa hora
+    // exacta y se guarda. La visita se crea igual que antes, con [VISITA:...]
+    // cuando ya están todos los datos (o de una vez si está reprogramando).
+    const horaAgendaSeleccionada = extraerHoraAgendaInteractiva(normalized);
+
+    if (horaAgendaSeleccionada) {
+      const { fechaISO, hora } = horaAgendaSeleccionada;
+
+      try {
+        console.log(
+          `🕐 Agenda interactiva — ${fromE164} eligió ${fechaISO} ${hora}. Revalidando Calendar...`
+        );
+
+        const telefonoPropio = reprogramacionActiva(session)
+          ? session.reprogramacion.telefono
+          : telefonoAgendaCliente(fromE164, session);
+
+        const sigueDisponible = await fechaSigueDisponibleAgenda(fechaISO, hora, telefonoPropio);
+
+        if (!sigueDisponible) {
+          console.warn(`⛔ Agenda interactiva — ${fechaISO} ${hora} ya no está libre para ${fromE164}.`);
+
+          const horasRestantes = await horasLibresAgenda(fechaISO).catch(() => []);
+
+          if (horasRestantes.length > 0) {
+            await enviarBotonesHoraAgenda(
+              from,
+              fechaISO,
+              horasRestantes,
+              `Disculpe 🙏 las ${horaLegibleSlot(hora)} acaba de ocuparse.`
+            );
+          } else {
+            await sendText(
+              from,
+              "Disculpe 🙏 Ese día acaba de llenarse. Le muestro las fechas que siguen libres:"
+            );
+            await enviarListaFechasAgenda(from, {
+              daysAhead: 35,
+              maxDates: 10,
+              texto: "Estas son las fechas disponibles actualmente:",
+            });
+          }
+
+          return;
+        }
+
+        // v26 + v28 — si está reprogramando, se mueve su visita a esa fecha/hora.
+        if (reprogramacionActiva(session)) {
+          await ejecutarReprogramacion(from, fromE164, get(from), fechaISO, canalNombre, hora);
+          return;
+        }
+
+        const fechaLegible = capitalizarAgenda(fechaISOaLegibleAgenda(fechaISO));
+        const horaTexto    = horaLegibleSlot(hora);
+
+        update(from, {
+          agenda_selected_date: fechaISO,
+          agenda_selected_hour: hora,
+          visit_day:            fechaISO,
+          visit_hour:           hora,
+          visit_confirmed:      false,
+          slots_shown:          fechaISO,
+        });
+
+        addMsg(
+          from,
+          "user",
+          `[SISTEMA AGENDA: El cliente seleccionó ${fechaLegible} a las ${horaTexto} de las opciones verificadas por el sistema.]`
+        );
+
+        const sesionActual = get(from);
+        const datosFaltantes = [];
+
+        if (!sesionActual.name)         datosFaltantes.push("su nombre");
+        if (!sesionActual.project_desc) datosFaltantes.push("qué trabajo o remodelación necesita");
+        if (!sesionActual.zone)         datosFaltantes.push("la zona donde se realizará el trabajo");
+        if (!sesionActual.waze_link)    datosFaltantes.push("la ubicación o enlace de Waze");
+        if (!sesionActual.client_email) datosFaltantes.push("su correo electrónico");
+
+        const siguientePregunta = datosFaltantes.length > 0
+          ? `Para completar la visita todavía necesito ${datosFaltantes.join(", ")}.`
+          : "Ya tengo los datos necesarios para completar la solicitud de visita.";
+
+        const mensajeSeleccion = [
+          `📅 Perfecto. Seleccionó *${fechaLegible} a las ${horaTexto}*`,
+          ``,
+          `Ese horario está disponible en este momento.`,
+          siguientePregunta,
+        ].join("\n");
+
+        await sendText(from, mensajeSeleccion);
+        addMsg(from, "assistant", mensajeSeleccion);
+
+        if (!esSupervisor) {
+          memoria.guardarMensaje({
+            phone:      fromE164,
+            clientName: session.name || null,
+            direction:  "out",
+            type:       "text",
+            content:    mensajeSeleccion,
+            session:    get(from),
+          }).catch(() => {});
+        }
+
+        console.log(`✅ Agenda interactiva — ${fechaISO} ${hora} guardado para ${fromE164}.`);
+        return;
+
+      } catch (err) {
+        console.error(
+          "❌ Error procesando selección de hora:",
+          err.message,
+          err.stack
+        );
+
+        await sendText(
+          from,
+          "Disculpe, tuve un problema al verificar ese horario en la agenda 🙏. Por favor inténtelo nuevamente."
+        );
+
+        return;
+      }
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // v20 — DISPONIBILIDAD REAL DE VISITAS (Google Calendar = fuente de verdad)
     // 1. Pregunta genérica → lista interactiva con fechas reales.
@@ -2708,6 +2870,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     }
     const dayMentioned = hablaDeVisitaExistente ? null : detectDayOrDate(normalized);
     let availabilityContext = "";
+    // v28 — si el cliente escribió un día hábil con horarios libres, después
+    // de la respuesta de Sasha se le mandan los botones de hora de esa fecha.
+    let botonesHoraPendientes = null;
 
     if (dayMentioned === "GENERICO") {
 
@@ -2772,7 +2937,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
             daysAhead: 35,
             maxDates: 10,
             texto:
-              `${detalleFecha} Las visitas se realizan lunes, martes y viernes. ` +
+              `${detalleFecha} Las visitas se realizan ${diasVisitaTexto()}. ` +
               `Estas son las próximas fechas realmente disponibles:`,
           });
 
@@ -2792,7 +2957,7 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
           availabilityContext =
             `\n\n[SISTEMA: El cliente pidió "${dayMentioned}", pero esa fecha/día ` +
-            `no corresponde a los días de visita (lunes, martes y viernes). ` +
+            `no corresponde a los días de visita (${diasVisitaTexto()}). ` +
             `Además ocurrió un error al consultar las alternativas reales en ` +
             `Google Calendar. NO inventes ninguna fecha. Explica únicamente la ` +
             `regla de días de visita e indica que la agenda no pudo consultarse ` +
@@ -2880,10 +3045,51 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
                 `la fecha exacta devuelta por Calendar: ${dateLabel}.`
               : "";
 
+            // v28 — si el cliente ya dijo una hora válida y libre, no hace
+            // falta mandarle botones; si no, se le mandan tras la respuesta.
+            const horaEnMensaje = extraerHoraDeTexto(normalized);
+            const horaYaElegida = horaEnMensaje && slots.includes(horaEnMensaje) ? horaEnMensaje : null;
+
+            // Solo se fija la fecha (y se mandan botones) si el cliente está
+            // eligiendo de verdad: visita aún no confirmada, no está
+            // reprogramando, y no es un "mañana"/"hoy" suelto que pisaría una
+            // fecha que ya eligió con los botones ("listo, nos vemos mañana").
+            const mencionaDiaExplicito =
+              /\b(lunes|martes|miercoles|jueves|viernes|sabado|domingo)\b|\d{1,2}\s+de\s+[a-z]+|\b\d{1,2}\/\d{1,2}\b/
+                .test(nHoyManana);
+            const yaTieneSeleccion =
+              /^\d{4}-\d{2}-\d{2}$/.test(String(session.agenda_selected_date || ""));
+            const fijarSeleccion =
+              session.visit_confirmed !== true &&
+              !reprogramacionActiva(session) &&
+              (mencionaDiaExplicito || !yaTieneSeleccion) &&
+              !(yaTieneSeleccion &&
+                session.agenda_selected_date === resultado?.fechaISO &&
+                session.agenda_selected_hour);
+
+            if (resultado?.fechaISO && fijarSeleccion) {
+              update(from, {
+                agenda_selected_date: resultado.fechaISO,
+                agenda_selected_hour: horaYaElegida,
+                ...(horaYaElegida ? { visit_hour: horaYaElegida } : {}),
+              });
+              if (!horaYaElegida && !esSupervisor) {
+                botonesHoraPendientes = { fechaISO: resultado.fechaISO, horas: slots };
+              }
+            }
+
             availabilityContext =
               `\n\n[SISTEMA: Google Calendar acaba de verificar la disponibilidad. ` +
               `La fecha real disponible es *${dateLabel}*. ` +
-              `Horario disponible: ${slotsText}. ` +
+              `Horarios libres ese día: ${slotsText}. ` +
+              (horaYaElegida
+                ? `El cliente ya eligió las ${horaLegibleSlot(horaYaElegida)}, que está libre. `
+                : botonesHoraPendientes
+                  ? `El sistema le enviará al cliente, justo después de tu mensaje, botones ` +
+                    `con esos horarios para que elija uno: NO los enumeres como lista, solo ` +
+                    `decile que elija el horario que le sirva en las opciones. `
+                  : `Si el cliente quiere agendar ese día, preguntale cuál de esos horarios ` +
+                    `prefiere y usá esa hora (formato HH:MM) en el flag [VISITA:...]. `) +
               `Esta información viene del backend y es la única fuente de verdad. ` +
               `NO calcules otra fecha, NO cambies el día y NO inventes horarios. ` +
               `Si el cliente quiere esa fecha, continúa recopilando los datos que ` +
@@ -2958,7 +3164,9 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
 
       // v20 — si el cliente eligió una fecha en la agenda interactiva (ISO
       // verificado por backend) y la visita aún no está confirmada, esa
-      // fecha manda sobre la que proponga Claude. Hora siempre 09:00.
+      // fecha manda sobre la que proponga Claude.
+      // v28 — hora: la del botón (agenda_selected_hour) > la del flag si es un
+      // horario válido > la ya guardada en sesión > 09:00.
       const fechaAgendaBackend =
         String(session.agenda_selected_date || "").trim();
 
@@ -2984,7 +3192,22 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
         session.visit_day ||
         "a coordinar";
 
-      const horaFinal = "09:00";
+      const horaBackend =
+        session.visit_confirmed !== true
+          ? normalizarHoraVisita(session.agenda_selected_hour)
+          : null;
+
+      const horaFinal =
+        horaBackend ||
+        normalizarHoraVisita(hour) ||
+        normalizarHoraVisita(session.visit_hour) ||
+        VISIT_SLOTS[0];
+
+      if (horaBackend && hour?.trim() && normalizarHoraVisita(hour) !== horaBackend) {
+        console.warn(
+          `🛡️ VISITA — Claude propuso la hora "${hour.trim()}", pero el cliente eligió "${horaBackend}". Se conserva la hora elegida.`
+        );
+      }
 
       // ── v17 — Guarda de idempotencia con fecha/hora definitivas ─────────
       const diaNuevoNorm  = String(diaFinal).trim().toLowerCase();
@@ -3089,11 +3312,13 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
             visit_confirmed: true,
             lead_saved: true,
             agenda_selected_date: null,
+            agenda_selected_hour: null,
           });
 
           updated.visit_confirmed = true;
           updated.lead_saved = true;
           updated.agenda_selected_date = null;
+          updated.agenda_selected_hour = null;
 
           const nombreDetectado = updated.name || campoLeadValido(name);
 
@@ -3225,6 +3450,20 @@ async function handleMessage(from, text, messageId, mediaIds = null) {
     // ── Flujo genérico (todo lo que NO es VISITA) ─────────────────────────────
     await sendText(from, cleanMessage);
     addMsg(from, "assistant", cleanMessage);
+
+    // v28 — botones de hora para el día que el cliente escribió.
+    if (botonesHoraPendientes && flag !== "ESCALAR") {
+      try {
+        const { texto } = await enviarBotonesHoraAgenda(
+          from,
+          botonesHoraPendientes.fechaISO,
+          botonesHoraPendientes.horas
+        );
+        addMsg(from, "assistant", texto);
+      } catch (errBotones) {
+        console.error("❌ v28 — No se pudieron enviar los botones de hora:", errBotones.message);
+      }
+    }
 
     if (!esSupervisor) {
       memoria.guardarMensaje({ phone: fromE164, clientName: session.name || null, direction: "out", type: "text", content: cleanMessage, session }).catch(() => {});
@@ -3401,19 +3640,40 @@ function detectDayOrDate(text) {
   return null;
 }
 
-// v12 — traduce "hoy"/"mañana" al día hábil de visitas más cercano.
+// v12/v28 — traduce "hoy"/"mañana" al PRÓXIMO día de visitas después de hoy
+// (nunca hoy). Antes devolvía el nombre de HOY si era hábil, y
+// getNextAvailableDate lo mandaba a la semana siguiente: un martes "mañana"
+// terminaba en el martes de la otra semana en vez del miércoles.
 function nearestBusinessDayName() {
-  const DIAS = { 1: "lunes", 2: "martes", 5: "viernes" };
   const now  = new Date(new Date().toLocaleString("en-US", { timeZone: TZ }));
   const hoy  = now.getDay();
 
-  if (DIAS[hoy]) return DIAS[hoy];
-
   for (let i = 1; i <= 7; i++) {
     const d = (hoy + i) % 7;
-    if (DIAS[d]) return DIAS[d];
+    if (BUSINESS_DAYS.includes(d)) return DIAS_SEMANA_ES[d];
   }
   return "lunes";
+}
+
+// v28 — Hora de visita escrita por el cliente ("a las 2", "11:30", "9 am").
+// Devuelve un slot de VISIT_SLOTS o null. Solo se mira lo que sigue a
+// "a las"/"tipo"/"como a las" o un formato hh:mm / h am|pm, para no
+// confundir números de fechas ("el 19") con horas.
+function extraerHoraDeTexto(texto) {
+  const n = String(texto || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const patrones = [
+    /\b(?:a\s+las|tipo|como\s+a\s+las|despues\s+de\s+las)\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)/,
+    /\b(\d{1,2}:\d{2}\s*(?:a\.?\s*m\.?|p\.?\s*m\.?)?)/,
+    /\b(\d{1,2}\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))/,
+  ];
+  for (const re of patrones) {
+    const m = n.match(re);
+    if (m) {
+      const hora = normalizarHoraVisita(m[1].replace(/\s+/g, ""));
+      if (hora) return hora;
+    }
+  }
+  return null;
 }
 
 function parseFlags(response) {
