@@ -1,5 +1,27 @@
 const { google } = require("googleapis");
 
+// ── v22 (14 octubre 2026) — VISITAS: LUNES, MARTES, MIÉRCOLES Y VIERNES ─────
+//    con 3 horarios por día: 9:00 a.m., 11:30 a.m. y 2:00 p.m. ──────────────
+// A petición de Darwin se reabren las visitas en todos los horarios a partir
+// de las 9:00 a.m., todos los días hábiles excepto jueves. Esto revierte el
+// "horario único" de v15 y agrega el miércoles.
+//
+// FUENTE ÚNICA DE VERDAD: BUSINESS_DAYS y VISIT_SLOTS (abajo) se exportan y
+// index.js los usa para construir la lista, los botones de hora y los textos.
+// Para volver a cambiar días u horarios en el futuro, se cambian SOLO estas
+// dos constantes (y el texto del prompt en claude.js).
+//
+// Otros cambios de esta versión:
+//   • getAvailableSlots() nunca devuelve slots para HOY ni para una fecha
+//     pasada (antes "14 de octubre" pedido el 14 antes de las 9:00 podía
+//     ofrecer el mismo día).
+//   • getAvailableVisitDates() devuelve, por fecha, la lista `hours` con los
+//     horarios realmente libres. Una fecha aparece si tiene AL MENOS uno.
+//   • Se mantiene el colchón de 30 min antes/después de cada evento y la
+//     duración de 1 h por visita. Con 9:00 / 11:30 / 14:00 dos visitas
+//     consecutivas NO se bloquean entre sí (quedan 1 h 30 de traslado).
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ── v15 — HORARIO ÚNICO: 9:00 a.m. (lunes, martes, viernes) ──────────────────
 // A petición de Darwin: Sasha ya no debe ofrecer múltiples horarios por día
 // (antes: 09:00, 11:30, 14:00). A partir de ahora el ÚNICO horario que se
@@ -132,10 +154,82 @@ const { google } = require("googleapis");
 // aunque eso vuelva a pasar, el sistema nunca le diga a un cliente que su
 // propia cita recién confirmada "ya no está disponible".
 // ─────────────────────────────────────────────────────────────────────────────
-const BUSINESS_DAYS = [1, 2, 5]; // 1=lunes, 2=martes, 5=viernes (0=domingo)
+// v22 — días de visita: lunes, martes, miércoles y viernes (jueves NO).
+const BUSINESS_DAYS = [1, 2, 3, 5]; // 0=domingo, 1=lunes, 2=martes, 3=miércoles, 5=viernes
+
+// v22 — horarios de visita para clientes (hora CR, visita de 1 h).
+const VISIT_SLOTS = ["09:00", "11:30", "14:00"];
+const VISIT_DURATION_MIN = 60;
+const VISIT_BUFFER_MIN   = 30;
 
 function esDiaLaborable(date) {
   return BUSINESS_DAYS.includes(date.getDay());
+}
+
+function hhmmAMinutos(hhmm) {
+  const [h, m] = String(hhmm || "").split(":").map(n => parseInt(n, 10));
+  return (isNaN(h) ? 0 : h) * 60 + (isNaN(m) ? 0 : m);
+}
+
+// "11:30" → "11:30 a.m.", "14:00" → "2:00 p.m."
+function horaLegibleSlot(hhmm) {
+  const [hh, mm] = String(hhmm || "09:00").split(":");
+  const h = parseInt(hh, 10);
+  const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
+  return `${h12}:${mm || "00"} ${h >= 12 ? "p.m." : "a.m."}`;
+}
+
+// Normaliza lo que venga ("2pm", "14", "2:00 p.m.", "11.30", "9") a uno de
+// VISIT_SLOTS. Devuelve null si no corresponde exactamente a un slot válido.
+// Las horas 1–6 sin am/pm se interpretan como p.m. (nadie agenda a las 2 a.m.).
+function normalizarHoraVisita(valor) {
+  if (valor === undefined || valor === null) return null;
+  const s = String(valor).trim().toLowerCase().replace(/\s+/g, "").replace(/\./g, ":");
+  const m = s.match(/^(\d{1,2})(?::(\d{2}))?:?(am|pm|a:m:|p:m:|a:m|p:m)?$/);
+  if (!m) return null;
+  let h = parseInt(m[1], 10);
+  const min = m[2] ? parseInt(m[2], 10) : 0;
+  const sufijo = (m[3] || "").replace(/:/g, "");
+  if (sufijo === "pm" && h < 12) h += 12;
+  if (sufijo === "am" && h === 12) h = 0;
+  if (!sufijo && h >= 1 && h <= 6) h += 12;
+  const hhmm = `${String(h).padStart(2, "0")}:${String(min).padStart(2, "0")}`;
+  return VISIT_SLOTS.includes(hhmm) ? hhmm : null;
+}
+
+// Texto para el prompt/mensajes: "lunes, martes, miércoles y viernes".
+function diasVisitaTexto() {
+  const legibles = { 1: "lunes", 2: "martes", 3: "miércoles", 4: "jueves", 5: "viernes", 6: "sábado", 0: "domingo" };
+  const lista = BUSINESS_DAYS.map(d => legibles[d]);
+  return lista.length > 1 ? `${lista.slice(0, -1).join(", ")} y ${lista[lista.length - 1]}` : lista.join("");
+}
+
+// Texto: "9:00 a.m., 11:30 a.m. y 2:00 p.m."
+function horariosVisitaTexto(slots = VISIT_SLOTS) {
+  const lista = slots.map(horaLegibleSlot);
+  return lista.length > 1 ? `${lista.slice(0, -1).join(", ")} y ${lista[lista.length - 1]}` : lista.join("");
+}
+
+// ¿La fecha (hora CR "disfrazada" de local, como nowCR()) es hoy o anterior?
+function esHoyOPasado(date) {
+  const hoy = nowCR();
+  hoy.setHours(0, 0, 0, 0);
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime() <= hoy.getTime();
+}
+
+// Devuelve los slots de VISIT_SLOTS que NO chocan con ninguno de los rangos
+// ocupados (minutos CR). Misma regla de solape + colchón en todo el archivo.
+function slotsLibres(occupiedRanges) {
+  return VISIT_SLOTS.filter(label => {
+    const startMin = hhmmAMinutos(label);
+    const endMin   = startMin + VISIT_DURATION_MIN;
+    return !occupiedRanges.some(r => {
+      if (r.allDay) return true;
+      return (startMin - VISIT_BUFFER_MIN) < r.endMin && (endMin + VISIT_BUFFER_MIN) > r.startMin;
+    });
+  });
 }
 
 // "Ahora" en zona horaria de Costa Rica — usar SIEMPRE en vez de `new Date()`
@@ -222,7 +316,10 @@ function toCRMinutes(dateTimeStr) {
 // garantiza en la capa de arriba (getAvailableSlots + el system prompt de
 // Sasha), no acá.
 function getNextAvailableDate(dayName, hourStr) {
-  const DAY_MAP = { lunes: 1, martes: 2, viernes: 5 };
+  // v22: miércoles agregado. Si un nombre de día no hábil llega acá (jueves,
+  // sábado, domingo), cae en el fallback "próximo lunes" de abajo y además lo
+  // rechazan esDiaLaborable()/la capa de index.js antes de agendar.
+  const DAY_MAP = { lunes: 1, martes: 2, miercoles: 3, viernes: 5 };
 
   let hour = 9, minute = 0;
   if (hourStr) {
@@ -336,40 +433,56 @@ function parseDescripcionEvento(description) {
 // ─────────────────────────────────────────────────────────────────────────────
 // getAvailableSlots — verifica disponibilidad real incluyendo eventos manuales
 //
-// v15: un único slot posible por día — 9:00 a.m. (antes: 09:00, 11:30, 14:00).
-// El chequeo de conflicto sigue siendo contra TODOS los eventos del día
+// v22: vuelven los 3 slots por día (VISIT_SLOTS: 09:00, 11:30, 14:00).
+// El chequeo de conflicto es contra TODOS los eventos del día
 // (calendar.events.list sin filtrar por origen), así que una cita puesta a
-// mano por un administrador a cualquier hora bloquea este slot igual que
-// bloqueaba los tres anteriores.
+// mano por un administrador a cualquier hora bloquea el slot que toque.
+// Nunca devuelve slots para hoy ni para fechas pasadas.
+//
+// Devuelve también `fechaISO` (YYYY-MM-DD de la fecha resuelta), que index.js
+// usa como id de los botones de hora.
 // ─────────────────────────────────────────────────────────────────────────────
 async function getAvailableSlots(dayName) {
-  const SLOTS = [
-    { label: "09:00", startMin: 9 * 60, endMin: 10 * 60 },
-  ];
-
   try {
     const dayStart = getNextAvailableDate(dayName, "09:00");
 
+    // v22: sin timeZone — dayStart ya es hora CR "disfrazada" de local, igual
+    // que en getAvailableVisitDates (FIX v21). A las 9:00 no había corrimiento,
+    // pero así ambas funciones etiquetan la fecha con el mismo criterio.
     const dateLabel = dayStart.toLocaleDateString("es-CR", {
-      timeZone: "America/Costa_Rica",
       weekday: "long",
       day: "numeric",
       month: "long",
     });
 
+    const fechaISO =
+      `${dayStart.getFullYear()}-` +
+      `${String(dayStart.getMonth() + 1).padStart(2, "0")}-` +
+      `${String(dayStart.getDate()).padStart(2, "0")}`;
+
     if (!esDiaLaborable(dayStart)) {
-      console.warn(`⛔ getAvailableSlots: "${dayName}" cae en día NO laborable (${dayStart.toLocaleDateString("es-CR", { timeZone: "America/Costa_Rica", weekday: "long" })})`);
-      return { date: dayStart, dateLabel, slots: [] };
+      console.warn(`⛔ getAvailableSlots: "${dayName}" cae en día NO laborable (${dateLabel})`);
+      return { date: dayStart, dateLabel, fechaISO, slots: [], motivo: "dia_no_laborable" };
+    }
+
+    if (esHoyOPasado(dayStart)) {
+      console.warn(`⛔ getAvailableSlots: "${dayName}" es hoy o ya pasó (${dateLabel}) — nunca se agenda el mismo día`);
+      return { date: dayStart, dateLabel, fechaISO, slots: [], motivo: "mismo_dia" };
     }
 
     const calendar = await getCalendarClient();
 
+    // v22: se consulta el día COMPLETO (antes 9:00–17:00). Con la ventana
+    // empezando a las 9:00, un evento 8:00–9:00 no aparecía y no aplicaba su
+    // colchón de 30 min sobre el slot de 9:00.
+    const windowStart = new Date(dayStart);
+    windowStart.setHours(0, 0, 0, 0);
     const dayEnd   = new Date(dayStart);
-    dayEnd.setHours(17, 0, 0, 0);
+    dayEnd.setHours(23, 59, 59, 0);
 
     const response = await calendar.events.list({
       calendarId: process.env.GOOGLE_CALENDAR_ID,
-      timeMin: toLocalDateTimeString(dayStart) + "-06:00",
+      timeMin: toLocalDateTimeString(windowStart) + "-06:00",
       timeMax: toLocalDateTimeString(dayEnd)   + "-06:00",
       singleEvents: true,
       orderBy: "startTime",
@@ -392,23 +505,17 @@ async function getAvailableSlots(dayName) {
       return { startMin, endMin: safeEndMin, allDay: false };
     });
 
-    const available = SLOTS.filter(slot => {
-      const bloqueado = occupiedRanges.some(({ startMin, endMin, allDay }) => {
-        if (allDay) return true;
-        return (slot.startMin - 30) < endMin && (slot.endMin + 30) > startMin;
-      });
+    const labels = slotsLibres(occupiedRanges);
+    for (const s of VISIT_SLOTS) {
+      if (!labels.includes(s)) console.log(`⛔ Slot ${s} bloqueado`);
+    }
 
-      if (bloqueado) console.log(`⛔ Slot ${slot.label} bloqueado`);
-      return !bloqueado;
-    });
-
-    const labels = available.map(s => s.label);
     console.log(`✅ Slots disponibles para ${dayName} (${dateLabel}): ${labels.join(", ") || "ninguno"}`);
-    return { date: dayStart, dateLabel, slots: labels };
+    return { date: dayStart, dateLabel, fechaISO, slots: labels };
 
   } catch (err) {
     console.error("❌ Error consultando disponibilidad:", err.message);
-    return { date: null, dateLabel: null, slots: [] };
+    return { date: null, dateLabel: null, fechaISO: null, slots: [], error: err.message };
   }
 }
 
@@ -417,9 +524,11 @@ async function getAvailableSlots(dayName) {
 // v19 — FECHAS REALES DISPONIBLES PARA SELECTOR DE WHATSAPP
 //
 // Devuelve únicamente días REALMENTE disponibles en Google Calendar.
-// Reglas SSR:
-//   • lunes, martes y viernes
-//   • único horario: 9:00 a.m.
+// Reglas SSR (v22):
+//   • lunes, martes, miércoles y viernes (BUSINESS_DAYS)
+//   • horarios 9:00 a.m., 11:30 a.m. y 2:00 p.m. (VISIT_SLOTS)
+//   • una fecha aparece si tiene al menos un horario libre; `hours` trae
+//     exactamente cuáles
 //   • nunca ofrece hoy
 //   • revisa eventos/bloqueos reales del calendario
 //   • horizonte configurable (30 días por defecto)
@@ -471,15 +580,6 @@ async function getAvailableVisitDates({ daysAhead = 30, maxDates = 10 } = {}) {
         continue;
       }
 
-      const slotStart = new Date(cursor);
-      slotStart.setHours(9, 0, 0, 0);
-
-      const dayStart = new Date(cursor);
-      dayStart.setHours(0, 0, 0, 0);
-
-      const dayEnd = new Date(cursor);
-      dayEnd.setHours(23, 59, 59, 999);
-
       const dayEvents = events.filter(event => {
         // Eventos all-day usan YYYY-MM-DD y necesitan comparación por fecha CR.
         if (event.start?.date && !event.start?.dateTime) {
@@ -491,18 +591,25 @@ async function getAvailableVisitDates({ daysAhead = 30, maxDates = 10 } = {}) {
         }
 
         if (!event.start?.dateTime) return false;
-        const eventStart = new Date(event.start.dateTime);
-        return eventStart >= dayStart && eventStart <= dayEnd;
+        // v22: se compara por FECHA CR del evento (antes por instante contra
+        // un dayStart/dayEnd "disfrazados", que en Railway UTC equivalen a
+        // 18:00 CR del día anterior → 18:00 CR de este día). Para el horario
+        // de visitas daba igual, pero así no depende de la zona del servidor.
+        const ymdCursor =
+          `${cursor.getFullYear()}-` +
+          `${String(cursor.getMonth() + 1).padStart(2, "0")}-` +
+          `${String(cursor.getDate()).padStart(2, "0")}`;
+        const ymdEvento = new Date(event.start.dateTime)
+          .toLocaleDateString("en-CA", { timeZone: "America/Costa_Rica" });
+        return ymdEvento === ymdCursor;
       });
 
-      let blocked = false;
-      let blockedBy = null;
-
+      // v22 — rangos ocupados del día → horarios (VISIT_SLOTS) libres.
+      const occupiedRanges = [];
       for (const event of dayEvents) {
         if (event.start?.date && !event.start?.dateTime) {
-          blocked = true;
-          blockedBy = event.summary || "Día bloqueado";
-          break;
+          occupiedRanges.push({ startMin: 0, endMin: 24 * 60, allDay: true, summary: event.summary || "Día bloqueado" });
+          continue;
         }
 
         if (!event.start?.dateTime || !event.end?.dateTime) continue;
@@ -511,19 +618,14 @@ async function getAvailableVisitDates({ daysAhead = 30, maxDates = 10 } = {}) {
         let eventEndMin = toCRMinutes(event.end.dateTime);
         if (eventEndMin < eventStartMin) eventEndMin = 23 * 60 + 59;
 
-        const slotStartMin = 9 * 60;
-        const slotEndMin = 10 * 60;
-
-        const overlaps =
-          (slotStartMin - 30) < eventEndMin &&
-          (slotEndMin + 30) > eventStartMin;
-
-        if (overlaps) {
-          blocked = true;
-          blockedBy = event.summary || "Evento existente";
-          break;
-        }
+        occupiedRanges.push({ startMin: eventStartMin, endMin: eventEndMin, allDay: false, summary: event.summary || "Evento existente" });
       }
+
+      const hours = slotsLibres(occupiedRanges);
+      const blocked = hours.length === 0;
+      const blockedBy = blocked
+        ? occupiedRanges.map(r => r.summary).filter(Boolean).join(" / ") || "Sin horarios libres"
+        : null;
 
       const isoDate =
         `${cursor.getFullYear()}-` +
@@ -548,13 +650,17 @@ async function getAvailableVisitDates({ daysAhead = 30, maxDates = 10 } = {}) {
       });
 
       if (!blocked) {
+        const primerSlot = new Date(cursor);
+        primerSlot.setHours(Math.floor(hhmmAMinutos(hours[0]) / 60), hhmmAMinutos(hours[0]) % 60, 0, 0);
+
         availableDates.push({
           date: isoDate,
           label,
-          hour: "09:00",
-          timestamp: slotStart.getTime(),
+          hour: hours[0],          // compatibilidad: primer horario libre
+          hours,                   // v22: todos los horarios libres de ese día
+          timestamp: primerSlot.getTime(),
         });
-        console.log(`✅ Disponible: ${label} — 9:00 a.m.`);
+        console.log(`✅ Disponible: ${label} — ${hours.join(", ")}`);
       } else {
         console.log(`⛔ No disponible: ${label} — bloqueado por "${blockedBy}"`);
       }
@@ -1331,7 +1437,7 @@ async function createVisitEvent({
         hour || "09:00"
       );
 
-    // ── BLINDAJE: solo lunes/martes/viernes ───────────────────────────────
+    // ── BLINDAJE: solo días de visita (BUSINESS_DAYS) ─────────────────────
     if (!esDiaLaborable(startDate)) {
       const weekday =
         startDate.toLocaleDateString(
@@ -1501,4 +1607,11 @@ module.exports = {
   getEventById,
   esDiaLaborable,
   proximosDiasHabiles,
+  // v22
+  BUSINESS_DAYS,
+  VISIT_SLOTS,
+  normalizarHoraVisita,
+  horaLegibleSlot,
+  diasVisitaTexto,
+  horariosVisitaTexto,
 };
