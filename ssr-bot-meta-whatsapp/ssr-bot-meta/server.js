@@ -53,6 +53,31 @@ const metaMensajeria          = require("./bot/metaMensajeria");
 // página: GET /api/meta/suscribir.
 // ══════════════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════════════
+// v28 (20 oct 2026) — ADJUNTOS DESDE EL CRM/ERP + ENVÍO MANUAL MÁS RÁPIDO
+//
+// 1. LENTITUD DE LOS MENSAJES MANUALES (causa raíz):
+//    /send-message, ANTES de mandar el texto a WhatsApp, descargaba la hoja
+//    MENSAJES COMPLETA (A:F, +3.000 filas y creciendo) desde Google Sheets
+//    para saber cuándo escribió el cliente por última vez (ventana de 24 h).
+//    Esa lectura (auth + descarga + filtrado) costaba de 2 a 6 s por envío y
+//    crecía con cada mensaje guardado. El envío a Meta en sí tarda ~0,5 s.
+//    FIX: caché en memoria del último mensaje ENTRANTE por número:
+//      · se actualiza en el webhook en cuanto llega cualquier mensaje;
+//      · al arrancar se precalienta con UNA sola lectura de MENSAJES;
+//      · la hoja solo se consulta si el número no está en caché.
+//    Resultado: el texto sale a WhatsApp de inmediato; guardar en MENSAJES
+//    sigue siendo en segundo plano (no bloquea la respuesta).
+//
+// 2. ENVIAR ARCHIVOS (PDF de presupuesto, imágenes, Word, Excel):
+//    POST /send-media  { telefono, archivoBase64, nombreArchivo, mimeType, caption? }
+//      · valida tipo y tamaño, respeta la ventana de 24 h;
+//      · sube el archivo a Meta y lo manda como documento (o imagen);
+//      · pausa/renueva a Sasha 60 min con ese cliente (igual que un texto);
+//      · en segundo plano lo guarda en Drive (carpeta del cliente) y lo
+//        registra en MENSAJES con su driveUrl para que se vea en el chat.
+// ══════════════════════════════════════════════════════════════════════════════
+
 const VENTANA_WHATSAPP_MS = 24 * 60 * 60 * 1000;
 const WA_API_VERSION      = process.env.WHATSAPP_API_VERSION || "v21.0";
 
@@ -161,17 +186,110 @@ function normalizarTelefono(telefono) {
 // v21 — VENTANA DE 24 H DE WHATSAPP
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// Último mensaje ENTRANTE (del cliente) guardado en MENSAJES. null si nunca
-// escribió. Lanza error si no se pudo leer la hoja (el llamador decide).
+// v28 — caché del último mensaje ENTRANTE por número ("506XXXXXXXX" → Date).
+const ultimoEntranteCache = new Map();
+let   cacheVentanaLista   = false;
+
+function registrarEntrante(telefonoNorm, fecha = new Date()) {
+  const t = String(telefonoNorm || "").replace(/\D/g, "");
+  if (!t) return;
+  const prev = ultimoEntranteCache.get(t);
+  if (!prev || fecha > prev) ultimoEntranteCache.set(t, fecha);
+}
+
+// Una sola lectura de MENSAJES al arrancar para llenar la caché.
+async function precalentarVentanas() {
+  try {
+    const t0   = Date.now();
+    const filas = await memoria.buscarPorTelefono("", 1e9);
+    for (const r of filas) {
+      if (String(r[3] || "").trim().toLowerCase() !== "in") continue;
+      const d = new Date(r[0]);
+      if (!isNaN(d.getTime())) registrarEntrante(r[1], d);
+    }
+    cacheVentanaLista = true;
+    console.log(`🪟 Caché de ventana 24 h lista: ${ultimoEntranteCache.size} números (${Date.now() - t0} ms)`);
+  } catch (e) {
+    console.warn("⚠️ No se pudo precalentar la caché de ventana 24 h (se usará la hoja bajo demanda):", e.message);
+  }
+}
+
+// Último mensaje ENTRANTE del cliente. null si nunca escribió. Usa la caché;
+// solo lee la hoja si el número no está en caché y la caché no está completa.
+// Lanza error si hubo que leer la hoja y falló (el llamador decide).
 async function ultimoMensajeEntrante(telefonoNorm) {
-  const filas = await memoria.buscarPorTelefono(telefonoNorm, 1000);
+  const t = String(telefonoNorm || "").replace(/\D/g, "");
+  if (ultimoEntranteCache.has(t)) return ultimoEntranteCache.get(t);
+  if (cacheVentanaLista) return null;
+
+  const filas = await memoria.buscarPorTelefono(t, 1000);
   let ultimo = null;
   for (const r of filas) {
     if (String(r[3] || "").trim().toLowerCase() !== "in") continue;
     const d = new Date(r[0]);
     if (!isNaN(d.getTime()) && (!ultimo || d > ultimo)) ultimo = d;
   }
+  if (ultimo) registrarEntrante(t, ultimo);
   return ultimo;
+}
+
+// Verifica la ventana de 24 h. Si está cerrada, intenta la plantilla de
+// reapertura y devuelve { cerrada:true, status, body } listo para responder.
+async function verificarVentanaOResponder(telefonoNorm, origen) {
+  const tel = "+" + telefonoNorm;
+  let ultimoEntrante = null;
+  let ventanaVerificada = false;
+  try {
+    ultimoEntrante = await ultimoMensajeEntrante(telefonoNorm);
+    ventanaVerificada = true;
+  } catch (errVentana) {
+    // Si no se pudo leer MENSAJES, no bloqueamos: se intenta el envío y,
+    // si WhatsApp lo rechaza, el aviso llega igual por el webhook.
+    console.warn(`⚠️ ${origen}: no se pudo verificar la ventana de 24 h de ${tel}:`, errVentana.message);
+  }
+
+  const fueraDeVentana = ventanaVerificada &&
+    (!ultimoEntrante || Date.now() - ultimoEntrante.getTime() > VENTANA_WHATSAPP_MS);
+  if (!fueraDeVentana) return { cerrada: false };
+
+  const hace = ultimoEntrante
+    ? `hace ${describirTiempo(Date.now() - ultimoEntrante.getTime())}`
+    : "nunca";
+  console.warn(`⛔ ${origen} → ${tel}: fuera de la ventana de 24 h (último mensaje del cliente: ${hace}). NO enviado.`);
+
+  const plantilla = await enviarPlantillaReapertura(telefonoNorm);
+
+  if (plantilla.enviada) {
+    memoria.guardarMensaje({
+      phone: tel, clientName: null, direction: "out", type: "text",
+      content: `[Plantilla de WhatsApp enviada: ${plantilla.nombre}]`, session: null,
+    }).catch(() => {});
+    console.log(`📨 Plantilla de reapertura "${plantilla.nombre}" enviada a ${tel}`);
+    return {
+      cerrada: true, status: 409,
+      body: {
+        ok: false, fueraDeVentana: true, plantillaEnviada: plantilla.nombre,
+        error:
+          `El cliente escribió por última vez ${hace}. WhatsApp no permite mensajes libres después de 24 h, ` +
+          `así que NO se envió. Se le mandó la plantilla "${plantilla.nombre}" para reabrir la conversación: ` +
+          `cuando responda, volvé a enviarlo.`,
+      },
+    };
+  }
+
+  return {
+    cerrada: true, status: 409,
+    body: {
+      ok: false, fueraDeVentana: true,
+      error:
+        `El cliente escribió por última vez ${hace}. WhatsApp solo entrega mensajes libres dentro de las 24 h ` +
+        `siguientes al último mensaje del cliente, así que NO se envió. ` +
+        (plantilla.motivo === "sin_plantilla_configurada"
+          ? `Para reabrir la conversación hace falta una plantilla aprobada (configurá WA_PLANTILLA_REAPERTURA en Railway) ` +
+            `o escribile desde el WhatsApp de la oficina.`
+          : `Además falló la plantilla de reapertura: ${plantilla.motivo}.`),
+    },
+  };
 }
 
 function describirTiempo(ms) {
@@ -407,6 +525,9 @@ app.post("/webhook", async (req, res) => {
     for (const msg of messages) {
       const from      = msg.from;
       const messageId = msg.id;
+
+      // v28 — abre/renueva la ventana de 24 h en caché al instante.
+      registrarEntrante(from, msg.timestamp ? new Date(Number(msg.timestamp) * 1000) : new Date());
 
       if (msg.type === "text") {
         const text = msg.text?.body;
@@ -1012,6 +1133,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // ── Endpoint: Enviar mensaje outbound desde CRM / ERP / Make ─────────────────
 app.post("/send-message", async (req, res) => {
+  const t0 = Date.now();
   try {
     const { telefono, mensaje } = req.body;
     if (!telefono || !mensaje) {
@@ -1021,65 +1143,21 @@ app.post("/send-message", async (req, res) => {
     const telefonoNorm = normalizarTelefono(telefono);
     const tel = "+" + telefonoNorm;
 
-    // ── v21: revisar la ventana de 24 h ANTES de enviar ─────────────────────
-    let ultimoEntrante = null;
-    let ventanaVerificada = false;
-    try {
-      ultimoEntrante = await ultimoMensajeEntrante(telefonoNorm);
-      ventanaVerificada = true;
-    } catch (errVentana) {
-      // Si no se pudo leer MENSAJES, no bloqueamos: se intenta el envío y,
-      // si WhatsApp lo rechaza, el aviso llega igual por el webhook.
-      console.warn(`⚠️ /send-message: no se pudo verificar la ventana de 24 h de ${tel}:`, errVentana.message);
-    }
-
-    const fueraDeVentana = ventanaVerificada &&
-      (!ultimoEntrante || Date.now() - ultimoEntrante.getTime() > VENTANA_WHATSAPP_MS);
-
-    if (fueraDeVentana) {
-      const hace = ultimoEntrante
-        ? `hace ${describirTiempo(Date.now() - ultimoEntrante.getTime())}`
-        : "nunca";
-      console.warn(`⛔ /send-message → ${tel}: fuera de la ventana de 24 h (último mensaje del cliente: ${hace}). Texto NO enviado.`);
-
-      const plantilla = await enviarPlantillaReapertura(telefonoNorm);
-
-      if (plantilla.enviada) {
-        memoria.guardarMensaje({
-          phone: tel, clientName: null, direction: "out", type: "text",
-          content: `[Plantilla de WhatsApp enviada: ${plantilla.nombre}]`, session: null,
-        }).catch(() => {});
-        console.log(`📨 Plantilla de reapertura "${plantilla.nombre}" enviada a ${tel}`);
-
-        return res.status(409).json({
-          ok: false,
-          fueraDeVentana: true,
-          plantillaEnviada: plantilla.nombre,
-          error:
-            `El cliente escribió por última vez ${hace}. WhatsApp no permite mensajes libres después de 24 h, ` +
-            `así que tu texto NO se envió. Se le mandó la plantilla "${plantilla.nombre}" para reabrir la conversación: ` +
-            `cuando responda, volvé a enviar tu mensaje.`,
-        });
-      }
-
-      return res.status(409).json({
-        ok: false,
-        fueraDeVentana: true,
-        error:
-          `El cliente escribió por última vez ${hace}. WhatsApp solo entrega mensajes libres dentro de las 24 h ` +
-          `siguientes al último mensaje del cliente, así que tu texto NO se envió. ` +
-          (plantilla.motivo === "sin_plantilla_configurada"
-            ? `Para reabrir la conversación hace falta una plantilla aprobada (configurá WA_PLANTILLA_REAPERTURA en Railway) ` +
-              `o escribile desde el WhatsApp de la oficina.`
-            : `Además falló la plantilla de reapertura: ${plantilla.motivo}.`),
-      });
-    }
+    // ── v21/v28: ventana de 24 h (desde caché, sin leer la hoja) ───────────
+    const ventana = await verificarVentanaOResponder(telefonoNorm, "/send-message");
+    if (ventana.cerrada) return res.status(ventana.status).json(ventana.body);
 
     // ── Dentro de la ventana: enviar normal ──────────────────────────────────
     const { sendText } = require("./bot/messenger");
-    await sendText(tel, mensaje);
-    console.log(`📤 /send-message → ${tel}: "${mensaje.substring(0, 60)}"`);
+    const r = await sendText(tel, mensaje);
 
+    // v20 — cada mensaje manual pausa/renueva a Sasha 60 min con ese cliente.
+    const expiraEn = pausarConversacion(tel);
+
+    console.log(`📤 /send-message → ${tel} en ${Date.now() - t0} ms: "${mensaje.substring(0, 60)}"`);
+    res.json({ ok: true, telefono: tel, pausadoHasta: expiraEn, wamid: r?.messages?.[0]?.id || null, ms: Date.now() - t0 });
+
+    // Guardar en MENSAJES después de responder (no frena al CRM/ERP).
     memoria.guardarMensaje({
       phone: tel,
       clientName: null,
@@ -1088,14 +1166,99 @@ app.post("/send-message", async (req, res) => {
       content: mensaje,
       session: null,
     }).catch(e => console.warn("⚠️ No se pudo guardar en memoria:", e.message));
-
-    // v20 — cada mensaje manual pausa/renueva a Sasha 60 min con ese cliente.
-    const expiraEn = pausarConversacion(tel);
-
-    res.json({ ok: true, telefono: tel, pausadoHasta: expiraEn });
   } catch (err) {
     console.error("❌ /send-message error:", err.message);
-    res.status(500).json({ ok: false, error: err.message });
+    if (!res.headersSent) res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ── v28: Enviar archivo (PDF de presupuesto, imagen, Word, Excel) ────────────
+// Body JSON: { telefono, archivoBase64, nombreArchivo, mimeType, caption? }
+// archivoBase64 puede venir con o sin prefijo "data:...;base64,".
+const MEDIA_PERMITIDOS = {
+  "application/pdf": { tipo: "document", maxMB: 100 },
+  "image/jpeg":      { tipo: "image",    maxMB: 5 },
+  "image/png":       { tipo: "image",    maxMB: 5 },
+  "application/msword": { tipo: "document", maxMB: 100 },
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": { tipo: "document", maxMB: 100 },
+  "application/vnd.ms-excel": { tipo: "document", maxMB: 100 },
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": { tipo: "document", maxMB: 100 },
+  "text/plain":      { tipo: "document", maxMB: 100 },
+};
+const MAX_MB_SERVIDOR = 35; // límite real por el JSON de 50 MB (base64 infla ~33 %)
+
+app.post("/send-media", async (req, res) => {
+  const t0 = Date.now();
+  try {
+    let { telefono, archivoBase64, nombreArchivo, mimeType, caption } = req.body || {};
+    if (!telefono || !archivoBase64) {
+      return res.status(400).json({ ok: false, error: "Faltan telefono y archivoBase64" });
+    }
+    if (/^(ig|fb)_/i.test(String(telefono).trim())) {
+      return res.status(400).json({ ok: false, error: "Por ahora los archivos solo se pueden enviar por WhatsApp (no por Instagram/Messenger)." });
+    }
+
+    // Separar el prefijo data URL si viene.
+    const m = /^data:([^;]+);base64,(.*)$/s.exec(String(archivoBase64));
+    if (m) { mimeType = mimeType || m[1]; archivoBase64 = m[2]; }
+    mimeType = String(mimeType || "").toLowerCase().trim();
+    if (mimeType === "image/jpg") mimeType = "image/jpeg";
+
+    const conf = MEDIA_PERMITIDOS[mimeType];
+    if (!conf) {
+      return res.status(415).json({ ok: false, error: `Tipo de archivo no permitido (${mimeType || "desconocido"}). Usá PDF, JPG, PNG, Word o Excel.` });
+    }
+
+    const buffer = Buffer.from(archivoBase64, "base64");
+    const mb = buffer.length / (1024 * 1024);
+    if (!buffer.length) return res.status(400).json({ ok: false, error: "El archivo llegó vacío." });
+    const maxMB = Math.min(conf.maxMB, MAX_MB_SERVIDOR);
+    if (mb > maxMB) {
+      return res.status(413).json({ ok: false, error: `El archivo pesa ${mb.toFixed(1)} MB; el máximo para este tipo es ${maxMB} MB.` });
+    }
+
+    nombreArchivo = String(nombreArchivo || (conf.tipo === "image" ? "imagen.jpg" : "documento.pdf"))
+      .replace(/[\\/:*?"<>|\r\n]+/g, "_").slice(0, 120);
+    caption = caption ? String(caption).slice(0, 1024) : "";
+
+    const telefonoNorm = normalizarTelefono(telefono);
+    const tel = "+" + telefonoNorm;
+
+    const ventana = await verificarVentanaOResponder(telefonoNorm, "/send-media");
+    if (ventana.cerrada) return res.status(ventana.status).json(ventana.body);
+
+    const { uploadMedia, sendDocument, sendImage } = require("./bot/messenger");
+    const mediaId = await uploadMedia(buffer, mimeType, nombreArchivo);
+    const r = conf.tipo === "image"
+      ? await sendImage(tel, mediaId, caption || null)
+      : await sendDocument(tel, mediaId, nombreArchivo, caption || null);
+
+    const expiraEn = pausarConversacion(tel);
+    console.log(`📎 /send-media → ${tel} en ${Date.now() - t0} ms: ${conf.tipo} "${nombreArchivo}" (${mb.toFixed(2)} MB)`);
+
+    res.json({
+      ok: true, telefono: tel, tipo: conf.tipo, nombreArchivo, mediaId,
+      wamid: r?.messages?.[0]?.id || null, pausadoHasta: expiraEn, ms: Date.now() - t0,
+    });
+
+    // En segundo plano: copia en Drive + registro en MENSAJES (con driveUrl).
+    (async () => {
+      let driveUrl = "";
+      try {
+        driveUrl = (await memoria.guardarMedia(buffer, mimeType, tel, null)) || "";
+      } catch (e) {
+        console.warn("⚠️ /send-media: no se pudo copiar a Drive:", e.message);
+      }
+      const etiqueta = conf.tipo === "image" ? "[Imagen enviada]" : `[Documento: ${nombreArchivo}]`;
+      await memoria.guardarMensaje({
+        phone: tel, clientName: null, direction: "out", type: conf.tipo,
+        content: caption ? `${etiqueta} ${caption}` : etiqueta,
+        mediaId, driveUrl, session: null,
+      });
+    })().catch(e => console.warn("⚠️ /send-media: no se pudo guardar en memoria:", e.message));
+  } catch (err) {
+    console.error("❌ /send-media error:", err.message);
+    if (!res.headersSent) res.status(err.status && err.status < 500 ? 502 : 500).json({ ok: false, error: err.message });
   }
 });
 
@@ -1190,6 +1353,7 @@ app.get("/api/conversacion/estado", async (req, res) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
+  precalentarVentanas();
   console.log(`
 ┌────────────────────────────────────────────────────────────┐
 │  🏗️  SS Remodelaciones ∙ WhatsApp Bot (Sasha)              │
@@ -1206,6 +1370,7 @@ app.listen(PORT, () => {
 │  🧾  Cotizador: GET /cotizador                              │
 │  🩺  Health check: GET /health                             │
 │  🎛️  Control manual: POST /api/conversacion/tomar-control  │
+│  📎  Adjuntos CRM/ERP: POST /send-media (PDF/img/Word/Excel)│
 │  📸  Instagram + Messenger: POST /webhook (object ig/page) │
 └────────────────────────────────────────────────────────────┘
   `);
