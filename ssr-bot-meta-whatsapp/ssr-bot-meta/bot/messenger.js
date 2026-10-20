@@ -3,6 +3,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // CHANGELOG v2:
 //   + sendTemplate() — mensajes fuera de ventana 24h (HSM/plantillas aprobadas)
+// CHANGELOG v3 (20 oct 2026):
+//   + uploadMedia()   — sube un archivo (PDF, imagen, Word, Excel) a Meta y
+//                       devuelve el media ID. Lo usa /send-media (CRM/ERP).
+//   + sendDocument()  — envía un documento con nombre de archivo y texto.
+//   + sendImage()     — envía una imagen con texto.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const GRAPH_URL = "https://graph.facebook.com/v19.0";
@@ -98,6 +103,58 @@ async function sendMediaById(to, mediaId, type = "image", caption = null) {
 }
 
 /**
+ * v3 — Sube un archivo a WhatsApp Cloud API y devuelve su media ID.
+ * Límites de Meta: documentos 100 MB, imágenes 5 MB (jpg/png).
+ * @param {Buffer} buffer
+ * @param {string} mimeType  - ej. "application/pdf"
+ * @param {string} filename  - ej. "Presupuesto_Clara.pdf"
+ * @returns {Promise<string>} media ID
+ */
+async function uploadMedia(buffer, mimeType, filename = "archivo") {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const token = process.env.WHATSAPP_TOKEN;
+
+  const form = new FormData();
+  form.append("messaging_product", "whatsapp");
+  form.append("type", mimeType);
+  form.append("file", new Blob([buffer], { type: mimeType }), filename);
+
+  const res = await fetch(`${GRAPH_URL}/${phoneNumberId}/media`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.id) {
+    const err = new Error(`Meta no aceptó el archivo: ${data?.error?.message || "HTTP " + res.status}`);
+    err.status = res.status;
+    err.meta   = data?.error;
+    console.error(`❌ uploadMedia (${res.status}):`, JSON.stringify(data));
+    throw err;
+  }
+  return data.id;
+}
+
+/**
+ * v3 — Envía un documento (PDF, Word, Excel…) ya subido con uploadMedia().
+ * WhatsApp muestra `filename` como nombre del archivo y `caption` debajo.
+ */
+async function sendDocument(to, mediaId, filename = "documento.pdf", caption = null) {
+  const document = { id: mediaId, filename };
+  if (caption) document.caption = caption;
+  return _post(to, { type: "document", document });
+}
+
+/**
+ * v3 — Envía una imagen ya subida con uploadMedia().
+ */
+async function sendImage(to, mediaId, caption = null) {
+  const image = { id: mediaId };
+  if (caption) image.caption = caption;
+  return _post(to, { type: "image", image });
+}
+
+/**
  * Descarga una imagen/media de Meta y la retorna en base64
  * @param {string} mediaId - ID del media recibido en el webhook
  * @returns {{ base64: string, mimeType: string }}
@@ -184,4 +241,7 @@ async function _post(to, messageFields) {
   return data;
 }
 
-module.exports = { sendText, sendButtons, sendList, sendTemplate, markRead, downloadMedia, sendMediaById };
+module.exports = {
+  sendText, sendButtons, sendList, sendTemplate, markRead, downloadMedia, sendMediaById,
+  uploadMedia, sendDocument, sendImage,
+};
